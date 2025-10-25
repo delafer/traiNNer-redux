@@ -1,0 +1,66 @@
+# Hyperion Degradation Pipeline (HDP) Configuration Example
+# This configuration extends the Real-ESRGAN OTF degradation pipeline with new realistic degradations
+
+# Enable the Hyperion Degradation Pipeline
+high_order_degradation: true
+high_order_degradations_debug: false
+high_order_degradations_debug_limit: 100
+
+# Clean Pass-Through
+p_clean: 0.2  # 20% probability of returning clean GT as LQ
+
+# USM degradation options
+lq_usm: false
+lq_usm_radius_range: [1, 25]
+
+# Modern Compression Artifacts
+webp_prob: 0.3  # 30% probability of applying WebP compression
+webp_range: [70, 90]  # Quality range for WebP compression
+avif_prob: 0.2  # 20% probability of applying AVIF compression
+avif_range: [75, 95]  # Quality range for AVIF compression
+
+# Oversharpening Artifact Simulation
+oversharpen_prob: 0.4  # 40% probability of applying oversharpening
+oversharpen_strength: [1.2, 2.5]  # Strength range for oversharpening
+
+# Chromatic Aberration Simulation
+chromatic_aberration_prob: 0.3  # 30% probability of applying chromatic aberration
+
+# Demosaicing Artifact Simulation
+demosaic_prob: 0.2  # 20% probability of applying demosaicing artifacts
+
+# Aliasing Artifact Simulation
+aliasing_prob: 0.3  # 30% probability of applying aliasing artifacts
+aliasing_scale_range: [0.6, 0.9]  # Scale range for aliasing
+
+# The first degradation process
+blur_prob: 0.2
+resize_prob: [0.2, 0.7, 0.1]  # up, down, keep
+resize_mode_list: ['bilinear', 'bicubic', 'nearest-exact', 'lanczos']
+resize_mode_prob: [0.25, 0.25, 0.25, 0.25]
+resize_range: [0.4, 1.5]
+gaussian_noise_prob: 0.3
+noise_range: [1, 10]
+poisson_scale_range: [0.05, 0.5]
+gray_noise_prob: 0.2
+jpeg_prob: 0.8
+jpeg_range: [70, 90]
+
+# The second degradation process
+blur_prob2: 0.2
+resize_prob2: [0.3, 0.4, 0.3]  # up, down, keep
+resize_mode_list2: ['bilinear', 'bicubic', 'nearest-exact', 'lanczos']
+resize_mode_prob2: [0.25, 0.25, 0.25, 0.25]
+resize_range2: [0.6, 1.2]
+gaussian_noise_prob2: 0.3
+noise_range2: [1, 8]
+poisson_scale_range2: [0.05, 0.3]
+gray_noise_prob2: 0.2
+jpeg_prob2: 0.8
+jpeg_range2: [75, 95]
+
+# The final resize to the target resolution
+resize_mode_list3: ['bilinear', 'bicubic', 'nearest-exact', 'lanczos']
+resize_mode_prob3: [0.25, 0.25, 0.25, 0.25]
+
+queue_size: 120

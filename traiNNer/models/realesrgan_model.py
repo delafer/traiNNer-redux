@@ -1,11 +1,19 @@
 import os
 import random
 import sys
+from io import BytesIO
 from os import path as osp
 
+import numpy as np
 import torch
 import torchvision
+from PIL import Image
 from torch import Tensor
+
+try:
+    from pillow_avif import AvifImagePlugin
+except ImportError:
+    AvifImagePlugin = None
 
 from traiNNer.data.degradations import (
     random_add_gaussian_noise_pt,
@@ -59,6 +67,314 @@ class RealESRGANModel(SRModel):
             logger.info(
                 "OTF debugging enabled. LR tiles will be saved to: %s", OTF_DEBUG_PATH
             )
+
+    def _apply_webp_compression(self, img_tensor: Tensor) -> Tensor:
+        """Apply WebP compression to a batch of images.
+
+        Args:
+            img_tensor (Tensor): Input tensor of shape (B, C, H, W) with values in [0, 1].
+
+        Returns:
+            Tensor: WebP compressed tensor of the same shape.
+        """
+        if not hasattr(self.opt, "webp_prob") or not hasattr(self.opt, "webp_range"):
+            return img_tensor
+
+        if RNG.get_rng().uniform() >= self.opt.webp_prob:
+            return img_tensor
+
+        # Convert tensor to PIL Images, apply WebP compression, and convert back
+        batch_size = img_tensor.size(0)
+        compressed_images = []
+
+        # Get quality parameter
+        quality = RNG.get_rng().uniform(self.opt.webp_range[0], self.opt.webp_range[1])
+
+        for i in range(batch_size):
+            # Convert tensor to PIL Image
+            img = img_tensor[i].cpu().clamp(0, 1).numpy()
+            img = (img * 255).astype("uint8")
+            img = img.transpose(1, 2, 0)  # CHW to HWC
+            if img.shape[2] == 1:
+                img = img[:, :, 0]  # Convert to grayscale if needed
+            pil_img = Image.fromarray(img)
+
+            # Apply WebP compression
+            buffer = BytesIO()
+            pil_img.save(buffer, format="WEBP", quality=int(quality))
+            buffer.seek(0)
+
+            # Load compressed image
+            compressed_img = Image.open(buffer)
+            compressed_img = compressed_img.convert("RGB")
+
+            # Convert back to tensor
+            compressed_tensor = (
+                torch.from_numpy(np.array(compressed_img)).float() / 255.0
+            )
+            compressed_tensor = compressed_tensor.permute(2, 0, 1)  # HWC to CHW
+            compressed_images.append(compressed_tensor)
+
+        return torch.stack(compressed_images, dim=0).to(img_tensor.device)
+
+    def _apply_avif_compression(self, img_tensor: Tensor) -> Tensor:
+        """Apply AVIF compression to a batch of images.
+
+        Args:
+            img_tensor (Tensor): Input tensor of shape (B, C, H, W) with values in [0, 1].
+
+        Returns:
+            Tensor: AVIF compressed tensor of the same shape.
+        """
+        if not hasattr(self.opt, "avif_prob") or not hasattr(self.opt, "avif_range"):
+            return img_tensor
+
+        if RNG.get_rng().uniform() >= self.opt.avif_prob:
+            return img_tensor
+
+        # Convert tensor to PIL Images, apply AVIF compression, and convert back
+        batch_size = img_tensor.size(0)
+        compressed_images = []
+
+        # Get quality parameter
+        quality = RNG.get_rng().uniform(self.opt.avif_range[0], self.opt.avif_range[1])
+
+        for i in range(batch_size):
+            # Convert tensor to PIL Image
+            img = img_tensor[i].cpu().clamp(0, 1).numpy()
+            img = (img * 255).astype("uint8")
+            img = img.transpose(1, 2, 0)  # CHW to HWC
+            if img.shape[2] == 1:
+                img = img[:, :, 0]  # Convert to grayscale if needed
+            pil_img = Image.fromarray(img)
+
+            # Apply AVIF compression
+            buffer = BytesIO()
+            pil_img.save(buffer, format="AVIF", quality=int(quality))
+            buffer.seek(0)
+
+            # Load compressed image
+            compressed_img = Image.open(buffer)
+            compressed_img = compressed_img.convert("RGB")
+
+            # Convert back to tensor
+            compressed_tensor = (
+                torch.from_numpy(np.array(compressed_img)).float() / 255.0
+            )
+            compressed_tensor = compressed_tensor.permute(2, 0, 1)  # HWC to CHW
+            compressed_images.append(compressed_tensor)
+
+        return torch.stack(compressed_images, dim=0).to(img_tensor.device)
+
+    def _apply_oversharpening(self, img_tensor: Tensor) -> Tensor:
+        """Apply oversharpening artifact simulation to a batch of images.
+
+        Args:
+            img_tensor (Tensor): Input tensor of shape (B, C, H, W) with values in [0, 1].
+
+        Returns:
+            Tensor: Oversharpened tensor of the same shape.
+        """
+        if not hasattr(self.opt, "oversharpen_prob") or not hasattr(
+            self.opt, "oversharpen_strength"
+        ):
+            return img_tensor
+
+        if RNG.get_rng().uniform() >= self.opt.oversharpen_prob:
+            return img_tensor
+
+        # Get strength parameter
+        strength = RNG.get_rng().uniform(
+            self.opt.oversharpen_strength[0], self.opt.oversharpen_strength[1]
+        )
+
+        # Create a blurred copy of the image using Gaussian blur
+        from traiNNer.data.degradations import resize_pt
+
+        blurred = resize_pt(
+            img_tensor, mode="bicubic", scale_factor=1.0
+        )  # This is just a placeholder
+
+        # For a proper Gaussian blur, we would need to implement it or use a library
+        # For now, we'll use a simple box blur as an approximation
+        kernel_size = 5
+        padding = kernel_size // 2
+        weight = torch.ones(
+            1, 1, kernel_size, kernel_size, device=img_tensor.device
+        ) / (kernel_size**2)
+        weight = weight.repeat(img_tensor.size(1), 1, 1, 1)
+
+        blurred = torch.nn.functional.conv2d(
+            img_tensor, weight, padding=padding, groups=img_tensor.size(1)
+        )
+
+        # Subtract the blurred copy from the original to isolate high-frequency details
+        details = img_tensor - blurred
+
+        # Add a multiplied version of these details back to the original image
+        oversharpened = img_tensor + details * strength
+
+        # Clamp values to [0, 1]
+        return torch.clamp(oversharpened, 0, 1)
+
+    def _apply_chromatic_aberration(self, img_tensor: Tensor) -> Tensor:
+        """Apply chromatic aberration simulation to a batch of images.
+
+        Args:
+            img_tensor (Tensor): Input tensor of shape (B, C, H, W) with values in [0, 1].
+
+        Returns:
+            Tensor: Chromatic aberration applied tensor of the same shape.
+        """
+        if not hasattr(self.opt, "chromatic_aberration_prob"):
+            return img_tensor
+
+        if RNG.get_rng().uniform() >= self.opt.chromatic_aberration_prob:
+            return img_tensor
+
+        batch_size, channels, _height, _width = img_tensor.shape
+        if channels != 3:
+            # Only apply to RGB images
+            return img_tensor
+
+        # Split the image tensor's R, G, B channels
+        r_channel, g_channel, b_channel = (
+            img_tensor[:, 0:1, :, :],
+            img_tensor[:, 1:2, :, :],
+            img_tensor[:, 2:3, :, :],
+        )
+
+        # Create slight scaling factors for R and B channels
+        # R at 100.1%, B at 99.9%
+        scale_r = 1.001
+        scale_b = 0.999
+
+        # Create affine transformation matrices for scaling
+        # For R channel (scale up)
+        theta_r = torch.tensor(
+            [[[scale_r, 0, 0], [0, scale_r, 0]]],
+            dtype=torch.float32,
+            device=img_tensor.device,
+        )
+        theta_r = theta_r.repeat(batch_size, 1, 1)
+        grid_r = torch.nn.functional.affine_grid(
+            theta_r, r_channel.size(), align_corners=False
+        )
+        r_channel_scaled = torch.nn.functional.grid_sample(
+            r_channel, grid_r, align_corners=False, mode="bilinear"
+        )
+
+        # For B channel (scale down)
+        theta_b = torch.tensor(
+            [[[scale_b, 0, 0], [0, scale_b, 0]]],
+            dtype=torch.float32,
+            device=img_tensor.device,
+        )
+        theta_b = theta_b.repeat(batch_size, 1, 1)
+        grid_b = torch.nn.functional.affine_grid(
+            theta_b, b_channel.size(), align_corners=False
+        )
+        b_channel_scaled = torch.nn.functional.grid_sample(
+            b_channel, grid_b, align_corners=False, mode="bilinear"
+        )
+
+        # G channel remains untouched
+        # Merge the channels back together
+        result = torch.cat([r_channel_scaled, g_channel, b_channel_scaled], dim=1)
+
+        # Clamp values to [0, 1]
+        return torch.clamp(result, 0, 1)
+
+    def _apply_demosaicing_artifacts(self, img_tensor: Tensor) -> Tensor:
+        """Apply demosaicing artifact simulation to a batch of images.
+
+        Args:
+            img_tensor (Tensor): Input tensor of shape (B, C, H, W) with values in [0, 1].
+
+        Returns:
+            Tensor: Demosaicing artifact applied tensor of the same shape.
+        """
+        if not hasattr(self.opt, "demosaic_prob"):
+            return img_tensor
+
+        if RNG.get_rng().uniform() >= self.opt.demosaic_prob:
+            return img_tensor
+
+        # Convert tensor to numpy for OpenCV processing
+        batch_size = img_tensor.size(0)
+        processed_images = []
+
+        for i in range(batch_size):
+            # Convert tensor to numpy array
+            img = img_tensor[i].cpu().clamp(0, 1).numpy()
+            img = (img * 255).astype("uint8")
+            img = img.transpose(1, 2, 0)  # CHW to HWC
+
+            # Convert RGB to Bayer pattern (BGGR)
+            h, w = img.shape[:2]
+            bayer_img = np.zeros((h, w), dtype=np.uint8)
+
+            # Create BGGR Bayer pattern
+            bayer_img[0::2, 0::2] = img[0::2, 0::2, 2]  # Red
+            bayer_img[0::2, 1::2] = img[0::2, 1::2, 1]  # Green
+            bayer_img[1::2, 0::2] = img[1::2, 0::2, 1]  # Green
+            bayer_img[1::2, 1::2] = img[1::2, 1::2, 0]  # Blue
+
+            # Apply demosaicing using OpenCV
+            try:
+                import cv2
+
+                demosaiced_img = cv2.demosaicing(bayer_img, cv2.COLOR_BAYER_BG2BGR)
+                # Convert back to tensor
+                demosaiced_tensor = torch.from_numpy(demosaiced_img).float() / 255.0
+                demosaiced_tensor = demosaiced_tensor.permute(2, 0, 1)  # HWC to CHW
+                processed_images.append(demosaiced_tensor)
+            except ImportError:
+                # If OpenCV is not available, return original image
+                processed_images.append(img_tensor[i])
+
+        if processed_images:
+            return torch.stack(processed_images, dim=0).to(img_tensor.device)
+        else:
+            return img_tensor
+
+    def _apply_aliasing_artifacts(self, img_tensor: Tensor) -> Tensor:
+        """Apply aliasing artifact simulation to a batch of images.
+
+        Args:
+            img_tensor (Tensor): Input tensor of shape (B, C, H, W) with values in [0, 1].
+
+        Returns:
+            Tensor: Aliasing artifact applied tensor of the same shape.
+        """
+        if not hasattr(self.opt, "aliasing_prob") or not hasattr(
+            self.opt, "aliasing_scale_range"
+        ):
+            return img_tensor
+
+        if RNG.get_rng().uniform() >= self.opt.aliasing_prob:
+            return img_tensor
+
+        # Get scale factor
+        scale_factor = RNG.get_rng().uniform(
+            self.opt.aliasing_scale_range[0], self.opt.aliasing_scale_range[1]
+        )
+
+        # Perform a downscale-then-upscale cycle using nearest-neighbor interpolation
+        _batch_size, _channels, height, width = img_tensor.shape
+
+        # Downscale
+        downscale_size = (int(height * scale_factor), int(width * scale_factor))
+        downscaled = torch.nn.functional.interpolate(
+            img_tensor, size=downscale_size, mode="nearest"
+        )
+
+        # Upscale back to original size
+        upscaled = torch.nn.functional.interpolate(
+            downscaled, size=(height, width), mode="nearest"
+        )
+
+        return upscaled
 
     @torch.no_grad()
     def _dequeue_and_enqueue(self) -> None:
@@ -143,6 +459,25 @@ class RealESRGANModel(SRModel):
 
             ori_h, ori_w = self.gt.size()[2:4]
 
+            # Clean Pass-Through: If random check passes, return original GT as LQ and skip all degradations
+            if (
+                hasattr(self.opt, "p_clean")
+                and RNG.get_rng().uniform() < self.opt.p_clean
+            ):
+                self.lq = self.gt.clone()
+                # Clamp and round
+                self.lq = torch.clamp((self.lq * 255.0).round(), 0, 255) / 255.0
+                # Random crop
+                gt_size = self.opt.datasets["train"].gt_size
+                assert gt_size is not None
+                self.gt, self.lq = paired_random_crop(
+                    self.gt, self.lq, gt_size, self.opt.scale
+                )
+                # Training pair pool
+                self._dequeue_and_enqueue()
+                self.lq = self.lq.contiguous()
+                return
+
             # ----------------------- The first degradation process ----------------------- #
             if self.opt.lq_usm:
                 usm_sharpener = USMSharp(
@@ -211,6 +546,15 @@ class RealESRGANModel(SRModel):
                 )  # clamp to [0, 1], otherwise JPEGer will result in unpleasant artifacts
                 out = self.jpeger(out, quality=jpeg_p)
 
+            # Apply chromatic aberration
+            out = self._apply_chromatic_aberration(out)
+
+            # Apply demosaicing artifacts
+            out = self._apply_demosaicing_artifacts(out)
+
+            # Apply aliasing artifacts
+            out = self._apply_aliasing_artifacts(out)
+
             # ----------------------- The second degradation process ----------------------- #
             # blur
             if RNG.get_rng().uniform() < self.opt.blur_prob2:
@@ -260,6 +604,9 @@ class RealESRGANModel(SRModel):
                     rounds=False,
                 )
 
+            # Apply oversharpening
+            out = self._apply_oversharpening(out)
+
             # JPEG compression + the final sinc filter
             # We also need to resize images to desired sizes. We group [resize back + sinc filter] together
             # as one operation.
@@ -301,6 +648,12 @@ class RealESRGANModel(SRModel):
                     mode=mode,
                 )
                 out = filter2d(out, self.sinc_kernel)
+
+            # Apply WebP compression
+            out = self._apply_webp_compression(out)
+
+            # Apply AVIF compression
+            out = self._apply_avif_compression(out)
 
             # clamp and round
             self.lq = torch.clamp((out * 255.0).round(), 0, 255) / 255.0

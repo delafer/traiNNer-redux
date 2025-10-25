@@ -495,6 +495,72 @@ class ReduxOptions(StrictStruct):
             description="The maximum number of OTF images to save when debugging is enabled."
         ),
     ] = 100
+    # Clean Pass-Through
+    p_clean: Annotated[
+        float,
+        Meta(
+            description="Probability of clean pass-through, where the GT image is returned as LQ without any degradations."
+        ),
+    ] = 0
+
+    # Modern Compression Artifacts
+    webp_prob: Annotated[
+        float,
+        Meta(description="Probability of applying WebP compression artifacts."),
+    ] = 0
+    webp_range: Annotated[
+        tuple[float, float],
+        Meta(
+            description="Quality range for WebP compression, in the format [min_quality, max_quality]."
+        ),
+    ] = (75, 95)
+    avif_prob: Annotated[
+        float,
+        Meta(description="Probability of applying AVIF compression artifacts."),
+    ] = 0
+    avif_range: Annotated[
+        tuple[float, float],
+        Meta(
+            description="Quality range for AVIF compression, in the format [min_quality, max_quality]."
+        ),
+    ] = (75, 95)
+
+    # Oversharpening Artifact Simulation
+    oversharpen_prob: Annotated[
+        float,
+        Meta(description="Probability of applying oversharpening artifacts."),
+    ] = 0
+    oversharpen_strength: Annotated[
+        tuple[float, float],
+        Meta(
+            description="Strength range for oversharpening artifacts, in the format [min_strength, max_strength]."
+        ),
+    ] = (1.0, 2.0)
+
+    # Chromatic Aberration Simulation
+    chromatic_aberration_prob: Annotated[
+        float,
+        Meta(description="Probability of applying chromatic aberration artifacts."),
+    ] = 0
+
+    # Demosaicing Artifact Simulation
+    demosaic_prob: Annotated[
+        float,
+        Meta(description="Probability of applying demosaicing artifacts."),
+    ] = 0
+
+    # Aliasing Artifact Simulation
+    aliasing_prob: Annotated[
+        float,
+        Meta(description="Probability of applying aliasing artifacts."),
+    ] = 0
+    aliasing_scale_range: Annotated[
+        tuple[float, float],
+        Meta(
+            description="Scale range for aliasing artifacts, in the format [min_scale, max_scale]."
+        ),
+    ] = (0.6, 0.9)
+
     dataroot_lq_prob: Annotated[
         float,
         Meta(description="Probability of using paired LR data instead of OTF LR data."),
