@@ -1,0 +1,37 @@
+# Example YAML configuration showing how to use the new ContrastiveLoss and LaplacianPyramidLoss
+# These losses replace the unstable GAN framework with more stable, semantically-aware alternatives
+
+# Remove network_d and optim_d sections as we're not using a discriminator
+network_g:
+  type: span
+  # ... other generator settings
+
+train:
+  # Replace MultiStepLR with CosineAnnealingLR
+  scheduler:
+    type: CosineAnnealingLR
+    T_max: 1000000
+    eta_min: !!float 1e-7
+
+  # Remove ganloss entry and add our new losses
+  losses:
+    # Keep some traditional losses for baseline reconstruction
+    - type: charbonnierloss
+      loss_weight: 1.0
+
+    # Add our new CLIP-based Contrastive Loss
+    # This encourages semantic similarity between SR and GT images
+    - type: contrastiveloss
+      loss_weight: 0.1  # Start with a low weight as this is a powerful loss
+      temperature: 0.1   # Temperature parameter for contrastive loss
+
+    # Add our new Laplacian Pyramid Loss
+    # This preserves structural details at multiple scales
+    - type: laplacianpyramidloss
+      loss_weight: 1.0
+      levels: 4
+      criterion: charbonnier  # Options: l1, l2, charbonnier
+
+# Note: To use the ContrastiveLoss, you'll need to install the transformers library:
+# pip install transformers
+# Then uncomment the CLIP model loading code in traiNNer/losses/contrastive_loss.py
