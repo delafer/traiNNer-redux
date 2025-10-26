@@ -32,12 +32,13 @@ Core Design Philosophy & Innovations:
 Usage:
 -   Place this file in your `traiNNer/archs/` directory.
 -   In your config.yaml, use one of the registered variants:
+    `network_g: type: paragonsr_tiny`
+    `network_g: type: paragonsr_xs`
     `network_g: type: paragonsr_s`
     `network_g: type: paragonsr_m`
     `network_g: type: paragonsr_l`
+    `network_g: type: paragonsr_xl`
 """
-
-from typing import List
 
 import torch
 import torch.nn.functional as F
@@ -50,65 +51,34 @@ from traiNNer.utils.registry import ARCH_REGISTRY
 
 class ReparamConv(nn.Module):
     """
-    A reparameterizable convolutional block that fuses a 3x3 conv, a 1x1 conv,
-    and an identity connection (via BatchNorm) into a single 3x3 conv for inference.
-    This version is production-ready, correctly handles grouped convolutions, and
-    includes an explicit `_is_fused` flag to track its state.
+    A stable, reparameterizable convolutional block that fuses a 3x3 and a 1x1
+    branch into a single 3x3 conv for inference.
     """
 
     def __init__(
         self, in_channels: int, out_channels: int, stride: int = 1, groups: int = 1
     ) -> None:
         super().__init__()
-        self.in_channels = in_channels
-        self.out_channels = out_channels
-        self.stride = stride
-        self.groups = groups
-
-        self.register_buffer("_is_fused", torch.tensor(False, dtype=torch.bool))
-
-        # Training-time branches
-        self.conv3x3 = nn.Conv2d(
+        self.in_channels, self.out_channels, self.stride, self.groups = (
             in_channels,
             out_channels,
-            kernel_size=3,
-            stride=stride,
-            padding=1,
-            groups=groups,
-            bias=True,
+            stride,
+            groups,
+        )
+        self.register_buffer("_is_fused", torch.tensor(False, dtype=torch.bool))
+        self.conv3x3 = nn.Conv2d(
+            in_channels, out_channels, 3, stride, 1, groups=groups, bias=True
         )
         self.conv1x1 = nn.Conv2d(
-            in_channels,
-            out_channels,
-            kernel_size=1,
-            stride=stride,
-            groups=groups,
-            bias=True,
+            in_channels, out_channels, 1, stride, 0, groups=groups, bias=True
         )
-        self.identity = (
-            nn.BatchNorm2d(in_channels, affine=True)
-            if in_channels == out_channels and stride == 1
-            else None
-        )
-
-        # Inference-time branch
         self.fused_conv = nn.Conv2d(
-            in_channels,
-            out_channels,
-            kernel_size=3,
-            stride=stride,
-            padding=1,
-            groups=groups,
-            bias=True,
+            in_channels, out_channels, 3, stride, 1, groups=groups, bias=True
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         if self.training:
-            out = self.conv3x3(x)
-            out = out + self.conv1x1(x)
-            if self.identity is not None:
-                out = out + self.identity(x)
-            return out
+            return self.conv3x3(x) + self.conv1x1(x)
         elif self._is_fused:
             return self.fused_conv(x)
         else:
@@ -116,75 +86,28 @@ class ReparamConv(nn.Module):
             return self.fused_conv(x)
 
     def fuse_kernels(self) -> None:
-        """
-        Performs the mathematical fusion of the training-time branches into the
-        single `fused_conv` layer. This is a one-way operation.
-        """
         if self._is_fused:
             return
-
-        # --- Step 1: Fuse 3x3 and 1x1 branches ---
-        fused_kernel = self.conv3x3.weight.clone()
-        fused_bias = self.conv3x3.bias.clone()
-
+        fused_kernel, fused_bias = (
+            self.conv3x3.weight.clone(),
+            self.conv3x3.bias.clone(),
+        )
         padded_1x1_kernel = F.pad(self.conv1x1.weight, [1, 1, 1, 1])
         fused_kernel += padded_1x1_kernel
         fused_bias += self.conv1x1.bias
-
-        # --- Step 2: Fuse the Identity branch (if it exists) ---
-        if self.identity is not None:
-            running_var = self.identity.running_var
-            running_mean = self.identity.running_mean
-            gamma = self.identity.weight
-            beta = self.identity.bias
-            eps = self.identity.eps
-
-            std = (running_var + eps).sqrt()
-
-            bn_scale = gamma / std
-            bn_bias = beta - running_mean * bn_scale
-
-            identity_kernel_1x1 = torch.zeros(
-                self.in_channels,
-                self.in_channels // self.groups,
-                1,
-                1,
-                device=fused_kernel.device,
-            )
-            for i in range(self.in_channels):
-                identity_kernel_1x1[i, i // self.groups, 0, 0] = 1.0
-
-            identity_kernel_3x3 = F.pad(identity_kernel_1x1, [1, 1, 1, 1])
-            identity_kernel_3x3 *= bn_scale.reshape(-1, 1, 1, 1)
-
-            fused_kernel += identity_kernel_3x3
-            fused_bias += bn_bias
-
-        # --- Step 3: Load the final weights into the inference convolution ---
         self.fused_conv.weight.data.copy_(fused_kernel)
         self.fused_conv.bias.data.copy_(fused_bias)
-
-        self.fused_conv.weight.requires_grad = self.conv3x3.weight.requires_grad
-        self.fused_conv.bias.requires_grad = self.conv3x3.bias.requires_grad
-
         self._is_fused.fill_(True)
 
     def train(self, mode: bool = True) -> None:
-        """Override train() to handle fusion state. Does NOT automatically fuse."""
         super().train(mode)
-        # When switching back to training mode, we must mark the model as "not fused"
-        # so that the training-path is used in the forward pass. The weights of the
-        # training branches were never touched, so they are still valid.
-        if mode is True:
+        if mode and self._is_fused:
             self._is_fused.fill_(False)
+        elif not mode and not self._is_fused:
+            self.fuse_kernels()
 
 
 class InceptionDWConv2d(nn.Module):
-    """
-    Inception-style Depthwise Convolution Block. Efficiently captures features
-    at multiple spatial scales (square, horizontal, vertical).
-    """
-
     def __init__(
         self,
         in_channels: int,
@@ -198,18 +121,10 @@ class InceptionDWConv2d(nn.Module):
             gc, gc, square_kernel_size, padding=square_kernel_size // 2, groups=gc
         )
         self.dwconv_w = nn.Conv2d(
-            gc,
-            gc,
-            kernel_size=(1, band_kernel_size),
-            padding=(0, band_kernel_size // 2),
-            groups=gc,
+            gc, gc, (1, band_kernel_size), padding=(0, band_kernel_size // 2), groups=gc
         )
         self.dwconv_h = nn.Conv2d(
-            gc,
-            gc,
-            kernel_size=(band_kernel_size, 1),
-            padding=(band_kernel_size // 2, 0),
-            groups=gc,
+            gc, gc, (band_kernel_size, 1), padding=(band_kernel_size // 2, 0), groups=gc
         )
         self.split_indexes = (in_channels - 3 * gc, gc, gc, gc)
 
@@ -221,10 +136,6 @@ class InceptionDWConv2d(nn.Module):
 
 
 class GatedFFN(nn.Module):
-    """
-    Gated Feed-Forward Network for powerful, non-linear feature transformation.
-    """
-
     def __init__(self, dim: int, expansion_ratio: float = 2.0) -> None:
         super().__init__()
         hidden_dim = int(dim * expansion_ratio)
@@ -235,52 +146,38 @@ class GatedFFN(nn.Module):
         self.project_out = nn.Conv2d(hidden_dim, dim, 1)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        g = self.project_in_g(x)
-        i = self.project_in_i(x)
+        g, i = self.project_in_g(x), self.project_in_i(x)
         g = self.spatial_mixer(g)
         return self.project_out(self.act(g) * i)
 
 
 class ParagonBlock(nn.Module):
-    """
-    The core block of ParagonSR.
-    Combines multi-scale context gathering with a powerful gated feature transformer.
-    """
-
     def __init__(self, dim: int, ffn_expansion: float = 2.0) -> None:
         super().__init__()
-        self.norm1 = nn.LayerNorm(dim)
+        self.norm1, self.norm2 = nn.LayerNorm(dim), nn.LayerNorm(dim)
         self.context = InceptionDWConv2d(dim)
-        self.norm2 = nn.LayerNorm(dim)
         self.transformer = GatedFFN(dim, expansion_ratio=ffn_expansion)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # LayerNorm expects (B, H, W, C), so we permute.
-        # .contiguous() is used to ensure memory layout is correct after permute.
         _B, _C, _H, _W = x.shape
-
-        # Context Gathering Branch
         residual = x
-        x_normed = x.permute(0, 2, 3, 1).contiguous()
-        x_normed = self.norm1(x_normed)
-        x_normed = x_normed.permute(0, 3, 1, 2).contiguous()
-        x = self.context(x_normed)
-        x = x + residual
-
-        # Feature Transformation Branch
+        x_normed = (
+            self.norm1(x.permute(0, 2, 3, 1).contiguous())
+            .permute(0, 3, 1, 2)
+            .contiguous()
+        )
+        x = self.context(x_normed) + residual
         residual = x
-        x_normed = x.permute(0, 2, 3, 1).contiguous()
-        x_normed = self.norm2(x_normed)
-        x_normed = x_normed.permute(0, 3, 1, 2).contiguous()
-        x = self.transformer(x_normed)
-        x = x + residual
-
+        x_normed = (
+            self.norm2(x.permute(0, 2, 3, 1).contiguous())
+            .permute(0, 3, 1, 2)
+            .contiguous()
+        )
+        x = self.transformer(x_normed) + residual
         return x
 
 
 class ResidualGroup(nn.Module):
-    """A group of ParagonBlocks with a local residual connection for stability."""
-
     def __init__(self, dim: int, num_blocks: int, ffn_expansion: float = 2.0) -> None:
         super().__init__()
         self.blocks = nn.Sequential(
@@ -291,12 +188,7 @@ class ResidualGroup(nn.Module):
         return self.blocks(x) + x
 
 
-# --- The Main ParagonSR Network ---
-
-
 class ParagonSR(nn.Module):
-    """The main ParagonSR architecture."""
-
     def __init__(
         self,
         scale: int = 4,
@@ -308,38 +200,63 @@ class ParagonSR(nn.Module):
     ) -> None:
         super().__init__()
         self.scale = scale
-
-        self.conv_in = nn.Conv2d(in_chans, num_feat, 3, padding=1)
+        self.conv_in = nn.Conv2d(in_chans, num_feat, 3, 1, 1)
         self.body = nn.Sequential(
             *[
                 ResidualGroup(num_feat, num_blocks, ffn_expansion)
                 for _ in range(num_groups)
             ]
         )
-        self.conv_fuse = nn.Conv2d(num_feat, num_feat, 3, padding=1)
+        self.conv_fuse = nn.Conv2d(num_feat, num_feat, 3, 1, 1)
         self.upsampler = nn.Sequential(
-            nn.Conv2d(num_feat, num_feat * scale * scale, 3, padding=1),
+            nn.Conv2d(num_feat, num_feat * scale * scale, 3, 1, 1),
             nn.PixelShuffle(scale),
         )
-        self.conv_out = nn.Conv2d(num_feat, in_chans, 3, padding=1)
+        self.conv_out = nn.Conv2d(num_feat, in_chans, 3, 1, 1)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x_shallow = self.conv_in(x)
         x_deep = self.body(x_shallow)
         x_fused = self.conv_fuse(x_deep) + x_shallow
-        x_upscaled = self.upsampler(x_fused)
-        return self.conv_out(x_upscaled)
+        return self.conv_out(self.upsampler(x_fused))
 
 
-# --- Factory Registration for traiNNer-redux ---
+# --- Factory Registration for traiNNer-redux: The Complete Family ---
+
+
+@ARCH_REGISTRY.register()
+def paragonsr_tiny(scale: int = 4, **kwargs) -> ParagonSR:
+    """
+    ParagonSR-Tiny: Ultra-lightweight variant for high-speed/real-time use.
+    - Use Case: Video upscaling, fast previews where quality is secondary to speed.
+    - Training Target: Any GPU with ~4-6GB VRAM. Very fast to train.
+    - Inference Target: Any modern GPU/CPU; suitable for real-time applications.
+    """
+    return ParagonSR(
+        scale=scale, num_feat=32, num_groups=3, num_blocks=3, ffn_expansion=2.0
+    )
+
+
+@ARCH_REGISTRY.register()
+def paragonsr_xs(scale: int = 4, **kwargs) -> ParagonSR:
+    """
+    ParagonSR-XS: Extra-Small variant. A wide but shallow design.
+    - Use Case: General-purpose upscaling on low-end hardware.
+    - Training Target: ~6-8GB VRAM GPU (e.g., RTX 2060, GTX 1660S). Fast to train.
+    - Inference Target: ~4-6GB VRAM GPU (e.g., GTX 1060).
+    """
+    return ParagonSR(
+        scale=scale, num_feat=48, num_groups=4, num_blocks=4, ffn_expansion=2.0
+    )
 
 
 @ARCH_REGISTRY.register()
 def paragonsr_s(scale: int = 4, **kwargs) -> ParagonSR:
     """
-    ParagonSR-S: Small variant.
+    ParagonSR-S: Small variant, the recommended flagship model.
+    - Use Case: High-quality general-purpose upscaling.
     - Training Target: ~12GB VRAM GPU (e.g., RTX 3060).
-    - Inference Target: ~6-8GB VRAM GPU (e.g., RTX 2060, GTX 1660S).
+    - Inference Target: Most GPUs with ~6-8GB VRAM (e.g., RTX 2070).
     """
     return ParagonSR(
         scale=scale, num_feat=64, num_groups=6, num_blocks=6, ffn_expansion=2.0
@@ -349,9 +266,10 @@ def paragonsr_s(scale: int = 4, **kwargs) -> ParagonSR:
 @ARCH_REGISTRY.register()
 def paragonsr_m(scale: int = 4, **kwargs) -> ParagonSR:
     """
-    ParagonSR-M: Medium variant.
+    ParagonSR-M: Medium variant, for prosumer hardware.
+    - Use Case: Higher-quality upscaling for users with strong GPUs.
     - Training Target: ~16-24GB VRAM GPU (e.g., RTX 3090, RTX 4080).
-    - Inference Target: ~8-12GB VRAM GPU (e.g., RTX 3060, RTX 2070).
+    - Inference Target: GPUs with ~8-12GB VRAM (e.g., RTX 3060).
     """
     return ParagonSR(
         scale=scale, num_feat=96, num_groups=8, num_blocks=8, ffn_expansion=2.0
@@ -361,10 +279,24 @@ def paragonsr_m(scale: int = 4, **kwargs) -> ParagonSR:
 @ARCH_REGISTRY.register()
 def paragonsr_l(scale: int = 4, **kwargs) -> ParagonSR:
     """
-    ParagonSR-L: Large variant.
-    - Training Target: High-end GPU with >24GB VRAM (e.g., RTX 4090, A100).
-    - Inference Target: ~12GB+ VRAM GPU (e.g., RTX 3080, RTX 4070).
+    ParagonSR-L: Large variant, for high-end enthusiast hardware.
+    - Use Case: Near-SOTA quality for users with top-tier hardware.
+    - Training Target: >24GB VRAM GPU (e.g., RTX 4090, RTX 3090 with small batch).
+    - Inference Target: High-end GPUs with ~12GB+ VRAM (e.g., RTX 3080, RTX 4070).
     """
     return ParagonSR(
         scale=scale, num_feat=128, num_groups=10, num_blocks=10, ffn_expansion=2.0
+    )
+
+
+@ARCH_REGISTRY.register()
+def paragonsr_xl(scale: int = 4, **kwargs) -> ParagonSR:
+    """
+    ParagonSR-XL: Extra-Large variant for researchers and enthusiasts.
+    - Use Case: Pushing the absolute limits of quality, regardless of cost.
+    - Training Target: High-VRAM accelerator cards (e.g., 48GB+ A100, H100).
+    - Inference Target: Flagship GPUs with >24GB VRAM (e.g., RTX 4090).
+    """
+    return ParagonSR(
+        scale=scale, num_feat=160, num_groups=12, num_blocks=12, ffn_expansion=2.0
     )
