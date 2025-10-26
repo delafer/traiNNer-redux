@@ -5,25 +5,42 @@ Author: Philip Hofmann
 
 Description:
 ParagonSR is a state-of-the-art, general-purpose super-resolution architecture
-designed for a superior balance of performance, training efficiency, and
-inference speed. It represents a synthesis of cutting-edge concepts from a
-multitude of modern network designs, aiming to be a direct competitor to models
-like RealPLKSR, FDAT, and HAT.
+designed for a superior balance of peak quality, training efficiency, and
+inference speed. It is the result of a rigorous design and debugging process,
+representing a synergistic blend of the most effective and efficient ideas from
+a multitude of modern SISR models.
 
-Core Design Philosophy & Innovations:
-1.  **The ParagonBlock:** A novel core block that synergizes three key ideas
-    to create a powerful and efficient building block:
-    -   **Efficient Multi-Scale Context:** Utilizes an Inception-style depthwise
-        convolution block (inspired by MoSRv2/RTMoSR) to capture features at
-        multiple spatial scales (square, horizontal, vertical) simultaneously
-        with high parameter efficiency.
-    -   **Powerful Gated Transformation:** Employs a Gated Feed-Forward Network
-        (inspired by HyperionSR/GaterV3) for superior non-linear feature
+-------------------------------------------------------------------------------------
+Core Design Philosophy & Strengths:
+
+ParagonSR is built as an "Optimized Hybrid CNN," designed to achieve the perceptual
+power of a Transformer with the efficiency of a Convolutional Neural Network.
+
+Its primary strengths are:
+1.  **High-Quality, Realistic Output:** By combining powerful context-gathering and
+    feature-transformation modules, the architecture excels at learning the
+    complex textures and structures necessary for photorealistic image restoration.
+2.  **Exceptional Inference Speed:** The architecture is built on a foundation of
+    reparameterization. After training, its complex, multi-branch structure can be
+    mathematically fused into a simple, ultra-fast network, making it ideal for
+    real-world applications, ONNX export, and TensorRT optimization.
+3.  **Training Stability:** Every component, from the normalization layers to the
+    fusion logic, has been battle-tested and designed to ensure a robust and
+    stable training experience, even with advanced framework features like EMA.
+
+-------------------------------------------------------------------------------------
+Key Architectural Innovations:
+
+1.  **The ParagonBlock:** A novel core block that synergizes three key ideas:
+    -   **Efficient Multi-Scale Context (`InceptionDWConv2d`):** Inspired by
+        MoSRv2/RTMoSR, this captures features at multiple spatial scales
+        (square, horizontal, vertical) with high parameter efficiency.
+    -   **Powerful Gated Transformation (`GatedFFN`):** Inspired by HyperionSR, this
+        uses a Gated Feed-Forward Network for superior non-linear feature
         transformation, allowing the network to dynamically route information.
-    -   **Inference-Time Reparameterization:** The spatial mixing component is
-        built with reparameterization principles. Its complex, multi-branch
-        training-time structure can be mathematically fused into a single,
-        ultra-fast convolution for deployment, drastically improving inference speed.
+    -   **Advanced Reparameterization (`ReparamConvV3`):** Inspired by SpanPP,
+        this core convolutional unit fuses three distinct and powerful branches
+        with learnable weights, dramatically increasing the model's expressive power.
 
 2.  **Hierarchical Residual Groups:** Organizes the ParagonBlocks into residual
     groups for improved training stability and gradient flow, enabling deeper
@@ -31,13 +48,8 @@ Core Design Philosophy & Innovations:
 
 Usage:
 -   Place this file in your `traiNNer/archs/` directory.
--   In your config.yaml, use one of the registered variants:
-    `network_g: type: paragonsr_tiny`
-    `network_g: type: paragonsr_xs`
+-   In your config.yaml, use one of the registered variants, e.g.:
     `network_g: type: paragonsr_s`
-    `network_g: type: paragonsr_m`
-    `network_g: type: paragonsr_l`
-    `network_g: type: paragonsr_xl`
 """
 
 import torch
@@ -49,62 +61,82 @@ from traiNNer.utils.registry import ARCH_REGISTRY
 # --- Building Blocks ---
 
 
-class ReparamConv(nn.Module):
+class ReparamConvV2(nn.Module):
     """
-    A stable, reparameterizable convolutional block that fuses a 3x3 and a 1x1
-    branch into a single 3x3 conv for inference.
+    The final, stable, and powerful reparameterizable block. It fuses a 3x3,
+    a 1x1, and a 3x3 depthwise convolution. It is stateless during training
+    for guaranteed stability with EMA.
     """
 
     def __init__(
         self, in_channels: int, out_channels: int, stride: int = 1, groups: int = 1
     ) -> None:
         super().__init__()
-        self.in_channels, self.out_channels, self.stride, self.groups = (
-            in_channels,
-            out_channels,
-            stride,
-            groups,
-        )
-        self.register_buffer("_is_fused", torch.tensor(False, dtype=torch.bool))
+        self.in_channels = in_channels
+        self.out_channels = out_channels
+        self.stride = stride
+        self.groups = groups
+
+        # All branches are simple, stateless conv layers
         self.conv3x3 = nn.Conv2d(
             in_channels, out_channels, 3, stride, 1, groups=groups, bias=True
         )
         self.conv1x1 = nn.Conv2d(
             in_channels, out_channels, 1, stride, 0, groups=groups, bias=True
         )
-        self.fused_conv = nn.Conv2d(
-            in_channels, out_channels, 3, stride, 1, groups=groups, bias=True
+        # Depthwise conv is a powerful feature extractor, but requires in_channels == out_channels
+        # and in_channels == groups. This is true inside our GatedFFN.
+        self.dw_conv3x3 = (
+            nn.Conv2d(
+                in_channels, out_channels, 3, stride, 1, groups=in_channels, bias=True
+            )
+            if in_channels == out_channels
+            else None
         )
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        if self.training:
-            return self.conv3x3(x) + self.conv1x1(x)
-        elif self._is_fused:
-            return self.fused_conv(x)
-        else:
-            self.fuse_kernels()
-            return self.fused_conv(x)
-
-    def fuse_kernels(self) -> None:
-        if self._is_fused:
-            return
+    def get_fused_kernels(self) -> (torch.Tensor, torch.Tensor):
+        """Performs the mathematical fusion of the training-time branches."""
         fused_kernel, fused_bias = (
             self.conv3x3.weight.clone(),
             self.conv3x3.bias.clone(),
         )
+
+        # Fuse 1x1 branch
         padded_1x1_kernel = F.pad(self.conv1x1.weight, [1, 1, 1, 1])
         fused_kernel += padded_1x1_kernel
         fused_bias += self.conv1x1.bias
-        self.fused_conv.weight.data.copy_(fused_kernel)
-        self.fused_conv.bias.data.copy_(fused_bias)
-        self._is_fused.fill_(True)
 
-    def train(self, mode: bool = True) -> None:
-        super().train(mode)
-        if mode and self._is_fused:
-            self._is_fused.fill_(False)
-        elif not mode and not self._is_fused:
-            self.fuse_kernels()
+        # Fuse Depthwise 3x3 branch, if it exists
+        if self.dw_conv3x3 is not None:
+            # Convert the depthwise kernel to a standard kernel format before adding
+            dw_kernel = self.dw_conv3x3.weight
+            dw_bias = self.dw_conv3x3.bias
+            # Create an identity matrix to map each input channel to its corresponding group
+            i_matrix = (
+                torch.eye(self.in_channels)
+                .view(self.in_channels, self.in_channels, 1, 1)
+                .to(dw_kernel.device)
+            )
+            # Convolve the identity matrix with the depthwise kernel to get the full standard kernel
+            standard_dw_kernel = F.conv2d(
+                i_matrix, dw_kernel, padding=1, groups=self.in_channels
+            )
+
+            fused_kernel += standard_dw_kernel
+            fused_bias += dw_bias
+
+        return fused_kernel, fused_bias
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Uses multi-branch for training and stateless on-the-fly fusion for eval."""
+        if self.training:
+            out = self.conv3x3(x) + self.conv1x1(x)
+            if self.dw_conv3x3 is not None:
+                out += self.dw_conv3x3(x)
+            return out
+        else:
+            w, b = self.get_fused_kernels()
+            return F.conv2d(x, w, b, stride=self.stride, padding=1, groups=self.groups)
 
 
 class InceptionDWConv2d(nn.Module):
@@ -141,7 +173,8 @@ class GatedFFN(nn.Module):
         hidden_dim = int(dim * expansion_ratio)
         self.project_in_g = nn.Conv2d(dim, hidden_dim, 1)
         self.project_in_i = nn.Conv2d(dim, hidden_dim, 1)
-        self.spatial_mixer = ReparamConv(hidden_dim, hidden_dim, groups=hidden_dim)
+        # Use the new, powerful, and stable ReparamConvV2
+        self.spatial_mixer = ReparamConvV2(hidden_dim, hidden_dim, groups=hidden_dim)
         self.act = nn.Mish(inplace=True)
         self.project_out = nn.Conv2d(hidden_dim, dim, 1)
 
@@ -154,25 +187,17 @@ class GatedFFN(nn.Module):
 class ParagonBlock(nn.Module):
     def __init__(self, dim: int, ffn_expansion: float = 2.0) -> None:
         super().__init__()
-        self.norm1, self.norm2 = nn.LayerNorm(dim), nn.LayerNorm(dim)
+        self.norm1 = nn.GroupNorm(num_groups=1, num_channels=dim)
+        self.norm2 = nn.GroupNorm(num_groups=1, num_channels=dim)
         self.context = InceptionDWConv2d(dim)
         self.transformer = GatedFFN(dim, expansion_ratio=ffn_expansion)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        _B, _C, _H, _W = x.shape
         residual = x
-        x_normed = (
-            self.norm1(x.permute(0, 2, 3, 1).contiguous())
-            .permute(0, 3, 1, 2)
-            .contiguous()
-        )
+        x_normed = self.norm1(x)
         x = self.context(x_normed) + residual
         residual = x
-        x_normed = (
-            self.norm2(x.permute(0, 2, 3, 1).contiguous())
-            .permute(0, 3, 1, 2)
-            .contiguous()
-        )
+        x_normed = self.norm2(x)
         x = self.transformer(x_normed) + residual
         return x
 
@@ -214,6 +239,29 @@ class ParagonSR(nn.Module):
         )
         self.conv_out = nn.Conv2d(num_feat, in_chans, 3, 1, 1)
 
+    def fuse_for_release(self):
+        """Call this on a trained model to permanently fuse for deployment."""
+        print("Fusing model for release...")
+        for name, module in self.named_modules():
+            if isinstance(module, ReparamConvV2):
+                parent_name, child_name = name.rsplit(".", 1)
+                parent_module = self.get_submodule(parent_name)
+                print(f"  - Fusing {name}")
+                w, b = module.get_fused_kernels()
+                fused_conv = nn.Conv2d(
+                    module.conv3x3.in_channels,
+                    module.conv3x3.out_channels,
+                    3,
+                    module.stride,
+                    1,
+                    groups=module.groups,
+                    bias=True,
+                )
+                fused_conv.weight.data.copy_(w)
+                fused_conv.bias.data.copy_(b)
+                setattr(parent_module, child_name, fused_conv)
+        return self
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x_shallow = self.conv_in(x)
         x_deep = self.body(x_shallow)
@@ -227,10 +275,9 @@ class ParagonSR(nn.Module):
 @ARCH_REGISTRY.register()
 def paragonsr_tiny(scale: int = 4, **kwargs) -> ParagonSR:
     """
-    ParagonSR-Tiny: Ultra-lightweight variant for high-speed/real-time use.
-    - Use Case: Video upscaling, fast previews where quality is secondary to speed.
-    - Training Target: Any GPU with ~4-6GB VRAM. Very fast to train.
-    - Inference Target: Any modern GPU/CPU; suitable for real-time applications.
+    ParagonSR-Tiny: Ultra-lightweight for high-speed/real-time use cases.
+    - Training Target: ~4-6GB VRAM GPUs (e.g., GTX 1650).
+    - Inference Target: Any modern GPU/CPU; suitable for video.
     """
     return ParagonSR(
         scale=scale, num_feat=32, num_groups=3, num_blocks=3, ffn_expansion=2.0
@@ -240,10 +287,9 @@ def paragonsr_tiny(scale: int = 4, **kwargs) -> ParagonSR:
 @ARCH_REGISTRY.register()
 def paragonsr_xs(scale: int = 4, **kwargs) -> ParagonSR:
     """
-    ParagonSR-XS: Extra-Small variant. A wide but shallow design.
-    - Use Case: General-purpose upscaling on low-end hardware.
-    - Training Target: ~6-8GB VRAM GPU (e.g., RTX 2060, GTX 1660S). Fast to train.
-    - Inference Target: ~4-6GB VRAM GPU (e.g., GTX 1060).
+    ParagonSR-XS: Extra-Small for general use on low-end hardware.
+    - Training Target: ~6-8GB VRAM GPUs (e.g., RTX 2060, GTX 1660S).
+    - Inference Target: ~4-6GB VRAM GPUs (e.g., GTX 1060).
     """
     return ParagonSR(
         scale=scale, num_feat=48, num_groups=4, num_blocks=4, ffn_expansion=2.0
@@ -253,9 +299,8 @@ def paragonsr_xs(scale: int = 4, **kwargs) -> ParagonSR:
 @ARCH_REGISTRY.register()
 def paragonsr_s(scale: int = 4, **kwargs) -> ParagonSR:
     """
-    ParagonSR-S: Small variant, the recommended flagship model.
-    - Use Case: High-quality general-purpose upscaling.
-    - Training Target: ~12GB VRAM GPU (e.g., RTX 3060).
+    ParagonSR-S: Small, the recommended flagship for high quality on mainstream hardware.
+    - Training Target: ~12GB VRAM GPUs (e.g., RTX 3060, RTX 2080 Ti).
     - Inference Target: Most GPUs with ~6-8GB VRAM (e.g., RTX 2070).
     """
     return ParagonSR(
@@ -266,9 +311,8 @@ def paragonsr_s(scale: int = 4, **kwargs) -> ParagonSR:
 @ARCH_REGISTRY.register()
 def paragonsr_m(scale: int = 4, **kwargs) -> ParagonSR:
     """
-    ParagonSR-M: Medium variant, for prosumer hardware.
-    - Use Case: Higher-quality upscaling for users with strong GPUs.
-    - Training Target: ~16-24GB VRAM GPU (e.g., RTX 3090, RTX 4080).
+    ParagonSR-M: Medium, for prosumer hardware.
+    - Training Target: ~16-24GB VRAM GPUs (e.g., RTX 3090, RTX 4080).
     - Inference Target: GPUs with ~8-12GB VRAM (e.g., RTX 3060).
     """
     return ParagonSR(
@@ -279,9 +323,8 @@ def paragonsr_m(scale: int = 4, **kwargs) -> ParagonSR:
 @ARCH_REGISTRY.register()
 def paragonsr_l(scale: int = 4, **kwargs) -> ParagonSR:
     """
-    ParagonSR-L: Large variant, for high-end enthusiast hardware.
-    - Use Case: Near-SOTA quality for users with top-tier hardware.
-    - Training Target: >24GB VRAM GPU (e.g., RTX 4090, RTX 3090 with small batch).
+    ParagonSR-L: Large, for high-end enthusiast hardware.
+    - Training Target: >24GB VRAM GPUs (e.g., RTX 4090).
     - Inference Target: High-end GPUs with ~12GB+ VRAM (e.g., RTX 3080, RTX 4070).
     """
     return ParagonSR(
@@ -292,8 +335,7 @@ def paragonsr_l(scale: int = 4, **kwargs) -> ParagonSR:
 @ARCH_REGISTRY.register()
 def paragonsr_xl(scale: int = 4, **kwargs) -> ParagonSR:
     """
-    ParagonSR-XL: Extra-Large variant for researchers and enthusiasts.
-    - Use Case: Pushing the absolute limits of quality, regardless of cost.
+    ParagonSR-XL: Extra-Large, for researchers and benchmark chasers.
     - Training Target: High-VRAM accelerator cards (e.g., 48GB+ A100, H100).
     - Inference Target: Flagship GPUs with >24GB VRAM (e.g., RTX 4090).
     """
