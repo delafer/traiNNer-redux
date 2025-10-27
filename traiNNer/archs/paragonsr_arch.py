@@ -64,35 +64,35 @@ from traiNNer.utils.registry import ARCH_REGISTRY
 class ReparamConvV2(nn.Module):
     """
     The final, stable, and powerful reparameterizable block. It fuses a 3x3,
-    a 1x1, and a 3x3 depthwise convolution. It is stateless during training
-    for guaranteed stability with EMA.
+    a 1x1, and a 3x3 depthwise convolution. This version has the corrected
+    fusion logic.
     """
 
     def __init__(
         self, in_channels: int, out_channels: int, stride: int = 1, groups: int = 1
     ) -> None:
         super().__init__()
-        self.in_channels = in_channels
-        self.out_channels = out_channels
-        self.stride = stride
-        self.groups = groups
+        self.in_channels, self.out_channels, self.stride, self.groups = (
+            in_channels,
+            out_channels,
+            stride,
+            groups,
+        )
 
-        # All branches are simple, stateless conv layers
+        # Standard convolutions
         self.conv3x3 = nn.Conv2d(
             in_channels, out_channels, 3, stride, 1, groups=groups, bias=True
         )
         self.conv1x1 = nn.Conv2d(
             in_channels, out_channels, 1, stride, 0, groups=groups, bias=True
         )
-        # Depthwise conv is a powerful feature extractor, but requires in_channels == out_channels
-        # and in_channels == groups. This is true inside our GatedFFN.
-        self.dw_conv3x3 = (
-            nn.Conv2d(
+
+        # Depthwise convolution branch. Only active if it's a valid operation.
+        self.dw_conv3x3 = None
+        if in_channels == out_channels and groups == in_channels:
+            self.dw_conv3x3 = nn.Conv2d(
                 in_channels, out_channels, 3, stride, 1, groups=in_channels, bias=True
             )
-            if in_channels == out_channels
-            else None
-        )
 
     def get_fused_kernels(self) -> (torch.Tensor, torch.Tensor):
         """Performs the mathematical fusion of the training-time branches."""
@@ -108,19 +108,24 @@ class ReparamConvV2(nn.Module):
 
         # Fuse Depthwise 3x3 branch, if it exists
         if self.dw_conv3x3 is not None:
-            # Convert the depthwise kernel to a standard kernel format before adding
-            dw_kernel = self.dw_conv3x3.weight
-            dw_bias = self.dw_conv3x3.bias
-            # Create an identity matrix to map each input channel to its corresponding group
-            i_matrix = (
-                torch.eye(self.in_channels)
-                .view(self.in_channels, self.in_channels, 1, 1)
-                .to(dw_kernel.device)
-            )
-            # Convolve the identity matrix with the depthwise kernel to get the full standard kernel
-            standard_dw_kernel = F.conv2d(
-                i_matrix, dw_kernel, padding=1, groups=self.in_channels
-            )
+            # --- CRITICAL FIX: Direct and Correct Kernel Conversion ---
+            # A depthwise kernel has shape (C_out, 1, kH, kW) where C_out = C_in.
+            # A standard kernel has shape (C_out, C_in / groups, kH, kW).
+            # To convert, we create a zero tensor of the target standard shape and
+            # place the depthwise weights along the diagonal.
+
+            dw_kernel = self.dw_conv3x3.weight.clone()
+            dw_bias = self.dw_conv3x3.bias.clone()
+
+            # The target shape for a standard conv with these groups
+            target_shape = self.conv3x3.weight.shape
+            standard_dw_kernel = torch.zeros(target_shape, device=dw_kernel.device)
+
+            # Place each depthwise filter into its correct position in the standard kernel
+            for i in range(self.in_channels):
+                # in_channel_idx_in_group = i // (in_channels // groups)
+                # For depthwise, groups=in_channels, so this is just 0.
+                standard_dw_kernel[i, 0, :, :] = dw_kernel[i, 0, :, :]
 
             fused_kernel += standard_dw_kernel
             fused_bias += dw_bias
