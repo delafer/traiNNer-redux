@@ -189,21 +189,53 @@ class GatedFFN(nn.Module):
         return self.project_out(self.act(g) * i)
 
 
+class LayerScale(nn.Module):
+    """
+    A learnable scaling factor applied to the output of a residual block.
+    This is a key stabilization technique for very deep networks.
+    From: "Going deeper with Image Transformers" (Touvron et al., 2021)
+    """
+
+    def __init__(self, dim: int, init_values: float = 1e-5) -> None:
+        super().__init__()
+        self.gamma = nn.Parameter(init_values * torch.ones(dim))
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # The permute is necessary because LayerScale is channel-wise.
+        return (
+            (x.permute(0, 2, 3, 1).contiguous() * self.gamma)
+            .permute(0, 3, 1, 2)
+            .contiguous()
+        )
+
+
 class ParagonBlock(nn.Module):
+    """The core block of ParagonSR, now with LayerScale for ultimate stability."""
+
     def __init__(self, dim: int, ffn_expansion: float = 2.0) -> None:
         super().__init__()
         self.norm1 = nn.GroupNorm(num_groups=1, num_channels=dim)
-        self.norm2 = nn.GroupNorm(num_groups=1, num_channels=dim)
         self.context = InceptionDWConv2d(dim)
+        self.norm2 = nn.GroupNorm(num_groups=1, num_channels=dim)
         self.transformer = GatedFFN(dim, expansion_ratio=ffn_expansion)
 
+        # STABILITY UPGRADE: Add a learnable LayerScale to the output of each branch.
+        self.ls1 = LayerScale(dim)
+        self.ls2 = LayerScale(dim)
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # The forward pass now scales the output of each residual branch.
+        # This forces the model to learn in a more controlled and stable manner.
         residual = x
         x_normed = self.norm1(x)
-        x = self.context(x_normed) + residual
+        x = self.context(x_normed)
+        x = residual + self.ls1(x)  # Apply scaling here
+
         residual = x
         x_normed = self.norm2(x)
-        x = self.transformer(x_normed) + residual
+        x = self.transformer(x_normed)
+        x = residual + self.ls2(x)  # And apply scaling here
+
         return x
 
 

@@ -66,8 +66,8 @@ network_g:
 #########################################################################################
 path:
   # pretrain_network_g: experiments/pretrained_models/pretrain.pth
-  param_key_g: ~
-  strict_load_g: true    # Disable strict loading to partially load a pretrain model with a different scale
+  param_key_g: experiments/4x_ParagonSR_S_beforeLayerScale/models/net_g_ema_70000.safetensors
+  strict_load_g: false    # Disable strict loading to partially load a pretrain model with a different scale or architecture version
   resume_state: ~
 
 ###########################################################################################
@@ -81,7 +81,7 @@ train:
   # Optimizer for generator model
   optim_g:
     type: AdamW
-    lr: !!float 2e-4
+    lr: !!float 1e-4
     weight_decay: 0
     betas: [0.9, 0.99]
 
