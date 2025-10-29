@@ -2,13 +2,14 @@
 #########################################################################################
 # ParagonSR_S 4x Perceptual Fine-Tuning Configuration
 # Realistic Workflow Distribution + Identity Learning
+# Enhanced Stability Version
 # Author: Philip Hofmann
 #########################################################################################
 
 name: 4x_paragon_sr_s_perceptual_finetune
 scale: 4
 use_amp: true
-amp_bf16: false
+amp_bf16: true  # Enable BF16 for better stability (your PSNR dip experience)
 use_channels_last: true
 fast_matmul: false
 num_gpu: auto
@@ -37,7 +38,7 @@ datasets:
 
     num_worker_per_gpu: 12  # Higher workers for better data loading during fine-tuning
     batch_size_per_gpu: 4   # Small batch size for fine-tuning (prevents overfitting)
-    accum_iter: 4           # Effective batch size = 4 * 4 * 4 = 64
+    accum_iter: 0           # Disabled for speed (as requested) - training will be slower but more stable
 
   val:
     name: ParagonSR_S 4x Validation
@@ -55,7 +56,7 @@ datasets:
 # Network Settings (ParagonSR_S 4x)
 #####################################################################
 network_g:
-  type: paragonsr  # ParagonSR_S architecture - replace with your actual model name
+  type: paragonsr_s  # ParagonSR_S variant
 
 network_d:
   type: dunet  # Lightweight discriminator for perceptual fine-tuning
@@ -70,58 +71,84 @@ path:
   resume_state: ~
 
 ###########################################################################################
-# Training Settings for Perceptual Fine-Tuning
+# Training Settings for Perceptual Fine-Tuning - STABILITY ENHANCED
 ###########################################################################################
 train:
   ema_decay: 0.9999  # Very high EMA decay for stable fine-tuning
-  grad_clip: false
+  grad_clip: true     # Enable gradient clipping (essential for stability)
+  grad_clip_max_norm: 1.0  # Conservative gradient clipping
 
   optim_g:
     type: AdamW
-    lr: 1e-4  # Lower learning rate for fine-tuning (prevents overfitting)
-    weight_decay: 0
-    betas: [0.9, 0.999]
+    lr: 1e-5          # Reduced LR for stability (as recommended)
+    weight_decay: 0.05  # Slight weight decay for regularization
+    betas: [0.8, 0.99]    # More conservative momentum for GAN stability
   optim_d:
     type: AdamW
-    lr: 5e-5  # Discriminator learning rate (even lower)
+    lr: 3e-6          # Even lower discriminator LR for stability
     weight_decay: 0
-    betas: [0.9, 0.999]
+    betas: [0.8, 0.99]    # More conservative momentum for GAN stability
 
   scheduler:
     type: MultiStepLR
-    milestones: [2000, 4000, 6000]  # Shorter milestones for fine-tuning
+    milestones: [4000, 8000, 12000]  # Extended milestones for fine-tuning
     gamma: 0.5
 
-  total_iter: 8000  # Fine-tuning iterations (shorter than training from scratch)
-  warmup_iter: 200   # Short warmup for fine-tuning
+  total_iter: 15000     # Extended iterations for stable fine-tuning
+  warmup_iter: 5000     # Extended warmup for stability
 
   #######################################################################
-  # Losses Optimized for Perceptual Fine-Tuning
+  # Enhanced Losses for Stability and Realistic Photo Quality
   #######################################################################
   losses:
-    # Reduced pixel loss (we assume pretrain already learned good reconstruction)
-    - type: mssimloss
-      loss_weight: 0.2  # Reduced from 0.5
+    # === FOUNDATIONAL LOSSES ===
 
-    # Enhanced perceptual losses (main focus for fine-tuning)
+    # Pixel/Content preservation (reduced from typical weights)
+    - type: l1loss
+      loss_weight: 0.2   # Increased for better content preservation during GAN training
+      reduction: mean
+
+    # SSIM-based structural loss (good for perceptual quality)
+    - type: mssimloss
+      loss_weight: 0.2
+
+    # === PERCEPTUAL LOSSES (Main focus for fine-tuning) ===
+
+    # Standard perceptual loss (VGG-based)
     - type: perceptualloss
       criterion: charbonnier
-      loss_weight: 0.5  # Increased for perceptual quality
+      loss_weight: 0.5
 
-    # Additional perceptual losses
+    # Enhanced color perception
     - type: hsluvloss
       criterion: charbonnier
-      loss_weight: 1.5  # Increased for color perception
+      loss_weight: 1.0    # Moderate weight for good color reproduction
 
+    # Structural similarity
     - type: cosimloss
-      loss_weight: 1.5  # Structural similarity for better fine-tuning
+      loss_weight: 1.0
 
-    # Moderate GAN loss (not too aggressive for fine-tuning)
+    # === ADVANCED PERCEPTUAL LOSSES ===
+
+    # Contextual loss for better texture preservation
+    - type: contextualloss
+      loss_weight: 0.3
+
+    # DISTS Loss - Excellent for perceptual quality and natural textures
+    - type: distsloss
+      loss_weight: 0.1
+
+    # Focal Frequency Loss - Great for sharp details and edges
+    - type: focal_frequency_loss
+      loss_weight: 0.05
+
+    # === GAN LOSS (Optimized for stability + effectiveness) ===
+
     - type: ganloss
       gan_type: r3gan
-      loss_weight: 0.05  # Reduced from 0.1 for fine-tuning
-      r1_weight: 5.0     # Reduced penalty
-      r2_weight: 5.0
+      loss_weight: 0.04    # Increased from 0.008 for better perceptual quality
+      r1_weight: 5.0       # Moderate R1 penalty
+      r2_weight: 5.0       # Moderate R2 penalty
 
   #######################################################################
   # REALISTIC WORKFLOW DISTRIBUTION CONFIGURATION
