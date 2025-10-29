@@ -647,6 +647,24 @@ class ReduxOptions(StrictStruct):
         ),
     ] = (75, 95)
 
+    # Degradation Sequence Control (Added by Philip Hofmann for ParagonSR)
+    enable_sequences: Annotated[
+        bool,
+        Meta(description="Enable degradation sequence control for realistic chains."),
+    ] = False
+    sequence_probability: Annotated[
+        float,
+        Meta(
+            description="Overall probability of applying a sequence (vs individual degradations)."
+        ),
+    ] = 0.5
+    predefined_sequences: Annotated[
+        dict[str, Any],
+        Meta(
+            description="Configuration for predefined sequences (internet, phone, dslr, social)."
+        ),
+    ] = field(default_factory=dict)
+
     dataroot_lq_prob: Annotated[
         float,
         Meta(description="Probability of using paired LR data instead of OTF LR data."),

@@ -60,6 +60,17 @@ class RealESRGANModel(SRModel):
     def __init__(self, opt: ReduxOptions) -> None:
         super().__init__(opt)
 
+        # Initialize sequence controller if enabled
+        self.sequence_controller: SequenceController | None = None
+        if hasattr(opt, "enable_sequences") and opt.enable_sequences:
+            sequences = create_predefined_sequences()
+            self.sequence_controller = SequenceController(sequences)
+            logger = get_root_logger()
+            logger.info(
+                "ParagonSR sequence control enabled with %d predefined sequences.",
+                len(sequences),
+            )
+
         self.queue_lr: Tensor | None = None
         self.queue_gt: Tensor | None = None
         self.queue_ptr = 0
