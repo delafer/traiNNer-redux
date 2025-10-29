@@ -63,7 +63,7 @@ class RealESRGANModel(SRModel):
         # Initialize sequence controller if enabled
         self.sequence_controller: SequenceController | None = None
         if hasattr(opt, "enable_sequences") and opt.enable_sequences:
-            sequences = create_predefined_sequences()
+            sequences = create_enhanced_predefined_sequences()
             self.sequence_controller = SequenceController(sequences)
             logger = get_root_logger()
             logger.info(

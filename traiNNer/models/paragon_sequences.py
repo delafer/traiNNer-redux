@@ -1,10 +1,38 @@
 """
-Degradation sequence control for ParagonSR.
+Comprehensive Degradation Sequence Control for ParagonSR.
 
 This module implements realistic degradation sequences that simulate
 real-world photography and internet workflows. The sequence control
-system allows for realistic degradation chains that better represent
-actual image degradation processes.
+system supports BOTH Real-ESRGAN degradations and ParagonSR extended
+degradations for truly realistic degradation chains.
+
+SUPPORTED DEGRADATION TYPES:
+
+Real-ESRGAN Core Degradations:
+- gaussian_noise: Apply Gaussian noise with configurable sigma range
+- poisson_noise: Apply Poisson noise with configurable scale range
+- blur: Apply Gaussian blur using kernel matrices
+- resize: Resize images using various interpolation modes
+- jpeg_compression: Apply JPEG compression artifacts
+
+ParagonSR Extended Degradations:
+- webp_compression: Modern WebP compression artifacts
+- avif_compression: Next-gen AVIF compression artifacts
+- heif_compression: HEIF/HEIC compression artifacts
+- motion_blur: Realistic motion blur simulation
+- lens_distortion: Camera lens distortion effects
+- exposure_error: Exposure/brightness correction errors
+- color_temp_shift: Color temperature adjustments
+- sensor_noise: Camera sensor noise patterns
+- rolling_shutter: CMOS rolling shutter effects
+- oversharpening: Oversharpening artifact simulation
+- chromatic_aberration: Lens chromatic aberration
+- demosaicing: Demosaicing artifact simulation
+- aliasing: Aliasing artifact simulation
+
+The sequence system allows users to create custom workflows by combining
+these degradations in realistic orders that simulate actual photography
+workflows from capture → processing → compression → sharing.
 
 Author: Philip Hofmann
 """
@@ -113,9 +141,14 @@ class SequenceController:
     """Controls the application of degradation sequences."""
 
     def __init__(self, sequences: list[DegradationSequence]) -> None:
-        """Initialize with a list of sequences."""
+        """Initialize with a list of sequences.
+
+        Args:
+            sequences: List of DegradationSequence objects
+        """
         self.sequences = sequences
         self.total_probability = sum(seq.probability for seq in sequences)
+        self.jpeger = None  # Initialize jpeger for JPEG compression
 
         if self.total_probability > 1.0:
             raise ValueError(
@@ -171,12 +204,74 @@ class SequenceController:
     def _apply_step(
         self, img_tensor: torch.Tensor, opt, step: DegradationStep
     ) -> torch.Tensor:
-        """Apply a single degradation step."""
+        """Apply a single degradation step.
+
+        Supports both Real-ESRGAN degradations and ParagonSR extended degradations:
+
+        Real-ESRGAN Degradations:
+        - gaussian_noise, poisson_noise, blur, resize, jpeg_compression
+
+        ParagonSR Extended Degradations:
+        - webp_compression, avif_compression, heif_compression, motion_blur,
+          lens_distortion, exposure_error, color_temp_shift, sensor_noise,
+          rolling_shutter, oversharpening, chromatic_aberration,
+          demosaicing, aliasing
+        """
         # Create a mock opt object with step-specific parameters
         step_opt = self._create_step_opt(opt, step)
 
-        # Apply the degradation based on type
-        if step.degradation_type == "webp_compression":
+        # Apply Real-ESRGAN degradations
+        if step.degradation_type == "gaussian_noise":
+            from traiNNer.data.degradations import random_add_gaussian_noise_pt
+
+            return random_add_gaussian_noise_pt(
+                img_tensor,
+                sigma_range=step.get_parameters().get("noise_range", (0, 15)),
+                clip=True,
+                rounds=False,
+                gray_prob=step.get_parameters().get("gray_noise_prob", 0),
+            )
+        elif step.degradation_type == "poisson_noise":
+            from traiNNer.data.degradations import random_add_poisson_noise_pt
+
+            return random_add_poisson_noise_pt(
+                img_tensor,
+                scale_range=step.get_parameters().get(
+                    "poisson_scale_range", (0.01, 1.5)
+                ),
+                gray_prob=step.get_parameters().get("gray_noise_prob", 0),
+                clip=True,
+                rounds=False,
+            )
+        elif step.degradation_type == "blur":
+            from traiNNer.utils.img_process_util import filter2d
+
+            # Use step_opt.blur_kernel as the kernel (passed via parameters)
+            kernel = step.get_parameters().get("blur_kernel")
+            if kernel is not None:
+                return filter2d(img_tensor, kernel)
+            else:
+                return img_tensor  # Skip if no kernel provided
+        elif step.degradation_type == "resize":
+            from traiNNer.data.degradations import resize_pt
+
+            scale_factor = step.get_parameters().get("scale_factor", 1.0)
+            mode = step.get_parameters().get("mode", "bicubic")
+            return resize_pt(img_tensor, scale_factor=scale_factor, mode=mode)
+        elif step.degradation_type == "jpeg_compression":
+            # Use built-in jpeger
+            jpeger = getattr(self, "jpeger", None)
+            if jpeger is None:
+                from traiNNer.utils import DiffJPEG
+
+                self.jpeger = DiffJPEG(differentiable=False).cuda()
+            quality_range = step.get_parameters().get("jpeg_range", (75, 95))
+            quality = RNG.get_rng().uniform(quality_range[0], quality_range[1])
+            img_clamped = torch.clamp(img_tensor, 0, 1)
+            return self.jpeger(img_clamped, quality=quality)
+
+        # Apply ParagonSR extended degradations
+        elif step.degradation_type == "webp_compression":
             return ParagonOTF.apply_webp_compression(img_tensor, step_opt)
         elif step.degradation_type == "avif_compression":
             return ParagonOTF.apply_avif_compression(img_tensor, step_opt)
