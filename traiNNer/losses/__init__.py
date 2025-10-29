@@ -10,10 +10,20 @@ from traiNNer.losses.gan_loss import (
     gradient_penalty_loss,
     r1_penalty,
 )
+
+# Import the new R3GAN loss classes for direct access (registered as "r3gan_loss" and "multi_scale_r3gan_loss")
+from traiNNer.losses.r3gan_loss import MultiScaleR3GANLoss, R3GANLoss
 from traiNNer.utils import get_root_logger, scandir
 from traiNNer.utils.registry import LOSS_REGISTRY
 
-__all__ = ["build_loss", "g_path_regularize", "gradient_penalty_loss", "r1_penalty"]
+__all__ = [
+    "build_loss",
+    "g_path_regularize",
+    "gradient_penalty_loss",
+    "r1_penalty",
+    "R3GANLoss",
+    "MultiScaleR3GANLoss",
+]
 
 # automatically scan and import loss modules for registry
 # scan all the files under the 'losses' folder and collect files ending with '_loss.py'

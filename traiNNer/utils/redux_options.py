@@ -561,6 +561,92 @@ class ReduxOptions(StrictStruct):
         ),
     ] = (0.6, 0.9)
 
+    # Motion Blur Simulation (Added by Philip Hofmann for ParagonSR)
+    motion_blur_prob: Annotated[
+        float,
+        Meta(description="Probability of applying motion blur artifacts."),
+    ] = 0
+    motion_blur_kernel_size: Annotated[
+        tuple[int, int],
+        Meta(
+            description="Kernel size range for motion blur, in the format [min_size, max_size]."
+        ),
+    ] = (5, 15)
+    motion_blur_angle_range: Annotated[
+        tuple[float, float],
+        Meta(
+            description="Angle range for motion blur in degrees, in the format [min_angle, max_angle]."
+        ),
+    ] = (0, 360)
+
+    # Lens Distortion Simulation (Added by Philip Hofmann for ParagonSR)
+    lens_distort_prob: Annotated[
+        float,
+        Meta(description="Probability of applying lens distortion artifacts."),
+    ] = 0
+    lens_distort_strength_range: Annotated[
+        tuple[float, float],
+        Meta(
+            description="Strength range for lens distortion, in the format [min_strength, max_strength]."
+        ),
+    ] = (-0.3, 0.3)
+
+    # Exposure Error Simulation (Added by Philip Hofmann for ParagonSR)
+    exposure_prob: Annotated[
+        float,
+        Meta(description="Probability of applying exposure errors."),
+    ] = 0
+    exposure_factor_range: Annotated[
+        tuple[float, float],
+        Meta(
+            description="Exposure factor range, in the format [min_factor, max_factor]."
+        ),
+    ] = (0.5, 2.0)
+
+    # Color Temperature Shift Simulation (Added by Philip Hofmann for ParagonSR)
+    color_temp_prob: Annotated[
+        float,
+        Meta(description="Probability of applying color temperature shifts."),
+    ] = 0
+    color_temp_shift_range: Annotated[
+        tuple[float, float],
+        Meta(
+            description="Color temperature shift range (-1 to 1, negative=cooler, positive=warmer)."
+        ),
+    ] = (-0.2, 0.2)
+
+    # Sensor Noise Simulation (Added by Philip Hofmann for ParagonSR)
+    sensor_noise_prob: Annotated[
+        float,
+        Meta(description="Probability of applying sensor noise patterns."),
+    ] = 0
+    sensor_noise_std_range: Annotated[
+        tuple[float, float],
+        Meta(description="Standard deviation range for sensor noise."),
+    ] = (0.01, 0.1)
+
+    # Rolling Shutter Simulation (Added by Philip Hofmann for ParagonSR)
+    rolling_shutter_prob: Annotated[
+        float,
+        Meta(description="Probability of applying rolling shutter artifacts."),
+    ] = 0
+    rolling_shutter_strength_range: Annotated[
+        tuple[float, float],
+        Meta(description="Strength range for rolling shutter distortion."),
+    ] = (-0.1, 0.1)
+
+    # HEIF Compression Artifacts (Added by Philip Hofmann for ParagonSR)
+    heif_prob: Annotated[
+        float,
+        Meta(description="Probability of applying HEIF compression artifacts."),
+    ] = 0
+    heif_range: Annotated[
+        tuple[float, float],
+        Meta(
+            description="Quality range for HEIF compression, in the format [min_quality, max_quality]."
+        ),
+    ] = (75, 95)
+
     dataroot_lq_prob: Annotated[
         float,
         Meta(description="Probability of using paired LR data instead of OTF LR data."),

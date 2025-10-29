@@ -23,10 +23,23 @@ from traiNNer.data.degradations import (
 from traiNNer.data.transforms import paired_random_crop
 from traiNNer.models.sr_model import SRModel
 from traiNNer.utils import RNG, DiffJPEG, get_root_logger
+
+# ----------------------------------------------------------------------
+# Extended OTF degradations added by Philip Hofmann for ParagonSR
+# Degradations included:
+#   • WebP compression (webp_prob, webp_range)
+#   • AVIF compression (avif_prob, avif_range)
+#   • Oversharpening (oversharpen_prob, oversharpen_strength)
+#   • Chromatic aberration (chromatic_aberration_prob)
+#   • Demosaicing artifacts (demosaic_prob)
+#   • Aliasing artifacts (aliasing_prob, aliasing_scale_range)
+# ----------------------------------------------------------------------
 from traiNNer.utils.img_process_util import USMSharp, filter2d
 from traiNNer.utils.redux_options import ReduxOptions
 from traiNNer.utils.registry import MODEL_REGISTRY
 from traiNNer.utils.types import DataFeed
+
+from .paragon_otf_degradations import ParagonOTF
 
 OTF_DEBUG_PATH = osp.abspath(
     osp.abspath(osp.join(osp.join(sys.argv[0], osp.pardir), "./debug/otf"))
@@ -391,9 +404,9 @@ class RealESRGANModel(SRModel):
         # initialize
         b, c, h, w = self.lq.size()
         if self.queue_lr is None:
-            assert self.queue_size % b == 0, (
-                f"queue size {self.queue_size} should be divisible by batch size {b}"
-            )
+            assert (
+                self.queue_size % b == 0
+            ), f"queue size {self.queue_size} should be divisible by batch size {b}"
             self.queue_lr = torch.zeros(self.queue_size, c, h, w).cuda()
             _, c, h, w = self.gt.size()
             self.queue_gt = torch.zeros(self.queue_size, c, h, w).cuda()
@@ -615,9 +628,9 @@ class RealESRGANModel(SRModel):
             #   2. JPEG compression + [resize back + sinc filter]
             # Empirically, we find other combinations (sinc + JPEG + Resize) will introduce twisted lines.
 
-            assert len(self.opt.resize_mode_list3) == len(self.opt.resize_mode_prob3), (
-                "resize_mode_list3 and resize_mode_prob3 must be the same length"
-            )
+            assert len(self.opt.resize_mode_list3) == len(
+                self.opt.resize_mode_prob3
+            ), "resize_mode_list3 and resize_mode_prob3 must be the same length"
 
             mode = random.choices(
                 self.opt.resize_mode_list3, weights=self.opt.resize_mode_prob3
@@ -649,11 +662,25 @@ class RealESRGANModel(SRModel):
                 )
                 out = filter2d(out, self.sinc_kernel)
 
-            # Apply WebP compression
-            out = self._apply_webp_compression(out)
+            # Apply extended degradations (Added by Philip Hofmann for ParagonSR)
+            # Modern compression formats
+            out = ParagonOTF.apply_webp_compression(out, self.opt)
+            out = ParagonOTF.apply_avif_compression(out, self.opt)
+            out = ParagonOTF.apply_heif_compression(out, self.opt)
 
-            # Apply AVIF compression
-            out = self._apply_avif_compression(out)
+            # Camera artifacts and effects
+            out = ParagonOTF.apply_motion_blur(out, self.opt)
+            out = ParagonOTF.apply_lens_distortion(out, self.opt)
+            out = ParagonOTF.apply_exposure_errors(out, self.opt)
+            out = ParagonOTF.apply_color_temperature_shift(out, self.opt)
+            out = ParagonOTF.apply_sensor_noise(out, self.opt)
+            out = ParagonOTF.apply_rolling_shutter(out, self.opt)
+
+            # Additional realistic degradations
+            out = ParagonOTF.apply_oversharpening(out, self.opt)
+            out = ParagonOTF.apply_chromatic_aberration(out, self.opt)
+            out = ParagonOTF.apply_demosaicing_artifacts(out, self.opt)
+            out = ParagonOTF.apply_aliasing_artifacts(out, self.opt)
 
             # clamp and round
             self.lq = torch.clamp((out * 255.0).round(), 0, 255) / 255.0

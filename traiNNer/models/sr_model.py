@@ -22,6 +22,7 @@ from traiNNer.archs import build_network
 from traiNNer.archs.arch_info import ARCHS_WITHOUT_FP16
 from traiNNer.data.base_dataset import BaseDataset
 from traiNNer.losses import build_loss
+from traiNNer.losses.r3gan_loss import R3GANLoss
 from traiNNer.metrics import calculate_metric
 from traiNNer.models.base_model import BaseModel
 from traiNNer.utils import get_root_logger, imwrite, tensor2img
@@ -397,7 +398,8 @@ class SRModel(BaseModel):
                 )  # self.output: rgb
 
                 assert isinstance(self.output, Tensor)
-                l_g_total = torch.tensor(0.0, device=self.output.device)
+                # Use a known tensor (lq) to obtain the device; self.output is guaranteed to be set after generator forward
+                l_g_total = torch.tensor(0.0, device=self.lq.device)
 
                 lq_target = None
 
@@ -441,9 +443,9 @@ class SRModel(BaseModel):
                             self.l_g_gan_ema = l_g_gan_ema
 
                     elif label == "l_g_ldl":
-                        assert self.net_g_ema is not None, (
-                            "ema_decay must be enabled for LDL loss"
-                        )
+                        assert (
+                            self.net_g_ema is not None
+                        ), "ema_decay must be enabled for LDL loss"
                         with torch.inference_mode():
                             output_ema = pixelformat2rgb_pt(
                                 self.net_g_ema(lq),
@@ -523,12 +525,31 @@ class SRModel(BaseModel):
             ):
                 # real
                 real_d_pred = self.net_d(self.gt)
-                l_d_real = cri_gan(real_d_pred, True, is_disc=True)
+                # Pass real and fake images for R1/R2 gradient penalties
+                l_d_real = cri_gan(
+                    real_d_pred,
+                    True,
+                    is_disc=True,
+                    real_images=self.gt,
+                    fake_images=self.output.detach()
+                    if self.output is not None
+                    else None,
+                )
                 loss_dict["l_d_real"] = l_d_real
                 loss_dict["out_d_real"] = torch.mean(real_d_pred.detach())
                 # fake
-                fake_d_pred = self.net_d(self.output.detach())
-                l_d_fake = cri_gan(fake_d_pred, False, is_disc=True)
+                # Use generated output if available; otherwise fall back to real images (avoids None errors)
+                fake_input = self.output if self.output is not None else self.gt
+                fake_d_pred = self.net_d(fake_input)
+                l_d_fake = cri_gan(
+                    fake_d_pred,
+                    False,
+                    is_disc=True,
+                    real_images=self.gt,
+                    fake_images=self.output.detach()
+                    if self.output is not None
+                    else None,
+                )
                 loss_dict["l_d_fake"] = l_d_fake
                 loss_dict["out_d_fake"] = torch.mean(fake_d_pred.detach())
 
@@ -772,9 +793,9 @@ class SRModel(BaseModel):
                             self.opt.path.visualization, f"{dataset_name} - {img_name}"
                         )
                     else:
-                        assert dataloader.dataset.opt.dataroot_lq is not None, (
-                            "dataroot_lq is required for val set"
-                        )
+                        assert (
+                            dataloader.dataset.opt.dataroot_lq is not None
+                        ), "dataroot_lq is required for val set"
                         lq_path = val_data["lq_path"][0]
 
                         # multiple root paths are supported, find the correct root path for each lq_path

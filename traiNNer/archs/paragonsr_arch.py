@@ -10,6 +10,8 @@ inference speed. It is the result of a rigorous design and debugging process,
 representing a synergistic blend of the most effective and efficient ideas from
 a multitude of modern SISR models.
 
+Licensed under the MIT License.
+
 -------------------------------------------------------------------------------------
 Core Design Philosophy & Strengths:
 
