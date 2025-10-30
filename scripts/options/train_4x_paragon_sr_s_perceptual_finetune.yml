@@ -10,7 +10,7 @@ name: 4x_paragon_sr_s_perceptual_finetune
 scale: 4
 use_amp: true
 amp_bf16: true  # Enable BF16 for better stability (your PSNR dip experience)
-use_channels_last: true
+use_channels_last: false
 fast_matmul: false
 num_gpu: auto
 # manual_seed: 1024
@@ -76,26 +76,25 @@ path:
 train:
   ema_decay: 0.9999  # Very high EMA decay for stable fine-tuning
   grad_clip: true     # Enable gradient clipping (essential for stability)
-  grad_clip_max_norm: 1.0  # Conservative gradient clipping
 
   optim_g:
     type: AdamW
-    lr: 1e-5          # Reduced LR for stability (as recommended)
-    weight_decay: 0.05  # Slight weight decay for regularization
-    betas: [0.8, 0.99]    # More conservative momentum for GAN stability
+    lr: 5e-6          # Reduced LR for stability
+    weight_decay: 0.02  # Slight weight decay for regularization
+    betas: [0.85, 0.98]    # More aggressive beta1 for faster adaptation
   optim_d:
     type: AdamW
-    lr: 3e-6          # Even lower discriminator LR for stability
+    lr: 5e-6          # Needs to keep up
     weight_decay: 0
-    betas: [0.8, 0.99]    # More conservative momentum for GAN stability
+    betas: [0.85, 0.98]  # Match generator for balance
 
   scheduler:
     type: MultiStepLR
-    milestones: [4000, 8000, 12000]  # Extended milestones for fine-tuning
+    milestones: [2000, 4000, 6000, 8000] # Faster decay for fine-tuning
     gamma: 0.5
 
-  total_iter: 15000     # Extended iterations for stable fine-tuning
-  warmup_iter: 5000     # Extended warmup for stability
+  total_iter: 12000     # Extended iterations for stable fine-tuning
+  warmup_iter: 2000     # Extended warmup for stability
 
   #######################################################################
   # Enhanced Losses for Stability and Realistic Photo Quality
@@ -105,50 +104,56 @@ train:
 
     # Pixel/Content preservation (reduced from typical weights)
     - type: l1loss
-      loss_weight: 0.2   # Increased for better content preservation during GAN training
+      loss_weight: 0.3   # Increased for better content preservation during GAN training
       reduction: mean
 
     # SSIM-based structural loss (good for perceptual quality)
     - type: mssimloss
-      loss_weight: 0.2
+      loss_weight: 0.25
 
     # === PERCEPTUAL LOSSES (Main focus for fine-tuning) ===
 
     # Standard perceptual loss (VGG-based)
     - type: perceptualloss
       criterion: charbonnier
-      loss_weight: 0.5
+      loss_weight: 1.0
 
     # Enhanced color perception
     - type: hsluvloss
       criterion: charbonnier
-      loss_weight: 1.0    # Moderate weight for good color reproduction
+      loss_weight: 0.8    # Moderate weight for good color reproduction
 
     # Structural similarity
     - type: cosimloss
-      loss_weight: 1.0
+      loss_weight: 0.6
 
     # === ADVANCED PERCEPTUAL LOSSES ===
 
     # Contextual loss for better texture preservation
     - type: contextualloss
-      loss_weight: 0.3
+      loss_weight: 0.2
 
-    # DISTS Loss - Excellent for perceptual quality and natural textures
-    - type: distsloss
-      loss_weight: 0.1
+    - type: adistsloss      # Better than standard DISTS
+      loss_weight: 0.15
 
     # Focal Frequency Loss - Great for sharp details and edges
-    - type: focal_frequency_loss
+    - type: ffloss
+      loss_weight: 0.03
+
+    - type: gradientvarianceloss
       loss_weight: 0.05
 
     # === GAN LOSS (Optimized for stability + effectiveness) ===
 
     - type: ganloss
-      gan_type: r3gan
-      loss_weight: 0.04    # Increased from 0.008 for better perceptual quality
-      r1_weight: 5.0       # Moderate R1 penalty
-      r2_weight: 5.0       # Moderate R2 penalty
+      gan_type: multiscaler3gan
+      loss_weight: 0.025    #
+      r1_weight: 3.0       # R1 penalty
+      r2_weight: 3.0       # R2 penalty
+
+    # === ANTI-PATTERN LOSS (Critical for PixelShuffle) ===
+    - type: checkerboardloss
+      loss_weight: 0.1  # Strong weight to prevent checkerboard patterns
 
   #######################################################################
   # REALISTIC WORKFLOW DISTRIBUTION CONFIGURATION
@@ -158,11 +163,11 @@ train:
   high_order_degradation: true
 
   # === IDENTITY LEARNING: 10% Clean Pass-Through ===
-  p_clean: 0.1  # 10% chance to pass clean images through (identity learning)
+  p_clean: 0.05  # 5% chance to pass clean images through (identity learning)
 
   # === REALISTIC WORKFLOW SEQUENCES ===
   enable_sequences: true
-  sequence_probability: 0.9  # 90% chance to use realistic workflows
+  sequence_probability: 0.95  # 95% chance to use realistic workflows
 
   predefined_sequences:
 
@@ -230,7 +235,7 @@ train:
     # 4. Pure Phone Camera (heavy processing)
     phone_camera:
       enabled: true
-      probability: 0.15  # 15% chance
+      probability: 0.15
       description: "Phone camera with typical processing"
       sequence_type: "combined"
       steps:
@@ -250,7 +255,7 @@ train:
     # 5. Phone Camera → Internet Upload
     phone_to_internet:
       enabled: true
-      probability: 0.15  # 15% chance
+      probability: 0.15
       description: "Phone camera → processing → internet sharing"
       sequence_type: "combined"
       steps:
