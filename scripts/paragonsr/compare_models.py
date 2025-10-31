@@ -9,7 +9,7 @@ against the ONNX exported models to identify if checkerboard/pixelation issues
 come from training or ONNX conversion.
 
 Usage:
-python -m scripts.paragonsr.compare_models --checkpoint path/to/trained_model.safetensors --onnx path/to/model_fp32.onnx --images path/to/validation_images/ --scale 4 --model_variant s
+python -m scripts.paragonsr.compare_models --checkpoint path/to/trained_model.safetensors --onnx path/to/model_fp32.onnx --images path/to/validation_images/ --scale 4 --model_variant s --input_size 256
 
 This will generate comparison images showing:
 - Original LR input

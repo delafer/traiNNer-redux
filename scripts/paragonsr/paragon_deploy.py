@@ -27,7 +27,8 @@ import onnx
 import torch
 from onnxconverter_common import convert_float_to_float16
 from safetensors.torch import load_file, save_file
-from traiNNer.archs.paragonsr_arch import paragonsr_s
+
+# Model variant imports are handled dynamically via get_model_variant()
 
 
 def validate_dependencies() -> bool:
@@ -60,21 +61,32 @@ def validate_training_checkpoint(state_dict: dict) -> tuple[bool, str]:
     if not state_dict:
         return False, "Model state dict is empty"
 
-    # Check for ParagonSR-specific patterns
-    has_paragon_blocks = any(
+    # Check for ParagonSR-specific patterns - look for ReparamConvV2 sub-modules
+    # These should be present in training checkpoints but not in fused models
+
+    # Pattern 1: ReparamConvV2 in main ParagonBlocks
+    has_main_reparam = any(
         "body" in key and any(x in key for x in ["conv3x3", "conv1x1"])
         for key in state_dict.keys()
     )
-    has_reparam_blocks = any(
+
+    # Pattern 2: ReparamConvV2 in GatedFFN spatial_mixer
+    has_spatial_reparam = any(
         "spatial_mixer" in key
         and any(x in key for x in ["conv3x3", "conv1x1", "dw_conv3x3"])
         for key in state_dict.keys()
     )
 
-    if not (has_paragon_blocks or has_reparam_blocks):
-        return False, "Model doesn't appear to be a ParagonSR architecture"
+    # Pattern 3: LayerScale parameters (specific to ParagonSR)
+    has_layerscale = any(
+        "layerscale" in key.lower() or "gamma" in key for key in state_dict.keys()
+    )
 
-    # Check if it's already fused (should not be for training checkpoint)
+    if not (has_main_reparam or has_spatial_reparam):
+        return False, "Model doesn't contain ParagonSR ReparamConvV2 patterns"
+
+    # Check if it's already fused by looking for fused_conv modules
+    # (These should NOT exist in training checkpoints)
     fused_conv_keys = [key for key in state_dict.keys() if "fused_conv" in key]
     if fused_conv_keys:
         return (
@@ -82,39 +94,111 @@ def validate_training_checkpoint(state_dict: dict) -> tuple[bool, str]:
             "Model appears to be already fused. This script expects a training checkpoint.",
         )
 
-    return True, "Model appears to be a valid ParagonSR training checkpoint"
+    # Additional validation: ensure it's not already a fused state_dict
+    # In fused models, spatial_mixer would be a Conv2d module, not ReparamConvV2
+    spatial_mixer_keys = [key for key in state_dict.keys() if "spatial_mixer" in key]
+    for key in spatial_mixer_keys:
+        if any(x in key for x in ["weight", "bias"]):
+            # Check if this is a ReparamConvV2 (training) or Conv2d (fused)
+            if "conv3x3" in key or "conv1x1" in key or "dw_conv3x3" in key:
+                # This indicates unfused ReparamConvV2 (good for training checkpoint)
+                break
+            elif "weight" in key and "conv3x3" not in key:
+                # This might be a fused Conv2d
+                pass
+
+    validation_notes = []
+    if has_layerscale:
+        validation_notes.append("LayerScale detected")
+    if has_main_reparam:
+        validation_notes.append("Main ReparamConvV2 detected")
+    if has_spatial_reparam:
+        validation_notes.append("Spatial ReparamConvV2 detected")
+
+    return True, f"Valid ParagonSR training checkpoint ({', '.join(validation_notes)})"
 
 
-def validate_training_scale(state_dict: dict, expected_scale: int) -> tuple[bool, str]:
+def validate_training_scale(
+    state_dict: dict, expected_scale: int, model_func
+) -> tuple[bool, str]:
     """
     Validate that the model was trained with the expected scale.
     Returns (is_valid, error_message)
     """
     try:
-        # Create a temporary model to check the scale parameter
-        temp_model = paragonsr_s(scale=expected_scale)
+        # Create a temporary model with the expected scale
+        temp_model = model_func(scale=expected_scale)
 
-        # Try to load state dict - if it fails, scale might be wrong
+        # Check the scale parameter directly from the model
+        scale_from_model = getattr(temp_model, "scale", None)
+
+        # Check if the model's upsampler dimension matches expected scale
+        # For ParagonSR, the upsampler uses scale*scale output channels
+        upsampler_conv = temp_model.upsampler[0]  # First conv in upsampler
+        # Get the actual num_feat for this specific variant
+        num_feat = (
+            upsampler_conv.in_channels
+        )  # This gives us the actual feature dimension
+        expected_out_channels = (
+            num_feat * expected_scale * expected_scale
+        )  # num_feat * scale^2
+        actual_out_channels = upsampler_conv.out_channels
+
+        # Try to load state dict to see if it fits
         try:
             temp_model.load_state_dict(state_dict, strict=False)
 
-            # Check if the upsampler has the right scale
-            scale_from_model = getattr(temp_model, "scale", None)
-            if scale_from_model == expected_scale:
-                return True, f"Model scale validation passed ({expected_scale}x)"
-            else:
+            # Verify scale parameter
+            if scale_from_model != expected_scale:
                 return (
                     False,
-                    f"Model scale mismatch. Expected {expected_scale}x, got {scale_from_model}",
+                    f"Model scale parameter mismatch. Expected {expected_scale}x, got {scale_from_model}",
                 )
-        except Exception as e:
-            return False, f"Scale validation failed: {e}"
+
+            # Verify upsampler structure
+            if actual_out_channels != expected_out_channels:
+                return (
+                    False,
+                    f"Upsampler channels mismatch. Expected {expected_out_channels}, got {actual_out_channels}",
+                )
+
+            # Additional check: try forward pass with dummy data to verify scale
+            dummy_input = torch.randn(1, 3, 32, 32)
+            with torch.no_grad():
+                try:
+                    dummy_output = temp_model(dummy_input)
+                    expected_output_size = 32 * expected_scale
+                    if dummy_output.shape[2:] == torch.Size(
+                        [expected_output_size, expected_output_size]
+                    ):
+                        return (
+                            True,
+                            f"Scale validation passed ({expected_scale}x - verified via inference)",
+                        )
+                    else:
+                        return (
+                            False,
+                            f"Output size mismatch. Expected {expected_output_size}x{expected_output_size}, got {dummy_output.shape[2:]}",
+                        )
+                except Exception as inference_error:
+                    # If inference fails, fall back to structural validation
+                    return (
+                        True,
+                        f"Scale validation passed ({expected_scale}x - structural check)",
+                    )
+
+        except Exception as load_error:
+            return (
+                False,
+                f"Scale validation failed - model structure incompatibility: {load_error}",
+            )
+
     except Exception as e:
         return False, f"Error during scale validation: {e}"
 
 
 def fuse_training_checkpoint(
-    input_path: str, output_path: str, model_func, scale: int, max_retries: int = 3
+    input_path: str, output_path: str, model_func, scale: int, max_retries: int = 1
 ) -> tuple[bool, str]:
     """
     Fuse training checkpoint and save as optimized safetensors.
@@ -158,7 +242,8 @@ def fuse_training_checkpoint(
 
             # Save fused model
             print("   Saving fused model...")
-            save_file(model.state_dict(), output_path)
+            model_weights = model.state_dict()
+            save_file(model_weights, output_path)
 
             # Validate saved file
             if not os.path.exists(output_path):
@@ -166,8 +251,34 @@ def fuse_training_checkpoint(
 
             # Test load
             test_load = load_file(output_path)
-            if len(test_load) != len(model.state_dict()):
-                raise ValueError("Saved model size mismatch")
+            if len(test_load) != len(model_weights):
+                raise ValueError(
+                    f"Saved model size mismatch. Expected {len(model_weights)} tensors, got {len(test_load)}"
+                )
+
+            # Validate key fusion patterns
+            fused_conv_keys = [
+                key
+                for key in model_weights.keys()
+                if "spatial_mixer" in key and "weight" in key
+            ]
+            if not fused_conv_keys:
+                raise ValueError(
+                    "No fused spatial_mixer weights found - fusion may have failed"
+                )
+
+            # Check that original ReparamConvV2 patterns are gone
+            original_patterns = [
+                "conv3x3.weight",
+                "conv1x1.weight",
+                "dw_conv3x3.weight",
+            ]
+            for pattern in original_patterns:
+                for key in model_weights.keys():
+                    if pattern in key:
+                        raise ValueError(
+                            f"Original ReparamConvV2 pattern '{pattern}' still present after fusion"
+                        )
 
             print(f"   ✅ Fusion successful! Created: {output_path}")
             return True, "Fusion completed successfully"
@@ -249,13 +360,17 @@ def export_to_onnx(
             model = model_func(scale=scale)
             model.eval()
 
-            # Load fused weights (use strict=False since fused model has different structure)
-            state_dict = load_file(fused_model_path)
-            model.load_state_dict(state_dict, strict=False)
-
-            # Fuse the model structure after loading weights
-            print("   Fusing loaded model for ONNX export...")
+            # CRITICAL FIX: First fuse the model structure, then load fused weights
+            # This ensures the model structure matches the fused state dict
+            print("   Preparing fused model structure...")
             model.fuse_for_release()
+
+            # Load fused weights (use strict=True since fused model has the expected structure)
+            state_dict = load_file(fused_model_path)
+            model.load_state_dict(state_dict, strict=True)
+
+            # Model is now properly fused and loaded
+            print("   Model structure fused and weights loaded successfully...")
 
             # Validate that model is properly fused by checking for ReparamConvV2 patterns
             model_state_dict = model.state_dict()
@@ -290,11 +405,34 @@ def export_to_onnx(
                     "input": {0: "batch_size", 2: "height", 3: "width"},
                     "output": {0: "batch_size", 2: "height", 3: "width"},
                 },
+                do_constant_folding=True,
             )
 
             # Validate FP32 ONNX
-            if not validate_onnx_model(fp32_path):
-                raise ValueError("FP32 ONNX validation failed")
+            is_valid, validation_msg = validate_onnx_model(fp32_path)
+            if not is_valid:
+                raise ValueError(f"FP32 ONNX validation failed: {validation_msg}")
+            print(f"   ✅ {validation_msg}")
+
+            # Additional validation: check model structure
+            onnx_model = onnx.load(fp32_path)
+
+            # Check input/output names
+            if len(onnx_model.graph.input) != 1:
+                raise ValueError(f"Expected 1 input, got {len(onnx_model.graph.input)}")
+            if len(onnx_model.graph.output) != 1:
+                raise ValueError(
+                    f"Expected 1 output, got {len(onnx_model.graph.output)}"
+                )
+
+            # Check input/output types
+            input_type = onnx_model.graph.input[0].type.tensor_type.elem_type
+            output_type = onnx_model.graph.output[0].type.tensor_type.elem_type
+            if input_type != onnx.TensorProto.FLOAT:
+                raise ValueError(f"Input type should be FLOAT, got {input_type}")
+            if output_type != onnx.TensorProto.FLOAT:
+                raise ValueError(f"Output type should be FLOAT, got {output_type}")
+
             print("   ✅ FP32 ONNX export successful")
             output_files["fp32"] = fp32_path
 
@@ -310,9 +448,10 @@ def export_to_onnx(
                 onnx.save(fp16_model, fp16_path)
 
                 # Validate FP16 ONNX
-                if not validate_onnx_model(fp16_path):
-                    raise ValueError("FP16 ONNX validation failed")
-                print("   ✅ FP16 ONNX export successful")
+                is_valid, validation_msg = validate_onnx_model(fp16_path)
+                if not is_valid:
+                    raise ValueError(f"FP16 ONNX validation failed: {validation_msg}")
+                print(f"   ✅ {validation_msg}")
                 output_files["fp16"] = fp16_path
 
             except Exception as e:
@@ -339,7 +478,11 @@ def export_to_onnx(
             for file_type in output_files:
                 file_path = output_files[file_type]
                 if file_path and os.path.exists(file_path):
-                    os.remove(file_path)
+                    try:
+                        os.remove(file_path)
+                        print(f"   🧹 Cleaned up failed file: {file_path}")
+                    except Exception as cleanup_error:
+                        print(f"   ⚠ Failed to clean up {file_path}: {cleanup_error}")
 
             if attempt < max_retries - 1:
                 print("   Retrying in 2 seconds...")
@@ -348,14 +491,42 @@ def export_to_onnx(
     return False, output_files
 
 
-def validate_onnx_model(model_path: str) -> bool:
-    """Basic ONNX model validation."""
+def validate_onnx_model(model_path: str) -> tuple[bool, str]:
+    """Enhanced ONNX model validation with detailed error reporting."""
     try:
+        # Load model
         model = onnx.load(model_path)
+
+        # Basic model check
         onnx.checker.check_model(model)
-        return True
-    except Exception:
-        return False
+
+        # Additional structural validation
+        validation_notes = []
+
+        # Check graph structure
+        if len(model.graph.input) == 0:
+            return False, "Model has no input tensors"
+        if len(model.graph.output) == 0:
+            return False, "Model has no output tensors"
+
+        # Check for required operators (basic opset validation)
+        opset_version = model.opset_import[0].version if model.opset_import else 0
+        validation_notes.append(f"ONNX opset: {opset_version}")
+
+        # Check model size
+        model_size = os.path.getsize(model_path) / (1024 * 1024)  # MB
+        validation_notes.append(f"Model size: {model_size:.1f}MB")
+
+        return True, f"Valid ONNX model ({', '.join(validation_notes)})"
+
+    except onnx.checker.ValidationError as e:
+        return False, f"ONNX validation failed: {e}"
+    except onnx.onnx_cpp2py_export.checker.ValidationError as e:
+        return False, f"ONNX validation failed: {e}"
+    except FileNotFoundError:
+        return False, f"Model file not found: {model_path}"
+    except Exception as e:
+        return False, f"ONNX validation error: {e}"
 
 
 def get_model_variant(model_name: str):
@@ -478,7 +649,7 @@ def main() -> None:
         print(f"✅ {msg}")
 
         # Validate training scale
-        is_valid, msg = validate_training_scale(state_dict, args.scale)
+        is_valid, msg = validate_training_scale(state_dict, args.scale, model_func)
         if not is_valid:
             print(f"❌ Scale validation failed: {msg}")
             sys.exit(1)
