@@ -111,16 +111,16 @@ train:
     # Standard perceptual loss (VGG-based)
     - type: perceptualloss
       criterion: charbonnier
-      loss_weight: 0.6   # Reduced from 1.0 for better balance
+      loss_weight: 1.2   # Increased for sharper, more detailed results
 
     # Enhanced color perception
     - type: hsluvloss
       criterion: charbonnier
-      loss_weight: 0.3   # Reduced from 0.8 for better balance
+      loss_weight: 0.5   # Increased for better color sharpness
 
     # DISTS perceptual loss
     - type: distsloss
-      loss_weight: 0.15
+      loss_weight: 0.25   # Increased for better perceptual quality
 
     # === STRUCTURE & SHARPNESS ENHANCEMENT ===
 
@@ -130,14 +130,14 @@ train:
 
     # Focal Frequency Loss - Sharp details and edges
     - type: ffloss
-      loss_weight: 0.15    # Increased for better edge definition
+      loss_weight: 0.3     # Significantly increased for sharp details and edges
 
     # === GAN TRAINING (R3GAN - RELATIVISTIC WITH GRADIENT PENALTIES) ===
 
     # R3GAN loss with gradient penalties for improved stability and reduced artifacts
     - type: ganloss
       gan_type: r3gan
-      loss_weight: 0.15   # Reduced for stability
+      loss_weight: 0.25   # Increased for sharper, more detailed results
       r1_weight: 3.0     # R1 penalty weight for stability
       r2_weight: 3.0     # R2 penalty weight for stability
 

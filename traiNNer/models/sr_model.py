@@ -475,7 +475,7 @@ class SRModel(BaseModel):
                 # add total generator loss for tensorboard tracking
                 loss_dict["l_g_total"] = l_g_total
 
-                self.scaler_g.scale(l_g_total).backward()
+                self.scaler_g.scale(l_g_total).backward(retain_graph=True)
 
                 if apply_gradient:
                     self.scaler_g.unscale_(self.optimizer_g)
@@ -523,16 +523,16 @@ class SRModel(BaseModel):
                 dtype=self.amp_dtype,
                 enabled=self.use_amp,
             ):
+                # Create detached copies to avoid in-place modifications
+                gt_detached = self.gt.detach().clone()
+                output_detached = self.output.detach().clone()
+
                 # real
-                real_d_pred = self.net_d(self.gt)
+                real_d_pred = self.net_d(gt_detached)
                 # Pass real and fake images for R1/R2 gradient penalties
                 # Ensure tensors have requires_grad for gradient penalty computation
-                real_images_for_penalty = self.gt.detach().requires_grad_(True)
-                fake_images_for_penalty = (
-                    self.output.detach().requires_grad_(True)
-                    if self.output is not None
-                    else None
-                )
+                real_images_for_penalty = gt_detached.requires_grad_(True)
+                fake_images_for_penalty = output_detached.requires_grad_(True)
                 l_d_real = cri_gan(
                     real_d_pred,
                     True,
@@ -543,9 +543,7 @@ class SRModel(BaseModel):
                 loss_dict["l_d_real"] = l_d_real
                 loss_dict["out_d_real"] = torch.mean(real_d_pred.detach())
                 # fake
-                # Use generated output if available; otherwise fall back to real images (avoids None errors)
-                fake_input = self.output if self.output is not None else self.gt
-                fake_d_pred = self.net_d(fake_input)
+                fake_d_pred = self.net_d(output_detached)
                 l_d_fake = cri_gan(
                     fake_d_pred,
                     False,
@@ -556,35 +554,33 @@ class SRModel(BaseModel):
                 loss_dict["l_d_fake"] = l_d_fake
                 loss_dict["out_d_fake"] = torch.mean(fake_d_pred.detach())
 
-            # Skip discriminator backward - let the main loop handle it
-            # self.scaler_d.scale((l_d_real + l_d_fake) / self.accum_iters).backward(
-            #     retain_graph=False
-            # )
+            self.scaler_d.scale((l_d_real + l_d_fake) / self.accum_iters).backward(
+                retain_graph=True
+            )
 
-            # Skip discriminator optimization since we're not doing backward pass
-            # if apply_gradient:
-            #     self.scaler_d.unscale_(self.optimizer_d)
-            #     grad_norm_d = torch.linalg.vector_norm(
-            #         torch.stack(
-            #             [
-            #                 torch.linalg.vector_norm(p.grad, 2)
-            #                 for p in self.net_d.parameters()
-            #                 if p.grad is not None
-            #             ]
-            #         )
-            #     ).detach()
+            if apply_gradient:
+                self.scaler_d.unscale_(self.optimizer_d)
+                grad_norm_d = torch.linalg.vector_norm(
+                    torch.stack(
+                        [
+                            torch.linalg.vector_norm(p.grad, 2)
+                            for p in self.net_d.parameters()
+                            if p.grad is not None
+                        ]
+                    )
+                ).detach()
 
-            #     loss_dict["grad_norm_d"] = grad_norm_d
+                loss_dict["grad_norm_d"] = grad_norm_d
 
-            #     if self.grad_clip:
-            #         clip_grad_norm_(self.net_d.parameters(), 1.0)
-            #     scale_before = self.scaler_d.get_scale()
-            #     self.scaler_d.step(self.optimizer_d)
-            #     self.scaler_d.update()
-            #     scale_after = self.scaler_d.get_scale()
-            #     loss_dict["scale_d"] = scale_after
-            #     self.optimizers_skipped[-1] = scale_after < scale_before
-            #     self.optimizer_d.zero_grad()
+                if self.grad_clip:
+                    clip_grad_norm_(self.net_d.parameters(), 1.0)
+                scale_before = self.scaler_d.get_scale()
+                self.scaler_d.step(self.optimizer_d)
+                self.scaler_d.update()
+                scale_after = self.scaler_d.get_scale()
+                loss_dict["scale_d"] = scale_after
+                self.optimizers_skipped[-1] = scale_after < scale_before
+                self.optimizer_d.zero_grad()
 
         for key, value in loss_dict.items():
             val = (
