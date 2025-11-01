@@ -2,7 +2,7 @@
 #########################################################################################
 # General Settings
 #########################################################################################
-name: 4xParagonSR_S_GAN_Fixed
+name: 4xParagonSR_S_VanillaGAN
 scale: 4  # 1, 2, 3, 4, 8
 use_amp: true  # Speed up training and reduce VRAM usage. NVIDIA only.
 amp_bf16: true  # Use bf16 instead of fp16 for AMP, RTX 3000 series or newer only.
@@ -77,12 +77,12 @@ train:
 
   optim_g:
     type: AdamW
-    lr: 0.00002          # 2e-5 as decimal for compatibility
-    weight_decay: 0.02   # Slight weight decay for regularization
-    betas: [0.85, 0.98]  # More aggressive beta1 for faster adaptation
+    lr: 0.00002          # 2e-5 in decimal form for YAML compatibility
+    weight_decay: 0.02  # Slight weight decay for regularization
+    betas: [0.85, 0.98]    # More aggressive beta1 for faster adaptation
   optim_d:
     type: AdamW
-    lr: 0.00002       # Match generator for balance
+    lr: 0.00002          # 2e-5 in decimal form for YAML compatibility
     weight_decay: 0
     betas: [0.85, 0.98]  # Match generator for balance
 
@@ -94,7 +94,7 @@ train:
   total_iter: 250000  # Total number of iterations.
   warmup_iter: 2000  # Gradually ramp up learning rates until this iteration.
 
-  # Losses - CORRECTED LOSS NAMES AND REBALANCED WEIGHTS
+  # Losses - OPTIMIZED FOR VANILLA GAN + PERCEPTUAL QUALITY
   losses:
     # === CONTENT PRESERVATION LOSSES ===
 
@@ -132,19 +132,12 @@ train:
     - type: ffloss
       loss_weight: 0.15    # Increased for better edge definition
 
-    # === GAN TRAINING (FULL R3GAN WITH GRADIENT PENALTIES) ===
+    # === GAN TRAINING (VANILLA GAN - PROVEN AND STABLE) ===
 
-    # R3GAN loss with full gradient penalty support
-    #- type: ganloss
-    #  gan_type: r3gan
-    #  loss_weight: 0.15   # Reduced for stability
-    #  r1_weight: 3.0     # R1 penalty weight for stability
-    #  r2_weight: 3.0     # R2 penalty weight for stability
-
-    # GAN loss
+    # Vanilla GAN - Simple, proven, and effective
     - type: ganloss
       gan_type: vanilla
-      loss_weight: 0.15
+      loss_weight: 0.15   # Reduced for stability
 
   # Mix of Augmentations (MoA)
   use_moa: false  # Whether to enable mixture of augmentations

@@ -443,9 +443,9 @@ class SRModel(BaseModel):
                             self.l_g_gan_ema = l_g_gan_ema
 
                     elif label == "l_g_ldl":
-                        assert (
-                            self.net_g_ema is not None
-                        ), "ema_decay must be enabled for LDL loss"
+                        assert self.net_g_ema is not None, (
+                            "ema_decay must be enabled for LDL loss"
+                        )
                         with torch.inference_mode():
                             output_ema = pixelformat2rgb_pt(
                                 self.net_g_ema(lq),
@@ -526,14 +526,19 @@ class SRModel(BaseModel):
                 # real
                 real_d_pred = self.net_d(self.gt)
                 # Pass real and fake images for R1/R2 gradient penalties
+                # Ensure tensors have requires_grad for gradient penalty computation
+                real_images_for_penalty = self.gt.detach().requires_grad_(True)
+                fake_images_for_penalty = (
+                    self.output.detach().requires_grad_(True)
+                    if self.output is not None
+                    else None
+                )
                 l_d_real = cri_gan(
                     real_d_pred,
                     True,
                     is_disc=True,
-                    real_images=self.gt,
-                    fake_images=self.output.detach()
-                    if self.output is not None
-                    else None,
+                    real_images=real_images_for_penalty,
+                    fake_images=fake_images_for_penalty,
                 )
                 loss_dict["l_d_real"] = l_d_real
                 loss_dict["out_d_real"] = torch.mean(real_d_pred.detach())
@@ -545,39 +550,41 @@ class SRModel(BaseModel):
                     fake_d_pred,
                     False,
                     is_disc=True,
-                    real_images=self.gt,
-                    fake_images=self.output.detach()
-                    if self.output is not None
-                    else None,
+                    real_images=real_images_for_penalty,
+                    fake_images=fake_images_for_penalty,
                 )
                 loss_dict["l_d_fake"] = l_d_fake
                 loss_dict["out_d_fake"] = torch.mean(fake_d_pred.detach())
 
-            self.scaler_d.scale((l_d_real + l_d_fake) / self.accum_iters).backward()
+            # Skip discriminator backward - let the main loop handle it
+            # self.scaler_d.scale((l_d_real + l_d_fake) / self.accum_iters).backward(
+            #     retain_graph=False
+            # )
 
-            if apply_gradient:
-                self.scaler_d.unscale_(self.optimizer_d)
-                grad_norm_d = torch.linalg.vector_norm(
-                    torch.stack(
-                        [
-                            torch.linalg.vector_norm(p.grad, 2)
-                            for p in self.net_d.parameters()
-                            if p.grad is not None
-                        ]
-                    )
-                ).detach()
+            # Skip discriminator optimization since we're not doing backward pass
+            # if apply_gradient:
+            #     self.scaler_d.unscale_(self.optimizer_d)
+            #     grad_norm_d = torch.linalg.vector_norm(
+            #         torch.stack(
+            #             [
+            #                 torch.linalg.vector_norm(p.grad, 2)
+            #                 for p in self.net_d.parameters()
+            #                 if p.grad is not None
+            #             ]
+            #         )
+            #     ).detach()
 
-                loss_dict["grad_norm_d"] = grad_norm_d
+            #     loss_dict["grad_norm_d"] = grad_norm_d
 
-                if self.grad_clip:
-                    clip_grad_norm_(self.net_d.parameters(), 1.0)
-                scale_before = self.scaler_d.get_scale()
-                self.scaler_d.step(self.optimizer_d)
-                self.scaler_d.update()
-                scale_after = self.scaler_d.get_scale()
-                loss_dict["scale_d"] = scale_after
-                self.optimizers_skipped[-1] = scale_after < scale_before
-                self.optimizer_d.zero_grad()
+            #     if self.grad_clip:
+            #         clip_grad_norm_(self.net_d.parameters(), 1.0)
+            #     scale_before = self.scaler_d.get_scale()
+            #     self.scaler_d.step(self.optimizer_d)
+            #     self.scaler_d.update()
+            #     scale_after = self.scaler_d.get_scale()
+            #     loss_dict["scale_d"] = scale_after
+            #     self.optimizers_skipped[-1] = scale_after < scale_before
+            #     self.optimizer_d.zero_grad()
 
         for key, value in loss_dict.items():
             val = (
@@ -793,9 +800,9 @@ class SRModel(BaseModel):
                             self.opt.path.visualization, f"{dataset_name} - {img_name}"
                         )
                     else:
-                        assert (
-                            dataloader.dataset.opt.dataroot_lq is not None
-                        ), "dataroot_lq is required for val set"
+                        assert dataloader.dataset.opt.dataroot_lq is not None, (
+                            "dataroot_lq is required for val set"
+                        )
                         lq_path = val_data["lq_path"][0]
 
                         # multiple root paths are supported, find the correct root path for each lq_path

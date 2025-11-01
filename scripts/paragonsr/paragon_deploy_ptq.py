@@ -15,7 +15,7 @@ PTQ vs Dynamic Quantization:
 - Result: Much better INT8 quality with proper calibration
 
 Usage:
-python -m scripts.paragonsr.paragon_deploy_ptq --input model.safetensors --variant s --scale 4 --calib_dir /path/to/calibration_data
+python -m scripts.paragonsr.paragon_deploy_ptq --input model.safetensors --model_variant s --scale 4 --calib_dir /path/to/calibration_data
 """
 
 import argparse
@@ -178,7 +178,7 @@ def create_calibration_dataset_from_images(
                 resized = (
                     np.array(
                         Image.fromarray((img_array * 255).astype(np.uint8)).resize(
-                            (new_w, new_h), Image.LANCZOS
+                            (new_w, new_h), Image.Resampling.LANCZOS
                         )
                     ).astype(np.float32)
                     / 255.0
@@ -265,10 +265,10 @@ def apply_ptq_calibration(
                     f"   📋 CalibrationReader initialized with {len(self.calib_files)} files"
                 )
 
-            def get_next(self):
+            def get_next(self) -> dict:
                 if self.current_idx >= len(self.calib_files):
                     print("   🔄 End of calibration data reached")
-                    return None
+                    return {}
 
                 try:
                     file_path = self.calib_files[self.current_idx]
@@ -276,31 +276,16 @@ def apply_ptq_calibration(
 
                     data = np.load(file_path)
 
-                    # Ensure correct shape and format for ONNX Runtime
-                    if data.shape == (1, 3, self.expected_size, self.expected_size):
+                    # For dynamic ONNX models, accept any (1, 3, H, W) shape
+                    if (
+                        len(data.shape) == 4
+                        and data.shape[0] == 1
+                        and data.shape[1] == 3
+                    ):
                         result = {"input": data.astype(np.float32)}
                         if self.current_idx <= 5:  # Debug first few samples
                             print(
                                 f"   📊 Sample {self.current_idx}: {data.shape}, range: [{data.min():.3f}, {data.max():.3f}]"
-                            )
-                        return result
-                    elif data.shape == (1, 3, -1, -1):
-                        # Resize to expected size
-                        import torch.nn.functional as F
-
-                        resized = torch.from_numpy(data).squeeze(0)
-                        resized = F.interpolate(
-                            resized.unsqueeze(0),
-                            size=(self.expected_size, self.expected_size),
-                            mode="bilinear",
-                            align_corners=False,
-                        )
-                        result = {
-                            "input": resized.squeeze(0).numpy().astype(np.float32)
-                        }
-                        if self.current_idx <= 5:  # Debug first few samples
-                            print(
-                                f"   📊 Sample {self.current_idx} (resized): {result['input'].shape}, range: [{result['input'].min():.3f}, {result['input'].max():.3f}]"
                             )
                         return result
                     else:
@@ -324,7 +309,7 @@ def apply_ptq_calibration(
 
         # Use QDQ format for best compatibility
         quant_format_obj = (
-            QuantFormat.QDQ if quant_format.upper() == "QDQ" else QuantFormat.IntegerOps
+            QuantFormat.QDQ if quant_format.upper() == "QDQ" else QuantFormat.QDQ
         )
 
         # ONNX Runtime 1.23.2 PTQ API - use correct function and parameter names
@@ -341,7 +326,6 @@ def apply_ptq_calibration(
                 calibration_data_reader=calib_reader,
                 weight_type=QuantType.QInt8,
                 activation_type=QuantType.QInt8,
-                quant_format=QuantFormat.IntegerOps,
             )
             print("   ✅ Successfully used quantize_static with IntegerOps format")
             api_success = True
@@ -596,7 +580,7 @@ def export_fp16_to_onnx(
             # Export ONNX (standard parameters, handle .data file naturally)
             torch.onnx.export(
                 model,
-                dummy_input,
+                (dummy_input,),
                 output_path,
                 verbose=False,
                 input_names=input_names,
@@ -794,7 +778,7 @@ def main() -> None:
         "--opset_version", type=int, default=18, help="ONNX opset version"
     )
     parser.add_argument(
-        "--max_retries", type=int, default=3, help="Maximum retry attempts"
+        "--max_retries", type=int, default=1, help="Maximum retry attempts"
     )
 
     args = parser.parse_args()
@@ -947,9 +931,15 @@ def main() -> None:
             if success:
                 print(f"   ✅ {msg}")
             else:
-                print(f"   ⚠ PTQ failed: {msg}, trying dynamic quantization...")
-                success, msg = convert_fp16_to_int8_dynamic(fp16_path, int8_path)
-                print(f"   {msg}")
+                print(f"   ❌ PTQ failed: {msg}")
+                print("   🚫 Not saving INT8 model - PTQ is required for good quality")
+                # Do not save INT8 model if PTQ failed - as requested by user
+                if os.path.exists(int8_path):
+                    try:
+                        os.remove(int8_path)
+                        print("   🗑️ Removed failed INT8 model")
+                    except:
+                        pass
         else:
             print("   ⚠ Calibration dataset creation failed, skipping INT8")
     else:
