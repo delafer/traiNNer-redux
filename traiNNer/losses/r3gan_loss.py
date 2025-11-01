@@ -19,43 +19,30 @@ class SafeGradientPenalty:
 
     @staticmethod
     def compute_grad_penalty(
-        images: Tensor, discriminator_output: Tensor, penalty_weight: float = 3.0
+        net_d: nn.Module, images: Tensor, penalty_weight: float
     ) -> Tensor:
         """Compute gradient penalty safely without interfering with main training graph"""
-        try:
-            # Create detached copies for gradient computation
+        if penalty_weight > 0:
+            # Create a fresh, gradient-enabled copy of the images
             images_detached = images.detach().clone().requires_grad_(True)
-            output_detached = discriminator_output.detach().clone()
 
-            # Compute gradients in isolation
-            gradient_results = torch.autograd.grad(
+            # Perform a forward pass with the detached images
+            output_detached = net_d(images_detached)
+
+            # Compute gradients
+            gradients = torch.autograd.grad(
                 outputs=output_detached.sum(),
                 inputs=images_detached,
-                create_graph=False,  # No new graph nodes
-                retain_graph=False,  # Don't retain graph
-                allow_unused=True,
-            )
+                create_graph=False,  # No new graph nodes needed here
+                retain_graph=False,  # Don't retain the graph
+            )[0]
 
-            # Handle the case where gradient might be None
-            gradients = (
-                gradient_results[0]
-                if gradient_results and gradient_results[0] is not None
-                else None
-            )
-
-            if gradients is None:
-                return torch.tensor(0.0, device=images.device)
-
-            # Reshape gradients to compute penalty
+            # Reshape gradients and compute penalty
             gradients = gradients.view(gradients.size(0), -1)
-            grad_penalty = gradients.norm(2, dim=1) - 1
-            grad_penalty = grad_penalty.pow(2).mean()
+            grad_penalty = (gradients.norm(2, dim=1) ** 2).mean()
 
             return grad_penalty * penalty_weight
-
-        except Exception:
-            # Return zero penalty if computation fails
-            return torch.tensor(0.0, device=images.device)
+        return torch.tensor(0.0, device=images.device)
 
 
 @LOSS_REGISTRY.register()
@@ -140,70 +127,61 @@ class R3GANLoss(nn.Module):
 
     def _compute_discriminator_loss_with_grad_penalty(
         self,
+        net_d: nn.Module,
         real_output: Tensor,
         fake_output: Tensor,
         real_images: Tensor,
         fake_images: Tensor,
-    ) -> Tensor:
+    ) -> dict[str, Tensor]:
         """Compute discriminator loss with R1/R2 gradient penalties"""
-
         # Standard R3GAN relativistic discriminator loss
-        # Discriminator wants real to have higher score than fake
         real_loss = F.softplus(-real_output).mean()
         fake_loss = F.softplus(fake_output).mean()
         adv_loss = (real_loss + fake_loss) / 2
 
-        # Temporarily disable gradient penalties to avoid training conflicts
-        # TODO: Re-enable gradient penalties after training stability is confirmed
-        # r1_penalty = self.safe_grad_penalty.compute_grad_penalty(
-        #     real_images, real_output, self.r1_weight
-        # )
-        # r2_penalty = self.safe_grad_penalty.compute_grad_penalty(
-        #     fake_images, fake_output, self.r2_weight
-        # )
-        # total_loss = adv_loss + (r1_penalty + r2_penalty) / 2
+        # R1 and R2 gradient penalties
+        r1_penalty = self.safe_grad_penalty.compute_grad_penalty(
+            net_d, real_images, self.r1_weight
+        )
+        r2_penalty = self.safe_grad_penalty.compute_grad_penalty(
+            net_d, fake_images, self.r2_weight
+        )
 
-        # For now, use only the relativistic loss
-        total_loss = adv_loss
+        total_loss = adv_loss + (r1_penalty + r2_penalty) / 2
 
-        return total_loss
+        return {
+            "d_loss": total_loss,
+            "r1_penalty": r1_penalty,
+            "r2_penalty": r2_penalty,
+        }
 
-    def _compute_generator_loss(self, fake_output: Tensor) -> Tensor:
+    def _compute_generator_loss(
+        self, real_output: Tensor, fake_output: Tensor
+    ) -> Tensor:
         """Compute generator loss"""
-        # Standard R3GAN relativistic generator loss
-        # Generator wants fake to have higher score than real
-        return F.softplus(-fake_output).mean() * self.loss_weight
+        # Relativistic generator loss
+        real_loss = F.softplus(real_output).mean()
+        fake_loss = F.softplus(-fake_output).mean()
+        return ((real_loss + fake_loss) / 2) * self.loss_weight
 
     def _r3gan_loss(
         self,
-        input: Tensor,
-        target_is_real: bool,
-        is_disc: bool = False,
-        real_images: Tensor | None = None,
-        fake_images: Tensor | None = None,
-        **kwargs,
-    ) -> Tensor:
+        net_d: nn.Module,
+        real_images: Tensor,
+        fake_images: Tensor,
+        is_disc: bool,
+        **_: dict,
+    ) -> Tensor | dict[str, Tensor]:
         """Relativistic R3GAN loss with R1/R2 gradient penalties"""
+        real_output = net_d(real_images)
+        fake_output = net_d(fake_images)
 
         if is_disc:
-            # For discriminator, we need both real and fake outputs and images
-            if real_images is not None and fake_images is not None:
-                # Assume input contains [real_output, fake_output]
-                if isinstance(input, (list, tuple)) and len(input) == 2:
-                    real_output, fake_output = input[0], input[1]
-                    return self._compute_discriminator_loss_with_grad_penalty(
-                        real_output, fake_output, real_images, fake_images
-                    )
-                else:
-                    # If only one output is provided, fall back to simple loss
-                    return F.softplus(-input).mean()
-            else:
-                # Without gradient penalty images, use standard loss
-                return F.softplus(-input).mean()
-
+            return self._compute_discriminator_loss_with_grad_penalty(
+                net_d, real_output, fake_output, real_images, fake_images
+            )
         else:
-            # Generator case - use simplified version for now
-            return F.softplus(-input).mean() * self.loss_weight
+            return self._compute_generator_loss(real_output, fake_output)
 
     def _get_target_label(self, input: Tensor, target_is_real: bool) -> Tensor:
         """Return target label for non‑relativistic loss types."""
@@ -212,15 +190,19 @@ class R3GANLoss(nn.Module):
 
     def forward(
         self,
-        input: Tensor,
-        target_is_real: bool,
+        input: Tensor | None = None,
+        target_is_real: bool | None = None,
         is_disc: bool = False,
         **kwargs,
-    ) -> Tensor:
+    ) -> Tensor | dict[str, Tensor]:
         """Forward entry point used by the training loop."""
         if self.gan_type == "r3gan":
-            return self._r3gan_loss(input, target_is_real, is_disc, **kwargs)
+            # R3GAN requires a different signature, so we call it directly
+            return self._r3gan_loss(is_disc=is_disc, **kwargs)
         else:
+            # Fallback for other GAN types
+            assert input is not None
+            assert target_is_real is not None
             return self.loss_func(input, target_is_real, is_disc=is_disc, **kwargs)
 
 

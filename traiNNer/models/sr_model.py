@@ -423,8 +423,16 @@ class SRModel(BaseModel):
 
                     if label == "l_g_gan":
                         assert self.net_d is not None
-                        fake_g_pred = self.net_d(self.output)
-                        l_g_loss = loss(fake_g_pred, True, is_disc=False)
+                        if isinstance(loss, R3GANLoss):
+                            l_g_loss = loss(
+                                net_d=self.net_d,
+                                real_images=self.gt,
+                                fake_images=self.output,
+                                is_disc=False,
+                            )
+                        else:
+                            fake_g_pred = self.net_d(self.output)
+                            l_g_loss = loss(fake_g_pred, True, is_disc=False)
 
                         if self.adaptive_d:
                             l_g_gan_ema = (
@@ -475,7 +483,7 @@ class SRModel(BaseModel):
                 # add total generator loss for tensorboard tracking
                 loss_dict["l_g_total"] = l_g_total
 
-                self.scaler_g.scale(l_g_total).backward(retain_graph=True)
+                self.scaler_g.scale(l_g_total).backward()
 
                 if apply_gradient:
                     self.scaler_g.unscale_(self.optimizer_g)
@@ -523,40 +531,29 @@ class SRModel(BaseModel):
                 dtype=self.amp_dtype,
                 enabled=self.use_amp,
             ):
-                # Create detached copies to avoid in-place modifications
-                gt_detached = self.gt.detach().clone()
-                output_detached = self.output.detach().clone()
+                # R3GAN loss requires a different signature
+                if isinstance(cri_gan, R3GANLoss):
+                    loss_d_dict = cri_gan(
+                        net_d=self.net_d,
+                        real_images=self.gt,
+                        fake_images=self.output.detach(),
+                        is_disc=True,
+                    )
+                    l_d_total = loss_d_dict["d_loss"]
+                    loss_dict["l_d_total"] = l_d_total
+                    loss_dict["r1_penalty"] = loss_d_dict["r1_penalty"]
+                    loss_dict["r2_penalty"] = loss_d_dict["r2_penalty"]
+                else:
+                    # Standard GAN loss
+                    real_d_pred = self.net_d(self.gt)
+                    fake_d_pred = self.net_d(self.output.detach())
+                    l_d_real = cri_gan(real_d_pred, True, is_disc=True)
+                    l_d_fake = cri_gan(fake_d_pred, False, is_disc=True)
+                    l_d_total = l_d_real + l_d_fake
+                    loss_dict["l_d_real"] = l_d_real
+                    loss_dict["l_d_fake"] = l_d_fake
 
-                # real
-                real_d_pred = self.net_d(gt_detached)
-                # Pass real and fake images for R1/R2 gradient penalties
-                # Ensure tensors have requires_grad for gradient penalty computation
-                real_images_for_penalty = gt_detached.requires_grad_(True)
-                fake_images_for_penalty = output_detached.requires_grad_(True)
-                l_d_real = cri_gan(
-                    real_d_pred,
-                    True,
-                    is_disc=True,
-                    real_images=real_images_for_penalty,
-                    fake_images=fake_images_for_penalty,
-                )
-                loss_dict["l_d_real"] = l_d_real
-                loss_dict["out_d_real"] = torch.mean(real_d_pred.detach())
-                # fake
-                fake_d_pred = self.net_d(output_detached)
-                l_d_fake = cri_gan(
-                    fake_d_pred,
-                    False,
-                    is_disc=True,
-                    real_images=real_images_for_penalty,
-                    fake_images=fake_images_for_penalty,
-                )
-                loss_dict["l_d_fake"] = l_d_fake
-                loss_dict["out_d_fake"] = torch.mean(fake_d_pred.detach())
-
-            self.scaler_d.scale((l_d_real + l_d_fake) / self.accum_iters).backward(
-                retain_graph=True
-            )
+            self.scaler_d.scale(l_d_total / self.accum_iters).backward()
 
             if apply_gradient:
                 self.scaler_d.unscale_(self.optimizer_d)
