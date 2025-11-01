@@ -17,12 +17,12 @@ from traiNNer.utils import get_root_logger, scandir
 from traiNNer.utils.registry import LOSS_REGISTRY
 
 __all__ = [
+    "MultiScaleR3GANLoss",
+    "R3GANLoss",
     "build_loss",
     "g_path_regularize",
     "gradient_penalty_loss",
     "r1_penalty",
-    "R3GANLoss",
-    "MultiScaleR3GANLoss",
 ]
 
 # automatically scan and import loss modules for registry
@@ -49,6 +49,17 @@ def build_loss(loss_opt: dict[str, Any]) -> nn.Module:
     """
     opt = deepcopy(loss_opt)
     loss_type = opt.pop("type")
+
+    # Special handling for GAN losses with R3GAN
+    if loss_type.lower() == "ganloss" and opt.get("gan_type", "").lower() == "r3gan":
+        # Use R3GANLoss instead of GANLoss for R3GAN configurations
+        loss_type = "r3ganloss"
+        logger = get_root_logger()
+        logger.info(
+            "Using R3GANLoss for gan_type: r3gan configuration.",
+            extra={"markup": True},
+        )
+
     loss = LOSS_REGISTRY.get(loss_type)(**opt)
     logger = get_root_logger()
     logger.info(

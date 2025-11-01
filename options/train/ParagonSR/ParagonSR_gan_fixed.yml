@@ -1,0 +1,195 @@
+# yaml-language-server: $schema=https://raw.githubusercontent.com/the-database/traiNNer-redux/refs/heads/master/schemas/redux-config.schema.json
+#########################################################################################
+# General Settings
+#########################################################################################
+name: 4xParagonSR_S_GAN_Fixed
+scale: 4  # 1, 2, 3, 4, 8
+use_amp: true  # Speed up training and reduce VRAM usage. NVIDIA only.
+amp_bf16: true  # Use bf16 instead of fp16 for AMP, RTX 3000 series or newer only.
+use_channels_last: false  # Enable channels last memory format while using AMP.
+fast_matmul: false  # Trade precision for performance.
+num_gpu: auto
+
+
+########################################################################################################################
+# Dataset and Dataloader Settings
+########################################################################################################################
+datasets:
+  # Settings for the training dataset.
+  train:
+    name: Train Dataset
+    type: pairedimagedataset
+    # Path to the HR (high res) images in your training dataset. Specify one or multiple folders, separated by commas.
+    dataroot_gt: [
+      /home/phips/Documents/dataset/cc0/hr
+    ]
+    # Path to the LR (low res) images in your training dataset. Specify one or multiple folders, separated by commas.
+    dataroot_lq: [
+      /home/phips/Documents/dataset/cc0/lr_pretrain_x4
+    ]
+    # meta_info: data/meta_info/dataset1.txt
+
+    lq_size: 64  # During training, a square of this size is cropped from LR images.
+    use_hflip: true  # Randomly flip the images horizontally.
+    use_rot: true  # Randomly rotate the images.
+
+    num_worker_per_gpu: 8
+    batch_size_per_gpu: 4  # Increasing stabilizes training but with diminishing returns.
+    accum_iter: 1  # paper: 8  # Using values larger than 1 simulates higher batch size
+
+  # Settings for your validation dataset (optional).
+  val:
+    name: Val Dataset
+    type: pairedimagedataset
+    dataroot_gt: [
+      /home/phips/Documents/dataset/cc0/val_hr
+    ]
+    dataroot_lq: [
+      /home/phips/Documents/dataset/cc0/val_x4
+    ]
+
+#####################################################################
+# Network Settings
+#####################################################################
+# Generator model settings
+network_g:
+  type: paragonsr_s  # ParagonSR_S variant
+
+# Discriminator model settings
+network_d:
+  type: dunet  # dunet, metagan2, unetdiscriminatorsn
+
+#########################################################################################
+# Pretrain and Resume Paths
+#########################################################################################
+path:
+  pretrain_network_g: experiments/4x_ParagonSR_S/models/4xParagonSR_S_pretrain.safetensors
+  param_key_g: ~
+  strict_load_g: true    # Disable strict loading to partially load a pretrain model with a different scale
+  resume_state: ~
+
+###########################################################################################
+# Training Settings
+###########################################################################################
+train:
+  ema_decay: 0.9999  # Very high EMA decay for stable fine-tuning
+  grad_clip: true     # Enable gradient clipping (essential for stability)
+
+  optim_g:
+    type: AdamW
+    lr: 0.00002          # 2e-5 as decimal for compatibility
+    weight_decay: 0.02   # Slight weight decay for regularization
+    betas: [0.85, 0.98]  # More aggressive beta1 for faster adaptation
+  optim_d:
+    type: AdamW
+    lr: 0.00002       # Match generator for balance
+    weight_decay: 0
+    betas: [0.85, 0.98]  # Match generator for balance
+
+  scheduler:
+    type: MultiStepLR
+    milestones: [125000, 200000, 225000, 237500]
+    gamma: 0.5
+
+  total_iter: 250000  # Total number of iterations.
+  warmup_iter: 2000  # Gradually ramp up learning rates until this iteration.
+
+  # Losses - CORRECTED LOSS NAMES AND REBALANCED WEIGHTS
+  losses:
+    # === CONTENT PRESERVATION LOSSES ===
+
+    # Charbonnier Loss - Foundation for content preservation
+    - type: charbonnierloss
+      loss_weight: 0.3   # Balanced content preservation
+
+    # Multi-Scale SSIM - Structural similarity
+    - type: mssimloss
+      loss_weight: 0.25  # Good for maintaining structure
+
+    # === PERCEPTUAL LOSSES (Optimized for visual quality) ===
+
+    # Standard perceptual loss (VGG-based)
+    - type: perceptualloss
+      criterion: charbonnier
+      loss_weight: 0.6   # Reduced from 1.0 for better balance
+
+    # Enhanced color perception
+    - type: hsluvloss
+      criterion: charbonnier
+      loss_weight: 0.3   # Reduced from 0.8 for better balance
+
+    # DISTS perceptual loss
+    - type: distsloss
+      loss_weight: 0.15
+
+    # === STRUCTURE & SHARPNESS ENHANCEMENT ===
+
+    # Cosine similarity for structural learning
+    - type: cosimloss
+      loss_weight: 0.3    # Good for maintaining similarity
+
+    # Focal Frequency Loss - Sharp details and edges
+    - type: ffloss
+      loss_weight: 0.15    # Increased for better edge definition
+
+    # Gradient Variance Loss - Better edge preservation (disabled - not available in this framework)
+    # - type: gradientvariance
+    #   loss_weight: 0.1
+
+    # === GAN TRAINING ===
+
+    # R3GAN loss with regularization (relativistic GAN with gradient penalties)
+    - type: ganloss
+      gan_type: r3gan
+      loss_weight: 0.15   # Reduced for stability
+      r1_weight: 3.0     # R1 penalty weight
+      r2_weight: 3.0     # R2 penalty weight
+
+    # Anti-pattern loss for checkerboard prevention (disabled - not available in this framework)
+    # - type: checkerboardloss
+    #   loss_weight: 0.05  # Reduced to avoid over-constraint
+
+  # Mix of Augmentations (MoA)
+  use_moa: false  # Whether to enable mixture of augmentations
+  moa_augs: ['none', 'mixup', 'cutmix', 'resizemix', 'cutblur']
+  moa_probs: [0.4, 0.084, 0.084, 0.084, 0.348]
+  moa_debug: false
+  moa_debug_limit: 100
+
+##############################################################################################
+# Validation
+##############################################################################################
+val:
+  val_enabled: true  # Whether to enable validations.
+  val_freq: 1000  # How often to run validations, in iterations.
+  save_img: true  # Whether to save the validation images.
+  tile_size: 0  # Tile size of input, reduce VRAM usage but slower inference.
+  tile_overlap: 8  # Number of pixels to overlap tiles by.
+
+  metrics_enabled: true  # Whether to run metrics calculations during validation.
+  metrics:
+    topiq:
+      type: calculate_topiq
+    psnr:
+      type: calculate_psnr
+      crop_border: 4
+      test_y_channel: false
+    ssim:
+      type: calculate_ssim
+      crop_border: 4
+      test_y_channel: false
+    lpips:
+      type: calculate_lpips
+      better: lower
+    dists:
+      type: calculate_dists
+      better: lower
+
+##############################################################################################
+# Logging
+##############################################################################################
+logger:
+  print_freq: 100
+  save_checkpoint_freq: 1000
+  save_checkpoint_format: safetensors
+  use_tb_logger: true
