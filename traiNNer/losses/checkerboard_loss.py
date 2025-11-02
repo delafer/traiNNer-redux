@@ -163,10 +163,11 @@ class CheckerboardLoss(nn.Module):
         target_unshuffled = self.pixel_unshuffle(target)
 
         # Reshape to separate individual local blocks
-        # Now: (B, C, scale^2, H/scale, W/scale) where scale^2 is the pixel positions
-        B, C, _, H, W = pred_unshuffled.shape
-        pred_groups = pred_unshuffled.view(B, C, -1, H, W)
-        target_groups = target_unshuffled.view(B, C, -1, H, W)
+        # Now: (B, C * scale^2, H/scale, W/scale)
+        B, _, H, W = pred_unshuffled.shape
+        C = pred.shape[1]  # Get original channel count from the input
+        pred_groups = pred_unshuffled.view(B, C, self.scale**2, H, W)
+        target_groups = target_unshuffled.view(B, C, self.scale**2, H, W)
 
         # Compute pairwise differences within each local block
         # Add dimensions for broadcasting: (B, C, 1, scale^2, H, W) and (B, C, scale^2, 1, H, W)

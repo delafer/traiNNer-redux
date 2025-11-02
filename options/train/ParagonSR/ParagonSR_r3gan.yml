@@ -88,7 +88,7 @@ train:
 
   scheduler:
     type: MultiStepLR
-    milestones: [125000, 200000, 225000, 237500]
+    milestones: [75000, 150000, 200000, 225000]
     gamma: 0.5
 
   total_iter: 250000  # Total number of iterations.
@@ -111,7 +111,7 @@ train:
     # Standard perceptual loss (VGG-based)
     - type: perceptualloss
       criterion: charbonnier
-      loss_weight: 1.2   # Increased for sharper, more detailed results
+      loss_weight: 1.5   # Increased for sharper, more detailed results
 
     # Enhanced color perception
     - type: hsluvloss
@@ -132,14 +132,25 @@ train:
     - type: ffloss
       loss_weight: 0.3     # Significantly increased for sharp details and edges
 
+    # L1 Loss - A strong anchor for content fidelity
+    - type: l1loss
+      loss_weight: 0.1
+
     # === GAN TRAINING (R3GAN - RELATIVISTIC WITH GRADIENT PENALTIES) ===
 
     # R3GAN loss with gradient penalties for improved stability and reduced artifacts
     - type: ganloss
       gan_type: r3gan
-      loss_weight: 0.25   # Increased for sharper, more detailed results
+      loss_weight: 0.2   # Increased for sharper, more detailed results
       r1_weight: 3.0     # R1 penalty weight for stability
       r2_weight: 3.0     # R2 penalty weight for stability
+
+
+    # Checkerboard artifact prevention, i added this at 86421 iters
+    - type: CheckerboardLoss
+      loss_weight: 0.05  # A small weight to start, just to guide the generator
+      scale: 4         # Must match your model's scale
+      criterion: "charbonnier"
 
   # Mix of Augmentations (MoA)
   use_moa: false  # Whether to enable mixture of augmentations
