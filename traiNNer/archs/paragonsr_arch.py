@@ -180,6 +180,12 @@ class GatedFFN(nn.Module):
 
 
 class LayerScale(nn.Module):
+    """
+    A learnable scaling factor applied to the output of a residual block.
+    This is a key stabilization technique for very deep networks.
+    From: "Going deeper with Image Transformers" (Touvron et al., 2021)
+    """
+
     def __init__(self, dim: int, init_values: float = 1e-5) -> None:
         super().__init__()
         self.gamma = nn.Parameter(init_values * torch.ones(dim))
