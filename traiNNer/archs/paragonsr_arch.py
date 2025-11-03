@@ -263,9 +263,19 @@ class ParagonSR(nn.Module):
             ]
         )
         self.conv_fuse = nn.Conv2d(num_feat, num_feat, 3, 1, 1)
+        # --- Upsampling Block ---
+        # Changed from PixelShuffle to a Resize+Conv block to mitigate checkerboard artifacts
+        # and improve ONNX compatibility.
+        #
+        # Why 'nearest' mode?:
+        # 1. Information Preservation: 'nearest' is a lossless operation. It duplicates
+        #    features without averaging, preserving the exact information for the CNN.
+        # 2. Maximum Control for CNN: It provides the raw, up-scaled features to the
+        #    convolutional layer, giving it maximum freedom to learn the optimal way
+        #    to interpolate and reconstruct details.
         self.upsampler = nn.Sequential(
-            nn.Conv2d(num_feat, num_feat * scale * scale, 3, 1, 1),
-            nn.PixelShuffle(scale),
+            nn.Upsample(scale_factor=scale, mode="nearest"),
+            nn.Conv2d(num_feat, num_feat, 3, 1, 1),
         )
         self.conv_out = nn.Conv2d(num_feat, in_chans, 3, 1, 1)
 

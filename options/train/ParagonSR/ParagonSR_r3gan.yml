@@ -65,7 +65,7 @@ network_d:
 path:
   pretrain_network_g: experiments/4x_ParagonSR_S/models/4xParagonSR_S_pretrain.safetensors
   param_key_g: ~
-  strict_load_g: true    # Disable strict loading to partially load a pretrain model with a different scale
+  strict_load_g: false    # Disable strict loading to partially load a pretrain model with a different scale # i just changed architecture at 202591 with avgpool.
   resume_state: ~
 
 ###########################################################################################
@@ -107,6 +107,8 @@ train:
       loss_weight: 0.25  # Good for maintaining structure
 
     # === PERCEPTUAL LOSSES (Optimized for visual quality) ===
+
+    # PS i added AvgPool2d Layer for potentially smoothing out artifacts made by pixelshuffle. If this does lessen the things i dont seem to like in the output, then i will change to Resize+Conv in the future because then PixelShuffle seems to exaggerate raster look with r3gan.
 
     # Standard perceptual loss (VGG-based)
     - type: perceptualloss
