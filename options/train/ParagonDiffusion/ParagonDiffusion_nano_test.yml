@@ -90,6 +90,29 @@ train:
 ##############################################################################################
 val:
   val_enabled: false # Validation is disabled as it's not compatible with the diffusion training loop
+  val_freq: 1000  # How often to run validations, in iterations.
+  save_img: false  # Whether to save the validation images.
+  tile_size: 0  # Tile size of input, reduce VRAM usage but slower inference.
+  tile_overlap: 8  # Number of pixels to overlap tiles by.
+
+  metrics_enabled: false  # Whether to run metrics calculations during validation.
+  metrics:
+    topiq:
+      type: calculate_topiq
+    psnr:
+      type: calculate_psnr
+      crop_border: 4
+      test_y_channel: false
+    ssim:
+      type: calculate_ssim
+      crop_border: 4
+      test_y_channel: false
+    lpips:
+      type: calculate_lpips
+      better: lower
+    dists:
+      type: calculate_dists
+      better: lower
 
 ##############################################################################################
 # Logging

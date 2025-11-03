@@ -22,6 +22,7 @@ from traiNNer.archs import build_network
 from traiNNer.archs.arch_info import ARCHS_WITHOUT_FP16
 from traiNNer.data.base_dataset import BaseDataset
 from traiNNer.losses import build_loss
+from traiNNer.losses.contrastive_loss import ContrastiveLoss
 from traiNNer.losses.r3gan_loss import R3GANLoss
 from traiNNer.metrics import calculate_metric
 from traiNNer.models.base_model import BaseModel
@@ -461,6 +462,8 @@ class SRModel(BaseModel):
                                 self.opt.output_pixel_format,
                             )
                         l_g_loss = loss(self.output, output_ema, target)
+                    elif isinstance(loss, ContrastiveLoss):
+                        l_g_loss = loss(self.output, target, self.lq)
                     else:
                         l_g_loss = loss(self.output, target)
 

@@ -25,59 +25,56 @@ class ContrastiveLoss(nn.Module):
         super().__init__()
         self.loss_weight = loss_weight
         self.temperature = temperature
+        self.use_clip = False
 
-        # Try to load CLIP model and processor
         try:
-            from transformers import CLIPModel, CLIPProcessor
+            from transformers import CLIPModel
 
             self.clip_model = CLIPModel.from_pretrained("openai/clip-vit-base-patch32")
-            self.clip_processor = CLIPProcessor.from_pretrained(
-                "openai/clip-vit-base-patch32"
-            )
 
             # Freeze CLIP model
             for param in self.clip_model.parameters():
                 param.requires_grad = False
             self.clip_model.eval()
+
+            # Preprocessing transforms
+            self.clip_preprocess = v2.Compose(
+                [
+                    v2.Resize(
+                        224, interpolation=InterpolationMode.BICUBIC, antialias=True
+                    ),
+                    v2.CenterCrop(224),
+                    v2.Normalize(
+                        mean=(0.48145466, 0.4578275, 0.40821073),
+                        std=(0.26862954, 0.26130258, 0.27577711),
+                    ),
+                ]
+            )
             self.use_clip = True
+
         except ImportError:
             print(
                 "Warning: transformers library not found. Using simplified contrastive loss."
             )
-            self.use_clip = False
         except Exception as e:
             print(
                 f"Warning: Could not load CLIP model: {e}. Using simplified contrastive loss."
             )
-            self.use_clip = False
 
-    def extract_clip_features(self, images: torch.Tensor) -> torch.Tensor:
+    def extract_clip_features(self, images: torch.Tensor) -> torch.Tensor | None:
         """Extract features from images using CLIP."""
         if not self.use_clip:
             return None
 
-        # Convert tensor to PIL images for CLIP processor
-        # Normalize from [-1, 1] to [0, 1] if needed
-        if images.min() < 0:
-            images = (images + 1) / 2
+        # Move CLIP model to the same device as the input images
+        self.clip_model.to(images.device)
 
-        # Clamp to [0, 1]
-        images = torch.clamp(images, 0, 1)
-
-        # Convert to list of PIL images
-        pil_images = [v2.functional.to_pil_image(img) for img in images]
-
-        # Process with CLIP processor
-        inputs = self.clip_processor(
-            images=pil_images, return_tensors="pt", padding=True
-        )
-
-        # Move inputs to the same device as the model
-        inputs = {k: v.to(self.clip_model.device) for k, v in inputs.items()}
+        # Preprocess images
+        images = self.clip_preprocess(images)
 
         # Extract features
         with torch.no_grad():
-            outputs = self.clip_model.get_image_features(**inputs)
+            outputs = self.clip_model.get_image_features(pixel_values=images)
 
         return outputs
 

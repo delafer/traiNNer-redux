@@ -10,6 +10,7 @@ from traiNNer.losses.gan_loss import (
     gradient_penalty_loss,
     r1_penalty,
 )
+from traiNNer.losses.loss_wrapper import ModelAsLoss
 
 # Import the new R3GAN loss classes for direct access (registered as "r3gan_loss" and "multi_scale_r3gan_loss")
 from traiNNer.losses.r3gan_loss import MultiScaleR3GANLoss, R3GANLoss
@@ -17,6 +18,7 @@ from traiNNer.utils import get_root_logger, scandir
 from traiNNer.utils.registry import LOSS_REGISTRY
 
 __all__ = [
+    "ModelAsLoss",
     "MultiScaleR3GANLoss",
     "R3GANLoss",
     "build_loss",

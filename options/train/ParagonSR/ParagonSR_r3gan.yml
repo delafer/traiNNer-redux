@@ -72,7 +72,7 @@ path:
 # Training Settings
 ###########################################################################################
 train:
-  ema_decay: 0.9999  # Very high EMA decay for stable fine-tuning
+  ema_decay: 0.999  # Adjusted for stable fine-tuning with new losses
   grad_clip: true     # Enable gradient clipping (essential for stability)
 
   optim_g:
@@ -100,7 +100,7 @@ train:
 
     # Charbonnier Loss - Foundation for content preservation
     - type: charbonnierloss
-      loss_weight: 0.3   # Balanced content preservation
+      loss_weight: 0.25   # Balanced content preservation
 
     # Multi-Scale SSIM - Structural similarity
     - type: mssimloss
@@ -111,7 +111,7 @@ train:
     # Standard perceptual loss (VGG-based)
     - type: perceptualloss
       criterion: charbonnier
-      loss_weight: 1.5   # Increased for sharper, more detailed results
+      loss_weight: 0.8   # Reduced to balance with contrastive loss, since current losses were overpowering contrastive added, i just might be sensitive to gan looks from all the gan trainings i did in the past
 
     # Enhanced color perception
     - type: hsluvloss
@@ -141,7 +141,7 @@ train:
     # R3GAN loss with gradient penalties for improved stability and reduced artifacts
     - type: ganloss
       gan_type: r3gan
-      loss_weight: 0.2   # Increased for sharper, more detailed results
+      loss_weight: 0.05   # Further reduced to combat GAN artifacts, i want to get the gan look under control, 185661 iters
       r1_weight: 3.0     # R1 penalty weight for stability
       r2_weight: 3.0     # R2 penalty weight for stability
 
@@ -151,6 +151,11 @@ train:
       loss_weight: 0.05  # A small weight to start, just to guide the generator
       scale: 4         # Must match your model's scale
       criterion: "charbonnier"
+
+    # CLIP-based Contrastive Loss for semantic realism, add at 175019 iters
+    - type: ContrastiveLoss
+      loss_weight: 1.0 # lets see if this can influence the gan look, increased a bit at 185661
+      temperature: 0.07
 
   # Mix of Augmentations (MoA)
   use_moa: false  # Whether to enable mixture of augmentations
