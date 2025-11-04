@@ -1,54 +1,43 @@
 #!/usr/bin/env python3
 """
-ParagonSR v2: Next-Generation Super-Resolution Architecture
+ParagonSR v2.1: A Refined, Deployment-Ready Super-Resolution Architecture
 Author: Philip Hofmann
 
 Description:
-ParagonSR v2 is the next evolution of the ParagonSR architecture, incorporating
-cutting-edge research to deliver a significant leap in perceptual quality and
-restoration intelligence. It is designed for users who want the absolute best
-image quality possible from a real-time, efficient CNN.
+ParagonSR v2.1 is the definitive evolution of the ParagonSR series. It is a
+synergistic blend of the V2 architecture's content-aware intelligence with a
+series of targeted refinements aimed at maximizing training speed, numerical
+stability, and deployment robustness for ONNX, TensorRT, and INT8 quantization.
 
 Licensed under the MIT License.
 
 -------------------------------------------------------------------------------------
-Core Philosophy of v2: Smarter, Not Bigger
+Core Philosophy of v2.1: Professional-Grade Practicality
 
-While ParagonSR v1 established a powerful baseline, v2 focuses on making the
-network more content-aware and adaptive. The goal is not to be larger or deeper,
-but to achieve a higher level of "intelligence" within the same parameter budget.
+This version prioritizes the trade-offs that matter for real-world application.
+It is designed to deliver state-of-the-art perceptual quality while ensuring the
+resulting model is fast, efficient, and easy to deploy.
 
-The key trade-off:
--   **Training:** V2 is moderately more demanding to train (slower epochs, slightly
-    higher VRAM) due to its more complex training-time architecture.
--   **Inference:** V2 is **identical in speed and VRAM usage** to a V1 model of
-    the same size. All training-time complexity is fused away for deployment.
+Key Refinements in v2.1:
+1.  **Normalization-Free Blocks:** `GroupNorm` layers have been removed from the
+    core blocks. This significantly simplifies the data path, making the model
+    faster to train and far more compatible with post-training quantization (INT8).
+    Training stability is maintained through the robust residual structure and
+    the use of LayerScale.
+2.  **Standardized Activation:** The `Mish` activation function has been replaced
+    with `LeakyReLU`. This provides a tangible speed boost and guarantees optimal,
+    hardware-accelerated support across all major inference engines.
+3.  **Superior Upsampling:** The architecture retains the "Magic-Conv" upsampler,
+    using the Magic Kernel Sharp 2021 algorithm to ensure the final output is
+    free from the common artifacts associated with other methods like PixelShuffle.
 
-The result is a model that produces visibly superior results for the same
-inference cost.
-
--------------------------------------------------------------------------------------
-Key Architectural Innovation: The Dynamic Transformer Block
-
-The primary innovation in v2 is the replacement of the GatedFFN with a new
-`DynamicTransformer` module inside the `ParagonBlockV2`. This module is inspired
-by the latest research into dynamic, context-aware convolutions.
-
-1.  **Dynamic Kernel Generation:** A tiny, efficient "kernel predictor" network
-    analyzes the incoming feature map and generates a unique 3x3 depth-wise
-    convolutional kernel *for that specific input*.
-2.  **Content-Adaptive Processing:** This allows the network to perform specialized
-    local processing. For example, it can learn to generate "line-sharpening"
-    kernels for edges and "de-blocking/smoothing" kernels for flat areas, all
-    within the same layer. This is a far more powerful and explicit form of
-    adaptation than what was possible in V1.
-3.  **Full Fusibility:** The underlying convolution in the Dynamic Transformer
-    remains a `ReparamConvV2`, ensuring that the entire architecture is fully
-    optimizable for deployment.
+The result is a model that is not only powerful in theory but also practical
+and robust in application.
 
 Usage:
--   Place this file in your `traiNNer/archs/` directory as `paragonsr_v2.py`.
--   In your config.yaml, use one of the new, recalibrated v2 variants, e.g.:
+-   Place this file in your `traiNNer/archs/` directory.
+-   Ensure your `resampler.py` file is in the same directory.
+-   In your config.yaml, use one of the v2 variants, e.g.:
     `network_g: type: paragonsr_v2_s`
 """
 
@@ -58,7 +47,9 @@ from torch import nn
 
 from traiNNer.utils.registry import ARCH_REGISTRY
 
-# --- Building Blocks (Proven components carried over from V1) ---
+from .resampler import MagicKernelSharp2021Upsample
+
+# --- Building Blocks (Proven components from V1) ---
 
 
 class ReparamConvV2(nn.Module):
@@ -90,7 +81,8 @@ class ReparamConvV2(nn.Module):
                 in_channels, out_channels, 3, stride, 1, groups=in_channels, bias=True
             )
 
-    def get_fused_kernels(self) -> (torch.Tensor, torch.Tensor):
+    def get_fused_kernels(self) -> tuple[torch.Tensor, torch.Tensor]:
+        """Performs the mathematical fusion of the training-time branches."""
         fused_kernel, fused_bias = (
             self.conv3x3.weight.clone(),
             self.conv3x3.bias.clone(),
@@ -109,6 +101,7 @@ class ReparamConvV2(nn.Module):
         return fused_kernel, fused_bias
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Uses multi-branch for training and stateless on-the-fly fusion for eval."""
         if self.training:
             out = self.conv3x3(x) + self.conv1x1(x)
             if self.dw_conv3x3 is not None:
@@ -120,6 +113,11 @@ class ReparamConvV2(nn.Module):
 
 
 class InceptionDWConv2d(nn.Module):
+    """
+    Efficiently captures features at multiple spatial scales (square, horizontal,
+    vertical) with high parameter efficiency, inspired by MoSRv2/RTMoSR.
+    """
+
     def __init__(
         self,
         in_channels: int,
@@ -148,6 +146,11 @@ class InceptionDWConv2d(nn.Module):
 
 
 class LayerScale(nn.Module):
+    """
+    A key stabilization technique for deep networks. It applies a learnable
+    scaling factor to the output of a residual block, preventing signal explosion.
+    """
+
     def __init__(self, dim: int, init_values: float = 1e-5) -> None:
         super().__init__()
         self.gamma = nn.Parameter(init_values * torch.ones(dim))
@@ -160,13 +163,13 @@ class LayerScale(nn.Module):
         )
 
 
-# --- V2 Core Innovation ---
+# --- V2.1 Core Innovation ---
 
 
 class DynamicKernelGenerator(nn.Module):
     """
-    A compact and efficient sub-network that generates convolutional kernels
-    dynamically based on the global context of the input features.
+    A compact sub-network that generates convolutional kernels dynamically
+    based on the global context of the input features.
     """
 
     def __init__(self, dim: int, kernel_size: int = 3) -> None:
@@ -190,8 +193,8 @@ class DynamicKernelGenerator(nn.Module):
 class DynamicTransformer(nn.Module):
     """
     The heart of ParagonSR v2. This block uses a dynamically generated kernel
-    to perform content-aware feature transformation. It replaces the GatedFFN
-    from V1.
+    to perform content-aware feature transformation. It is the source of the
+    model's ability to adapt its spatial processing to the input image.
     """
 
     def __init__(self, dim: int, expansion_ratio: float = 2.0) -> None:
@@ -199,11 +202,11 @@ class DynamicTransformer(nn.Module):
         hidden_dim = int(dim * expansion_ratio)
         self.project_in = nn.Conv2d(dim, hidden_dim, 1)
         self.kernel_generator = DynamicKernelGenerator(hidden_dim)
-        # We don't use this layer's forward pass, but we keep it so that its
-        # parameters are part of the model's state_dict. At inference time,
-        # the fusion logic will find and fuse this layer.
+        # This layer is a placeholder for fusion. Its parameters will be part
+        # of the model's state_dict, but its forward pass is only used during inference.
         self.dynamic_conv = ReparamConvV2(hidden_dim, hidden_dim, groups=hidden_dim)
-        self.act = nn.Mish(inplace=True)
+        # Using LeakyReLU for universal, high-speed hardware support.
+        self.act = nn.LeakyReLU(0.1, inplace=True)
         self.project_out = nn.Conv2d(hidden_dim, dim, 1)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -212,13 +215,14 @@ class DynamicTransformer(nn.Module):
         if self.training:
             b, c, h, w = x.shape
             kernels = self.kernel_generator(x)  # (B, C, 3, 3)
+            # The dynamic convolution is performed as a single large grouped convolution
+            # where each channel in the batch gets its own unique kernel.
             x_reshaped = x.view(1, b * c, h, w)
             kernels_reshaped = kernels.view(b * c, 1, 3, 3)
-            # Perform dynamic convolution using the generated kernels
             y = F.conv2d(x_reshaped, kernels_reshaped, padding=1, groups=b * c)
             y = y.view(b, c, h, w)
         else:
-            # During inference, we revert to a standard, non-dynamic convolution.
+            # During inference, we revert to the standard, non-dynamic reparam-conv.
             # The "knowledge" of the kernel generator has been baked into the
             # other model parameters through training.
             y = self.dynamic_conv(x)
@@ -227,32 +231,33 @@ class DynamicTransformer(nn.Module):
 
 
 class ParagonBlockV2(nn.Module):
-    """The core block of ParagonSR v2."""
+    """
+    The core block of ParagonSR v2.1. This version is normalization-free,
+    relying on residual connections and LayerScale for stability. This design
+    improves training speed and ONNX/INT8 deployment robustness.
+    """
 
     def __init__(self, dim: int, ffn_expansion: float = 2.0, **block_kwargs) -> None:
         super().__init__()
-        self.norm1 = nn.GroupNorm(num_groups=1, num_channels=dim)
         self.context = InceptionDWConv2d(dim, **block_kwargs)
         self.ls1 = LayerScale(dim)
-
-        self.norm2 = nn.GroupNorm(num_groups=1, num_channels=dim)
         self.transformer = DynamicTransformer(dim, expansion_ratio=ffn_expansion)
         self.ls2 = LayerScale(dim)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         residual = x
-        x_normed = self.norm1(x)
-        x = self.context(x_normed)
+        x = self.context(x)
         x = residual + self.ls1(x)
 
         residual = x
-        x_normed = self.norm2(x)
-        x = self.transformer(x_normed)
+        x = self.transformer(x)
         x = residual + self.ls2(x)
         return x
 
 
 class ResidualGroupV2(nn.Module):
+    """A group of ParagonBlocks with a residual connection for stable training."""
+
     def __init__(
         self, dim: int, num_blocks: int, ffn_expansion: float = 2.0, **block_kwargs
     ) -> None:
@@ -268,7 +273,12 @@ class ResidualGroupV2(nn.Module):
         return self.blocks(x) + x
 
 
+# --- Main Architecture ---
+
+
 class ParagonSRv2(nn.Module):
+    """The complete ParagonSR v2.1 architecture."""
+
     def __init__(
         self,
         scale: int = 4,
@@ -283,7 +293,11 @@ class ParagonSRv2(nn.Module):
         if block_kwargs is None:
             block_kwargs = {}
         self.scale = scale
+
+        # --- Shallow Feature Extraction ---
         self.conv_in = nn.Conv2d(in_chans, num_feat, 3, 1, 1)
+
+        # --- Deep Feature Extraction (The Body) ---
         self.body = nn.Sequential(
             *[
                 ResidualGroupV2(num_feat, num_blocks, ffn_expansion, **block_kwargs)
@@ -291,15 +305,20 @@ class ParagonSRv2(nn.Module):
             ]
         )
         self.conv_fuse = nn.Conv2d(num_feat, num_feat, 3, 1, 1)
-        self.upsampler = nn.Sequential(
-            nn.Conv2d(num_feat, num_feat * scale * scale, 3, 1, 1),
-            nn.PixelShuffle(scale),
-        )
+
+        # --- Upsampling Block: The "Magic-Conv" ---
+        # Using the Magic Kernel Sharp 2021 provides a sharper, cleaner, and more
+        # foundationally sound input for the final stage of image reconstruction,
+        # avoiding common artifacts from other upsampling methods.
+        self.magic_upsampler = MagicKernelSharp2021Upsample(in_channels=num_feat)
+        self.upsampler = nn.Conv2d(num_feat, num_feat, 3, 1, 1)
+
+        # --- Final Image Reconstruction ---
         self.conv_out = nn.Conv2d(num_feat, in_chans, 3, 1, 1)
 
     def fuse_for_release(self):
         """Fuses all ReparamConvV2 blocks for deployment."""
-        print("Fusing ParagonSR v2 model for release...")
+        print("Fusing ParagonSR v2.1 model for release...")
         for name, module in self.named_modules():
             if isinstance(module, ReparamConvV2):
                 parent_name, child_name = name.rsplit(".", 1)
@@ -324,7 +343,8 @@ class ParagonSRv2(nn.Module):
         x_shallow = self.conv_in(x)
         x_deep = self.body(x_shallow)
         x_fused = self.conv_fuse(x_deep) + x_shallow
-        return self.conv_out(self.upsampler(x_fused))
+        x_upsampled = self.magic_upsampler(x_fused, scale_factor=self.scale)
+        return self.conv_out(self.upsampler(x_upsampled))
 
 
 # --- Factory Registration for traiNNer-redux: The Recalibrated V2 Family ---
@@ -333,15 +353,15 @@ class ParagonSRv2(nn.Module):
 @ARCH_REGISTRY.register()
 def paragonsr_v2_anime(scale: int = 4, **kwargs) -> ParagonSRv2:
     """
-    ParagonSR-v2-Anime: Architecturally specialized for anime/cartoon restoration.
-    Features larger kernels for clean line reconstruction and a hyper-efficient
-    design for maximum real-time performance.
+    V2-Anime: Specialized for animation. Features wider context kernels for clean
+    line reconstruction and an efficient design for real-time performance.
+    - Target Hardware (Train): ~8-12GB VRAM GPUs (RTX 3060).
     """
     return ParagonSRv2(
         scale=scale,
         num_feat=28,
         num_groups=2,
-        num_blocks=2,
+        num_blocks=3,
         ffn_expansion=1.5,
         block_kwargs={"band_kernel_size": 15},
     )
@@ -350,33 +370,34 @@ def paragonsr_v2_anime(scale: int = 4, **kwargs) -> ParagonSRv2:
 @ARCH_REGISTRY.register()
 def paragonsr_v2_tiny(scale: int = 4, **kwargs) -> ParagonSRv2:
     """
-    ParagonSR-v2-Tiny: The new baseline for high-speed, general-purpose use.
-    It's smaller and more efficient than its V1 counterpart, aiming to deliver
-    similar or better quality at a lower computational cost.
+    V2-Tiny: The ideal starting point for quick tests and low-resource training.
+    Excellent for validating a training pipeline.
+    - Target Hardware (Train): ~6-8GB VRAM GPUs (GTX 1660S, RTX 3050).
     """
     return ParagonSRv2(
-        scale=scale, num_feat=28, num_groups=3, num_blocks=2, ffn_expansion=2.0
+        scale=scale, num_feat=32, num_groups=3, num_blocks=2, ffn_expansion=2.0
     )
 
 
 @ARCH_REGISTRY.register()
 def paragonsr_v2_s(scale: int = 4, **kwargs) -> ParagonSRv2:
     """
-    ParagonSR-v2-S: The flagship and scientific benchmark. It has the *same* size
-    and speed as the V1 'S' model, designed to definitively prove the architectural
-    superiority of V2 through higher-quality results.
+    V2-S (Recalibrated): The flagship model, designed for high quality on
+    mainstream hardware. It leverages the intelligent V2 architecture to achieve
+    superior results within a practical training budget.
+    - Target Hardware (Train): ~12GB VRAM GPUs (RTX 3060, RTX 2080 Ti).
     """
     return ParagonSRv2(
-        scale=scale, num_feat=64, num_groups=6, num_blocks=6, ffn_expansion=2.0
+        scale=scale, num_feat=56, num_groups=5, num_blocks=5, ffn_expansion=2.0
     )
 
 
 @ARCH_REGISTRY.register()
 def paragonsr_v2_m(scale: int = 4, **kwargs) -> ParagonSRv2:
     """
-    ParagonSR-v2-M: The prosumer choice for high-fidelity restoration. Serves the
-    same hardware targets as V1-M (~16GB GPUs) but pushes quality to a new level
-    thanks to the more intelligent V2 architecture.
+    V2-M: The prosumer choice for future hardware, offering a significant
+    jump in expressive power for higher fidelity restoration.
+    - Target Hardware (Train): ~16-24GB VRAM GPUs (RTX 3090, RTX 4080).
     """
     return ParagonSRv2(
         scale=scale, num_feat=96, num_groups=8, num_blocks=8, ffn_expansion=2.0
@@ -386,9 +407,8 @@ def paragonsr_v2_m(scale: int = 4, **kwargs) -> ParagonSRv2:
 @ARCH_REGISTRY.register()
 def paragonsr_v2_l(scale: int = 4, **kwargs) -> ParagonSRv2:
     """
-    ParagonSR-v2-L: The enthusiast's choice for near-SOTA quality. Targets high-end
-    hardware (~24GB+ GPUs), leveraging the V2 design to produce exceptionally
-    detailed and artifact-free images.
+    V2-L: The enthusiast's choice for near-SOTA quality on high-end hardware.
+    - Target Hardware (Train): ~24GB+ VRAM GPUs (RTX 4090).
     """
     return ParagonSRv2(
         scale=scale, num_feat=128, num_groups=10, num_blocks=10, ffn_expansion=2.0
@@ -398,8 +418,9 @@ def paragonsr_v2_l(scale: int = 4, **kwargs) -> ParagonSRv2:
 @ARCH_REGISTRY.register()
 def paragonsr_v2_xl(scale: int = 4, **kwargs) -> ParagonSRv2:
     """
-    ParagonSR-v2-XL: The ultimate research-grade model for chasing state-of-the-art
-    benchmarks, designed for top-tier accelerator cards (48GB+).
+    V2-XL: The ultimate research-grade model for chasing state-of-the-art
+    benchmarks, designed for top-tier accelerator cards.
+    - Target Hardware (Train): 48GB+ VRAM (NVIDIA A100, H100).
     """
     return ParagonSRv2(
         scale=scale, num_feat=160, num_groups=12, num_blocks=12, ffn_expansion=2.0
