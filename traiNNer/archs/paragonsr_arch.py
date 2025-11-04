@@ -62,6 +62,8 @@ from torch import nn
 
 from traiNNer.utils.registry import ARCH_REGISTRY
 
+from .resampler import MagicKernelSharp2021Upsample
+
 # --- Building Blocks ---
 
 
@@ -263,18 +265,27 @@ class ParagonSR(nn.Module):
             ]
         )
         self.conv_fuse = nn.Conv2d(num_feat, num_feat, 3, 1, 1)
-        # --- Upsampling Block ---
-        # Changed from PixelShuffle to a Resize+Conv block to mitigate checkerboard artifacts
-        # and improve ONNX compatibility.
-        #
-        # Why 'nearest' mode?:
-        # 1. Information Preservation: 'nearest' is a lossless operation. It duplicates
-        #    features without averaging, preserving the exact information for the CNN.
-        # 2. Maximum Control for CNN: It provides the raw, up-scaled features to the
-        #    convolutional layer, giving it maximum freedom to learn the optimal way
-        #    to interpolate and reconstruct details.
+
+        # --- Upsampling Block Evolution: The "Magic-Conv" ---
+        # The upsampling strategy has been a critical focus of this architecture,
+        # evolving through several stages to maximize quality and compatibility.
+        # 1. Initial Approach: `PixelShuffle`. While efficient, it produced subtle
+        #    rasterization artifacts in practice, particularly on the 4x 's' variant when
+        #    trained with adversarial losses (R3GAN).
+        # 2. Intermediate Solution: `Resize+Conv`. To eliminate artifacts and
+        #    ensure flawless dynamic ONNX export, the design shifted to a
+        #    pre-upsampling block. `Nearest-Neighbor+Conv` was chosen over
+        #    Bilinear to avoid detail loss, but it introduced blocky artifacts,
+        #    especially visible in early training stages.
+        # 3. Final Architecture: Magic Kernel Sharp 2021 Upsample + Conv. Extensive
+        #    research led to the discovery of the Magic Kernel, a resampling
+        #    algorithm with superior anti-aliasing properties. It surpasses
+        #    traditional methods like Lanczos-3 in perceptual quality and artifact
+        #    suppression. This "magic-conv" block provides the network with a
+        #    sharper, cleaner, and more foundationally sound input, significantly
+        #    improving the final output quality.
+        self.magic_upsampler = MagicKernelSharp2021Upsample(in_channels=num_feat)
         self.upsampler = nn.Sequential(
-            nn.Upsample(scale_factor=scale, mode="nearest"),
             nn.Conv2d(num_feat, num_feat, 3, 1, 1),
         )
         self.conv_out = nn.Conv2d(num_feat, in_chans, 3, 1, 1)
@@ -306,7 +317,8 @@ class ParagonSR(nn.Module):
         x_shallow = self.conv_in(x)
         x_deep = self.body(x_shallow)
         x_fused = self.conv_fuse(x_deep) + x_shallow
-        return self.conv_out(self.upsampler(x_fused))
+        x_upsampled = self.magic_upsampler(x_fused, scale_factor=self.scale)
+        return self.conv_out(self.upsampler(x_upsampled))
 
 
 # --- Factory Registration for traiNNer-redux: The Complete Family ---
