@@ -38,7 +38,7 @@ class SafeGradientPenalty:
             )[0]
 
             # Reshape gradients and compute penalty
-            gradients = gradients.view(gradients.size(0), -1)
+            gradients = gradients.reshape(gradients.size(0), -1)
             grad_penalty = (gradients.norm(2, dim=1) ** 2).mean()
 
             return grad_penalty * penalty_weight

@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-ParagonSR v2.1: A Refined, Deployment-Ready Super-Resolution Architecture
+ParagonSR2: A Refined, Deployment-Ready Super-Resolution Architecture
 Author: Philip Hofmann
 
 Description:
-ParagonSR v2.1 is the definitive evolution of the ParagonSR series. It is a
+ParagonSR2 is the definitive evolution of the ParagonSR series. It is a
 synergistic blend of the V2 architecture's content-aware intelligence with a
 series of targeted refinements aimed at maximizing training speed, numerical
 stability, and deployment robustness for ONNX, TensorRT, and INT8 quantization.
@@ -12,13 +12,13 @@ stability, and deployment robustness for ONNX, TensorRT, and INT8 quantization.
 Licensed under the MIT License.
 
 -------------------------------------------------------------------------------------
-Core Philosophy of v2.1: Professional-Grade Practicality
+Core Philosophy of 2: Professional-Grade Practicality
 
 This version prioritizes the trade-offs that matter for real-world application.
 It is designed to deliver state-of-the-art perceptual quality while ensuring the
 resulting model is fast, efficient, and easy to deploy.
 
-Key Refinements in v2.1:
+Key Refinements in 2:
 1.  **Normalization-Free Blocks:** `GroupNorm` layers have been removed from the
     core blocks. This significantly simplifies the data path, making the model
     faster to train and far more compatible with post-training quantization (INT8).
@@ -187,7 +187,7 @@ class DynamicKernelGenerator(nn.Module):
         """Generates kernels with shape (B, C, K, K)"""
         batch_size, dim, _, _ = x.shape
         kernels = self.predictor(x)
-        return kernels.view(batch_size, dim, self.kernel_size, self.kernel_size)
+        return kernels.reshape(batch_size, dim, self.kernel_size, self.kernel_size)
 
 
 class DynamicTransformer(nn.Module):
@@ -217,10 +217,10 @@ class DynamicTransformer(nn.Module):
             kernels = self.kernel_generator(x)  # (B, C, 3, 3)
             # The dynamic convolution is performed as a single large grouped convolution
             # where each channel in the batch gets its own unique kernel.
-            x_reshaped = x.view(1, b * c, h, w)
-            kernels_reshaped = kernels.view(b * c, 1, 3, 3)
+            x_reshaped = x.reshape(1, b * c, h, w)
+            kernels_reshaped = kernels.reshape(b * c, 1, 3, 3)
             y = F.conv2d(x_reshaped, kernels_reshaped, padding=1, groups=b * c)
-            y = y.view(b, c, h, w)
+            y = y.reshape(b, c, h, w)
         else:
             # During inference, we revert to the standard, non-dynamic reparam-conv.
             # The "knowledge" of the kernel generator has been baked into the
@@ -276,7 +276,7 @@ class ResidualGroupV2(nn.Module):
 # --- Main Architecture ---
 
 
-class ParagonSRv2(nn.Module):
+class ParagonSR2(nn.Module):
     """The complete ParagonSR v2.1 architecture."""
 
     def __init__(
@@ -351,13 +351,13 @@ class ParagonSRv2(nn.Module):
 
 
 @ARCH_REGISTRY.register()
-def paragonsr_v2_anime(scale: int = 4, **kwargs) -> ParagonSRv2:
+def paragonsr2_anime(scale: int = 4, **kwargs) -> ParagonSR2:
     """
     V2-Anime: Specialized for animation. Features wider context kernels for clean
     line reconstruction and an efficient design for real-time performance.
     - Target Hardware (Train): ~8-12GB VRAM GPUs (RTX 3060).
     """
-    return ParagonSRv2(
+    return ParagonSR2(
         scale=scale,
         num_feat=28,
         num_groups=2,
@@ -368,60 +368,60 @@ def paragonsr_v2_anime(scale: int = 4, **kwargs) -> ParagonSRv2:
 
 
 @ARCH_REGISTRY.register()
-def paragonsr_v2_tiny(scale: int = 4, **kwargs) -> ParagonSRv2:
+def paragonsr2_tiny(scale: int = 4, **kwargs) -> ParagonSR2:
     """
     V2-Tiny: The ideal starting point for quick tests and low-resource training.
     Excellent for validating a training pipeline.
     - Target Hardware (Train): ~6-8GB VRAM GPUs (GTX 1660S, RTX 3050).
     """
-    return ParagonSRv2(
+    return ParagonSR2(
         scale=scale, num_feat=32, num_groups=3, num_blocks=2, ffn_expansion=2.0
     )
 
 
 @ARCH_REGISTRY.register()
-def paragonsr_v2_s(scale: int = 4, **kwargs) -> ParagonSRv2:
+def paragonsr2_s(scale: int = 4, **kwargs) -> ParagonSR2:
     """
     V2-S (Recalibrated): The flagship model, designed for high quality on
     mainstream hardware. It leverages the intelligent V2 architecture to achieve
     superior results within a practical training budget.
     - Target Hardware (Train): ~12GB VRAM GPUs (RTX 3060, RTX 2080 Ti).
     """
-    return ParagonSRv2(
+    return ParagonSR2(
         scale=scale, num_feat=56, num_groups=5, num_blocks=5, ffn_expansion=2.0
     )
 
 
 @ARCH_REGISTRY.register()
-def paragonsr_v2_m(scale: int = 4, **kwargs) -> ParagonSRv2:
+def paragonsr2_m(scale: int = 4, **kwargs) -> ParagonSR2:
     """
     V2-M: The prosumer choice for future hardware, offering a significant
     jump in expressive power for higher fidelity restoration.
     - Target Hardware (Train): ~16-24GB VRAM GPUs (RTX 3090, RTX 4080).
     """
-    return ParagonSRv2(
+    return ParagonSR2(
         scale=scale, num_feat=96, num_groups=8, num_blocks=8, ffn_expansion=2.0
     )
 
 
 @ARCH_REGISTRY.register()
-def paragonsr_v2_l(scale: int = 4, **kwargs) -> ParagonSRv2:
+def paragonsr2_l(scale: int = 4, **kwargs) -> ParagonSR2:
     """
     V2-L: The enthusiast's choice for near-SOTA quality on high-end hardware.
     - Target Hardware (Train): ~24GB+ VRAM GPUs (RTX 4090).
     """
-    return ParagonSRv2(
+    return ParagonSR2(
         scale=scale, num_feat=128, num_groups=10, num_blocks=10, ffn_expansion=2.0
     )
 
 
 @ARCH_REGISTRY.register()
-def paragonsr_v2_xl(scale: int = 4, **kwargs) -> ParagonSRv2:
+def paragonsr2_xl(scale: int = 4, **kwargs) -> ParagonSR2:
     """
     V2-XL: The ultimate research-grade model for chasing state-of-the-art
     benchmarks, designed for top-tier accelerator cards.
     - Target Hardware (Train): 48GB+ VRAM (NVIDIA A100, H100).
     """
-    return ParagonSRv2(
+    return ParagonSR2(
         scale=scale, num_feat=160, num_groups=12, num_blocks=12, ffn_expansion=2.0
     )

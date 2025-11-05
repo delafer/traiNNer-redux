@@ -1,8 +1,10 @@
 # yaml-language-server: $schema=https://raw.githubusercontent.com/the-database/traiNNer-redux/refs/heads/master/schemas/redux-config.schema.json
-name: 2x_ParagonSR_Tiny_Perceptual
+name: 2x_ParagonSR2_Tiny_Perceptual
 scale: 2
 use_amp: true
-amp_bf16: true
+amp_bf16: false
+use_channels_last: true
+fast_matmul: true
 num_gpu: auto
 
 # -------------------------------------------------------------------------------------------------
@@ -14,24 +16,24 @@ datasets:
     type: pairedimagedataset
     dataroot_gt: /home/phips/Documents/dataset/cc0/hr
     dataroot_lq: /home/phips/Documents/dataset/cc0/lr_x2
-    lq_size: 128  # 128px -> 256px
+    lq_size: 64
     use_hflip: true
     use_rot: true
     num_worker_per_gpu: 8
-    batch_size_per_gpu: 4 # Can be increased for tiny model if VRAM allows
+    batch_size_per_gpu: 8
     accum_iter: 1
 
   val:
     name: Val_Dataset
     type: pairedimagedataset
     dataroot_gt: /home/phips/Documents/dataset/cc0/val_hr
-    dataroot_lq: /home/phips/Documents/dataset/cc0/val_x2
+    dataroot_lq: /home/phips/Documents/dataset/cc0/val_lr_x2
 
 # -------------------------------------------------------------------------------------------------
 # Network
 # -------------------------------------------------------------------------------------------------
 network_g:
-  type: paragonsr_v2_tiny
+  type: paragonsr2_tiny
 
 network_d:
   type: dunet
@@ -101,9 +103,9 @@ train:
     # Adversarial (Subtle)
     - type: ganloss
       gan_type: r3gan
-      loss_weight: 0.01
-      r1_penalty_weight: 1.0
-      r2_penalty_weight: 1.0
+      loss_weight: 0.05
+      r1_weight: 3.0
+      r2_weight: 3.0
 
 # -------------------------------------------------------------------------------------------------
 # Validation
@@ -113,6 +115,7 @@ val:
   val_freq: 2500
   save_img: true
 
+  metrics_enabled: true
   metrics:
     psnr:
       type: calculate_psnr
@@ -128,6 +131,8 @@ val:
     dists:
       type: calculate_dists
       better: lower
+    topiq:
+      type: calculate_topiq
 
 # -------------------------------------------------------------------------------------------------
 # Logging
