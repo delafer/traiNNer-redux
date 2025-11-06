@@ -475,6 +475,18 @@ class ParagonSR2(nn.Module):
         """Fuses all ReparamConvV2 blocks for deployment."""
         print("Fusing ParagonSR v2.1 model for release...")
         for name, module in self.named_modules():
+            if isinstance(module, DynamicTransformer):
+                tracked_initialized = cast(torch.Tensor, module.tracked_initialized)
+                if not bool(tracked_initialized.item()):
+                    warnings.warn(
+                        f"{name}: tracked kernel statistics were not initialized before fusion. "
+                        "The identity kernel will be used. Run a brief calibration pass before fusion for best quality.",
+                        stacklevel=2,
+                    )
+                module.enable_static_mode(True)
+                module.kernel_generator = None
+                continue
+
             if isinstance(module, ReparamConvV2):
                 parent_name, child_name = name.rsplit(".", 1)
                 parent_module = self.get_submodule(parent_name)
@@ -508,6 +520,22 @@ class ParagonSR2(nn.Module):
 
 
 # --- Factory Registration for traiNNer-redux: The Recalibrated V2 Family ---
+
+
+@ARCH_REGISTRY.register()
+def paragonsr2_nano(scale: int = 4, **kwargs) -> ParagonSR2:
+    """
+    V2-Nano: Ultra-light configuration for rapid prototyping and low-VRAM hardware.
+    - Target Hardware (Train): ~4GB VRAM GPUs (GTX 1650, RTX 3050 Laptop).
+    """
+    return ParagonSR2(
+        scale=scale,
+        num_feat=24,
+        num_groups=2,
+        num_blocks=2,
+        ffn_expansion=1.5,
+        block_kwargs={"band_kernel_size": 9},
+    )
 
 
 @ARCH_REGISTRY.register()
