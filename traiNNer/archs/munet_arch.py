@@ -26,36 +26,43 @@ class UpBlock(nn.Module):
     to preserve anti-aliasing and sharpness characteristics.
     """
 
-    def __init__(self, in_feat: int, out_feat: int, slope: float = 0.2) -> None:
+    def __init__(
+        self,
+        in_feat: int,
+        skip_feat: int,
+        out_feat: int | None = None,
+        slope: float = 0.2,
+    ) -> None:
         super().__init__()
+
+        if out_feat is None:
+            out_feat = skip_feat
 
         # Upsampling layer with the custom Magic kernel resampler
         self.magic_upsample = MagicKernelSharp2021Upsample(in_feat)
 
-        # Convolution to reduce aliasing and control channel mixing
+        # Convolution to reduce aliasing and align channel count with the skip connection
         self.post_upsample_conv = spectral_norm(
-            nn.Conv2d(in_feat, out_feat, 3, 1, 1, bias=False)
+            nn.Conv2d(in_feat, skip_feat, 3, 1, 1, bias=False)
         )
+
+        fusion_in_channels = skip_feat + skip_feat
 
         # Fusion layer (processes concatenated skip connection)
         self.fusion_conv = nn.Sequential(
-            spectral_norm(nn.Conv2d(out_feat * 2, out_feat, 3, 1, 1, bias=False)),
+            spectral_norm(nn.Conv2d(fusion_in_channels, out_feat, 3, 1, 1, bias=False)),
             nn.LeakyReLU(slope, inplace=True),
         )
 
     def forward(self, x: Tensor, skip: Tensor) -> Tensor:
-        # Compute approximate scale factor
+        # Compute scale ratios relative to the skip connection
         scale_h = skip.shape[2] / x.shape[2]
         scale_w = skip.shape[3] / x.shape[3]
-        scale_factor = (scale_h + scale_w) * 0.5
 
-        # Handle non-integer scaling (e.g., due to rounding)
-        if abs(scale_factor - round(scale_factor)) > 1e-3:
-            # Use nearest-neighbor pre-resize, then Magic kernel smoothing
-            x = F.interpolate(x, size=skip.shape[2:], mode="nearest")
-            x = self.magic_upsample(x, scale_factor=1)
+        if abs(scale_h - 1.0) < 1e-6 and abs(scale_w - 1.0) < 1e-6:
+            x = self.magic_upsample(x, 1.0)
         else:
-            x = self.magic_upsample(x, scale_factor=round(scale_factor))
+            x = self.magic_upsample(x, (scale_h, scale_w))
 
         x = self.post_upsample_conv(x)
 
@@ -92,10 +99,12 @@ class MUNet(nn.Module):
 
         # --- Encoder ---
         self.down_blocks = nn.ModuleList()
+        encoder_channels = [num_feat]
         in_ch = num_feat
         for mult in ch_mult:
             out_ch = num_feat * mult
             self.down_blocks.append(DownBlock(in_ch, out_ch, slope))
+            encoder_channels.append(out_ch)
             in_ch = out_ch
 
         # --- Bottleneck ---
@@ -108,10 +117,13 @@ class MUNet(nn.Module):
 
         # --- Decoder ---
         self.up_blocks = nn.ModuleList()
-        for mult in reversed(ch_mult):
-            out_ch = num_feat * mult
-            self.up_blocks.append(UpBlock(in_ch, out_ch, slope))
-            in_ch = out_ch
+        decoder_specs = list(reversed(encoder_channels[:-1]))
+        in_ch = encoder_channels[-1]
+        for skip_ch in decoder_specs:
+            self.up_blocks.append(
+                UpBlock(in_ch, skip_ch, out_feat=skip_ch, slope=slope)
+            )
+            in_ch = skip_ch
 
         # --- Output ---
         self.out_conv = spectral_norm(nn.Conv2d(num_feat, 1, 3, 1, 1))

@@ -1,7 +1,10 @@
+from typing import Any, cast
+
 import torch
 import torch.nn.functional as F
 from torch import nn
 from torchvision.transforms import InterpolationMode, v2
+from torchvision.transforms.v2 import functional as v2F
 
 from traiNNer.utils.registry import LOSS_REGISTRY
 
@@ -23,58 +26,97 @@ class ContrastiveLoss(nn.Module):
             temperature (float): Temperature parameter for the contrastive loss. Default: 0.1
         """
         super().__init__()
-        self.loss_weight = loss_weight
-        self.temperature = temperature
+        if temperature <= 0:
+            raise ValueError("temperature must be a positive float.")
+
+        self.loss_weight = float(loss_weight)
+        self.temperature = float(temperature)
+
+        # CLIP integration state
         self.use_clip = False
+        self.clip_model: nn.Module | None = None
+        self.clip_preprocess = v2.Compose(
+            [
+                v2.Resize(224, interpolation=InterpolationMode.BICUBIC, antialias=True),
+                v2.CenterCrop(224),
+                v2.Normalize(
+                    mean=(0.48145466, 0.4578275, 0.40821073),
+                    std=(0.26862954, 0.26130258, 0.27577711),
+                ),
+            ]
+        )
+        self._clip_model_name = "openai/clip-vit-base-patch32"
+        self._clip_device: torch.device | None = None
+        self._clip_cls: Any = None
 
         try:
-            from transformers import CLIPModel
+            from transformers import CLIPModel  # type: ignore
 
-            self.clip_model = CLIPModel.from_pretrained("openai/clip-vit-base-patch32")
-
-            # Freeze CLIP model
-            for param in self.clip_model.parameters():
-                param.requires_grad = False
-            self.clip_model.eval()
-
-            # Preprocessing transforms
-            self.clip_preprocess = v2.Compose(
-                [
-                    v2.Resize(
-                        224, interpolation=InterpolationMode.BICUBIC, antialias=True
-                    ),
-                    v2.CenterCrop(224),
-                    v2.Normalize(
-                        mean=(0.48145466, 0.4578275, 0.40821073),
-                        std=(0.26862954, 0.26130258, 0.27577711),
-                    ),
-                ]
-            )
+            self._clip_cls = CLIPModel
             self.use_clip = True
-
         except ImportError:
             print(
                 "Warning: transformers library not found. Using simplified contrastive loss."
             )
-        except Exception as e:
+        except Exception as exc:
             print(
-                f"Warning: Could not load CLIP model: {e}. Using simplified contrastive loss."
+                f"Warning: Could not provision CLIP model ({exc}). Using simplified contrastive loss."
             )
+            self._clip_cls = None
+            self.use_clip = False
+
+    def _ensure_clip_model(self, device: torch.device) -> bool:
+        """
+        Lazily load and place the CLIP model on the requested device.
+
+        Returns:
+            bool: True if the CLIP model is available and ready, False otherwise.
+        """
+        clip_cls = self._clip_cls
+        if not self.use_clip or clip_cls is None:
+            return False
+
+        clip_model = self.clip_model
+        if clip_model is None:
+            try:
+                clip_model = cast(
+                    nn.Module,
+                    clip_cls.from_pretrained(self._clip_model_name),  # type: ignore[attr-defined]
+                )
+            except Exception as exc:  # pragma: no cover - download/runtime error
+                print(
+                    f"Warning: Failed to load CLIP model '{self._clip_model_name}': {exc}. "
+                    "Falling back to simplified contrastive loss."
+                )
+                self.clip_model = None
+                self.use_clip = False
+                return False
+
+            for param in clip_model.parameters():
+                param.requires_grad = False
+            clip_model.eval()
+            self.clip_model = clip_model
+
+        if self._clip_device != device:
+            clip_model = self.clip_model
+            assert clip_model is not None
+            clip_model = clip_model.to(device)
+            self.clip_model = clip_model
+            self._clip_device = device
+
+        return True
 
     def extract_clip_features(self, images: torch.Tensor) -> torch.Tensor | None:
         """Extract features from images using CLIP."""
-        if not self.use_clip:
+        if not self._ensure_clip_model(images.device):
             return None
 
-        # Move CLIP model to the same device as the input images
-        self.clip_model.to(images.device)
+        images = self.clip_preprocess(images).float()
 
-        # Preprocess images
-        images = self.clip_preprocess(images)
-
-        # Extract features
+        clip_model = self.clip_model
+        assert clip_model is not None
         with torch.no_grad():
-            outputs = self.clip_model.get_image_features(pixel_values=images)
+            outputs = clip_model.get_image_features(pixel_values=images)  # type: ignore[arg-type]
 
         return outputs
 
@@ -93,12 +135,13 @@ class ContrastiveLoss(nn.Module):
             torch.Tensor: Computed contrastive loss
         """
         # Create negative samples using bicubic upsampling
-        bicubic_upscale = v2.Resize(
-            (gt.shape[2], gt.shape[3]),
+        target_size = (gt.shape[2], gt.shape[3])
+        negative = v2F.resize(
+            lq,
+            size=list(target_size),
             interpolation=InterpolationMode.BICUBIC,
             antialias=True,
         )
-        negative = bicubic_upscale(lq)
 
         if self.use_clip:
             # Extract CLIP features

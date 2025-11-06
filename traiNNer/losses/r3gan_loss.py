@@ -14,7 +14,8 @@ Key improvements:
 """
 
 import warnings
-from typing import Optional
+from collections.abc import Callable
+from typing import Any, Optional
 
 import torch
 from torch import Tensor, nn
@@ -123,16 +124,18 @@ class R3GANLoss(nn.Module):
     ) -> None:
         super().__init__()
         self.gan_type = gan_type
-        self.loss_weight = loss_weight
+        self.loss_weight = float(loss_weight)
         self.real_label_val = real_label_val
         self.fake_label_val = fake_label_val
         self.r1_weight = float(r1_weight)
         self.r2_weight = float(r2_weight)
         self.safe_grad_penalty = SafeGradientPenalty()
+        self.loss: nn.Module | None = None
+        self.loss_func: Callable[..., Tensor] | None = None
 
         # Register appropriate base losses for alternative GANs
         if gan_type == "r3gan":
-            self.loss_func = self._r3gan_loss
+            self.loss_func = None
         elif gan_type == "vanilla":
             self.loss = nn.BCEWithLogitsLoss()
             self.loss_func = self._vanilla_loss
@@ -157,9 +160,11 @@ class R3GANLoss(nn.Module):
         return input.new_full(input.size(), val)
 
     def _vanilla_loss(self, input: Tensor, target_is_real: bool, **_) -> Tensor:
+        assert self.loss is not None
         return self.loss(input, self._get_target_label(input, target_is_real))
 
     def _lsgan_loss(self, input: Tensor, target_is_real: bool, **_) -> Tensor:
+        assert self.loss is not None
         return self.loss(input, self._get_target_label(input, target_is_real))
 
     def _wgan_loss(self, input: Tensor, target_is_real: bool, **_) -> Tensor:
@@ -173,7 +178,9 @@ class R3GANLoss(nn.Module):
     ) -> Tensor:
         if is_disc:
             input = -input if target_is_real else input
-            return F.relu(1 + input).mean()
+            loss_module = self.loss
+            assert loss_module is not None
+            return torch.mean(loss_module(1 + input))
         else:
             return -input.mean()
 
@@ -281,8 +288,7 @@ class R3GANLoss(nn.Module):
         fake_mean = real_output.mean()
         loss_real = F.relu(1.0 + (real_output - real_mean)).mean()
         loss_fake = F.relu(1.0 - (fake_output - fake_mean)).mean()
-        g_loss = 0.5 * (loss_real + loss_fake)
-        return g_loss * self.loss_weight
+        return 0.5 * (loss_real + loss_fake)
 
     def _r3gan_loss(
         self,
@@ -318,15 +324,42 @@ class R3GANLoss(nn.Module):
         input: Tensor | None = None,
         target_is_real: bool | None = None,
         is_disc: bool = False,
-        **kwargs,
+        **kwargs: Any,
     ) -> Tensor | dict[str, Tensor]:
         if self.gan_type == "r3gan":
-            # R3GAN expects net_d/real_images/fake_images etc. passed via kwargs
-            return self._r3gan_loss(is_disc=is_disc, **kwargs)
-        else:
-            assert input is not None
-            assert target_is_real is not None
-            return self.loss_func(input, target_is_real, is_disc=is_disc, **kwargs)
+            loss_kwargs = dict(kwargs)
+            try:
+                net_d = loss_kwargs.pop("net_d")
+                real_images = loss_kwargs.pop("real_images")
+                fake_images = loss_kwargs.pop("fake_images")
+            except KeyError as exc:
+                raise TypeError(
+                    "R3GANLoss.forward requires 'net_d', 'real_images', and 'fake_images' when gan_type='r3gan'."
+                ) from exc
+
+            real_images_unaug = loss_kwargs.pop("real_images_unaug", None)
+            fake_images_unaug = loss_kwargs.pop("fake_images_unaug", None)
+
+            if loss_kwargs:
+                unexpected = ", ".join(sorted(loss_kwargs))
+                raise TypeError(
+                    f"Unexpected keyword arguments for R3GANLoss.forward: {unexpected}"
+                )
+
+            return self._r3gan_loss(
+                net_d=net_d,
+                real_images=real_images,
+                fake_images=fake_images,
+                is_disc=is_disc,
+                real_images_unaug=real_images_unaug,
+                fake_images_unaug=fake_images_unaug,
+            )
+
+        assert input is not None
+        assert target_is_real is not None
+        loss_func = self.loss_func
+        assert loss_func is not None
+        return loss_func(input, target_is_real, is_disc=is_disc, **kwargs)
 
 
 # ---------------------------------------------------------------------------- #
@@ -343,18 +376,39 @@ class MultiScaleR3GANLoss(R3GANLoss):
 
     def forward(
         self,
-        input: list[Tensor] | Tensor,
-        target_is_real: bool,
+        input: Tensor | list[Tensor] | None = None,
+        target_is_real: bool | None = None,
         is_disc: bool = False,
-        **kwargs,
+        **kwargs: Any,
     ) -> Tensor:
+        if self.gan_type == "r3gan":
+            raise NotImplementedError(
+                "MultiScaleR3GANLoss does not support gan_type='r3gan'. "
+                "Use R3GANLoss instead."
+            )
+
+        assert target_is_real is not None
         if isinstance(input, list):
             assert len(input) > 0, "Empty discriminator output list."
-            total = torch.tensor(0.0, device=input[0].device)
+            device = input[0].device
+            dtype = input[0].dtype
+            total = torch.zeros((), device=device, dtype=dtype)
             for pred in input:
                 if isinstance(pred, (list, tuple)):
                     pred = pred[-1]
-                total += super().forward(pred, target_is_real, is_disc, **kwargs).mean()
+                loss = super().forward(pred, target_is_real, is_disc, **kwargs)
+                if isinstance(loss, dict):
+                    raise TypeError(
+                        "MultiScaleR3GANLoss does not support dict returns for non-R3GAN loss types."
+                    )
+                assert isinstance(loss, Tensor)
+                total = total + loss.mean()
             return total / len(input)
-        else:
-            return super().forward(input, target_is_real, is_disc, **kwargs)
+
+        result = super().forward(input, target_is_real, is_disc, **kwargs)
+        if isinstance(result, dict):
+            raise TypeError(
+                "MultiScaleR3GANLoss expects scalar tensor outputs for non-R3GAN loss types."
+            )
+        assert isinstance(result, Tensor)
+        return result
