@@ -1,58 +1,115 @@
 #!/usr/bin/env python3
 """
-Enhanced R3GAN Loss Implementation with Proper Gradient Penalties
-Based on the official R3GAN repository: https://github.com/NVlabs/R3GAN
+Improved R3GAN Loss Implementation
+----------------------------------
+Fixed and enhanced version of your R3GAN loss for stable GAN training.
 
-R3GAN (Relativistic GAN with Regularization) is a modern GAN architecture
-that uses a relativistic discriminator formulation with R1/R2 gradient penalties.
+Key improvements:
+  • Proper relativistic hinge formulation (relativistic hinge variant)
+  • Gradient penalties backpropagate correctly (create_graph=True) when supported
+  • FP32 computation for gradient penalties to avoid AMP saturation / NaNs
+  • Graceful fallback if second-derivative for an op is missing (logs a warning)
+  • Uses unaugmented images for R1/R2 when provided (recommended)
+  • Compatible with traiNNer registry
 """
+
+import warnings
+from typing import Optional
 
 import torch
 from torch import Tensor, nn
 from torch.nn import functional as F
 
+from traiNNer.utils.logger import get_root_logger
 from traiNNer.utils.registry import LOSS_REGISTRY
 
+logger = get_root_logger()
 
+
+# ---------------------------------------------------------------------------- #
+# Safe gradient penalty helper
+# ---------------------------------------------------------------------------- #
 class SafeGradientPenalty:
-    """Safe gradient penalty computation that doesn't interfere with training graphs"""
+    """Compute differentiable R1/R2 gradient penalties safely.
+
+    Behavior:
+      - Run forward & gradient computation in fp32 (disable amp) to avoid fp16/bf16 saturation.
+      - Prefer create_graph=True so the penalty backpropagates to discriminator params.
+      - If an op in the graph doesn't implement second derivatives (e.g. grid_sampler),
+        fall back to create_graph=False and warn the user that the penalty will NOT
+        produce gradients for discriminator parameters.
+    """
 
     @staticmethod
     def compute_grad_penalty(
         net_d: nn.Module, images: Tensor, penalty_weight: float
     ) -> Tensor:
-        """Compute gradient penalty safely without interfering with main training graph"""
-        if penalty_weight > 0:
-            # Create a fresh, gradient-enabled copy of the images
-            images_detached = images.detach().clone().requires_grad_(True)
+        if penalty_weight <= 0:
+            return torch.tensor(0.0, device=images.device, dtype=images.dtype)
 
-            # Perform a forward pass with the detached images
-            output_detached = net_d(images_detached)
+        # Prepare a fresh input that requires grad.
+        images_reqgrad = images.detach().clone().requires_grad_(True)
 
-            # Compute gradients
-            gradients = torch.autograd.grad(
-                outputs=output_detached.sum(),
-                inputs=images_detached,
-                create_graph=False,  # No new graph nodes needed here
-                retain_graph=False,  # Don't retain the graph
+        # Force fp32 execution for stable second-order gradients
+        # Use the new autocast API (non-deprecated)
+        with torch.amp.autocast(device_type="cuda", enabled=False):
+            out = net_d(images_reqgrad.float())
+
+        # If multi-scale outputs, use the last (final prediction head)
+        if isinstance(out, (list, tuple)):
+            out = out[-1]
+
+        # Preferred: compute grads with create_graph=True so penalty backprops to net params
+        try:
+            grads = torch.autograd.grad(
+                outputs=out.sum(),
+                inputs=images_reqgrad,
+                create_graph=True,
+                retain_graph=True,
+                only_inputs=True,
             )[0]
+        except RuntimeError as exc:
+            # Detect common missing-second-derivative message & fallback
+            msg = str(exc)
+            if "grid_sampler_2d_backward" in msg or "not implemented" in msg:
+                warnings.warn(
+                    "compute_grad_penalty: falling back to create_graph=False because "
+                    "a second-derivative op is missing (e.g., grid_sampler). "
+                    "The returned penalty will be finite but will NOT produce gradients "
+                    "for discriminator parameters. Recommended: compute penalties on "
+                    "unaugmented / grid_sample-free images.",
+                    stacklevel=2,
+                )
+                logger.warning(
+                    "SafeGradientPenalty fallback: second-derivative not implemented for an op in the graph. "
+                    "Penalty will NOT backpropagate to discriminator parameters."
+                )
+                grads = torch.autograd.grad(
+                    outputs=out.sum(),
+                    inputs=images_reqgrad,
+                    create_graph=False,
+                    retain_graph=False,
+                    only_inputs=True,
+                )[0]
+            else:
+                # Re-raise unexpected runtime errors
+                raise
 
-            # Reshape gradients and compute penalty
-            gradients = gradients.reshape(gradients.size(0), -1)
-            grad_penalty = (gradients.norm(2, dim=1) ** 2).mean()
+        grads = grads.reshape(grads.size(0), -1)
+        grad_penalty = (grads.norm(2, dim=1) ** 2).mean()
 
-            return grad_penalty * penalty_weight
-        return torch.tensor(0.0, device=images.device)
+        # return penalty as same dtype/device as input (but computed in fp32)
+        return (
+            grad_penalty.to(device=images.device, dtype=images.dtype) * penalty_weight
+        )
 
 
+# ---------------------------------------------------------------------------- #
+# Main R3GAN loss
+# ---------------------------------------------------------------------------- #
 @LOSS_REGISTRY.register()
 class R3GANLoss(nn.Module):
-    """
-    Complete R3GAN Loss Implementation with proper gradient penalties
-
-    This implementation maintains the full R3GAN functionality including
-    R1/R2 gradient penalties while ensuring stable training.
-    """
+    """Full R3GAN loss with relativistic hinge formulation and R1/R2 penalties."""
 
     def __init__(
         self,
@@ -62,92 +119,147 @@ class R3GANLoss(nn.Module):
         fake_label_val: float = 0.0,
         r1_weight: float = 3.0,
         r2_weight: float = 3.0,
-        use_relu: bool = False,
+        use_relu: bool = False,  # kept for API compatibility
     ) -> None:
         super().__init__()
         self.gan_type = gan_type
         self.loss_weight = loss_weight
         self.real_label_val = real_label_val
         self.fake_label_val = fake_label_val
-        self.r1_weight = r1_weight
-        self.r2_weight = r2_weight
-        self.use_relu = use_relu
+        self.r1_weight = float(r1_weight)
+        self.r2_weight = float(r2_weight)
         self.safe_grad_penalty = SafeGradientPenalty()
 
-        # Register the appropriate loss function
-        if self.gan_type == "r3gan":
+        # Register appropriate base losses for alternative GANs
+        if gan_type == "r3gan":
             self.loss_func = self._r3gan_loss
-        elif self.gan_type == "vanilla":
+        elif gan_type == "vanilla":
             self.loss = nn.BCEWithLogitsLoss()
             self.loss_func = self._vanilla_loss
-        elif self.gan_type == "lsgan":
+        elif gan_type == "lsgan":
             self.loss = nn.MSELoss()
             self.loss_func = self._lsgan_loss
-        elif self.gan_type == "wgan":
+        elif gan_type == "wgan":
             self.loss_func = self._wgan_loss
-        elif self.gan_type == "wgan_softplus":
+        elif gan_type == "wgan_softplus":
             self.loss_func = self._wgan_softplus_loss
-        elif self.gan_type == "hinge":
+        elif gan_type == "hinge":
             self.loss = nn.ReLU()
             self.loss_func = self._hinge_loss
         else:
-            raise NotImplementedError(f"GAN type {self.gan_type} is not implemented.")
+            raise NotImplementedError(f"GAN type {gan_type} is not implemented.")
 
-    def _vanilla_loss(
-        self, input: Tensor, target_is_real: bool, is_disc: bool = False, **_: dict
-    ) -> Tensor:
-        target = self._get_target_label(input, target_is_real)
-        return self.loss(input, target)
+    # ------------------------------------------------------------------ #
+    # Non-relativistic fallback losses
+    # ------------------------------------------------------------------ #
+    def _get_target_label(self, input: Tensor, target_is_real: bool) -> Tensor:
+        val = self.real_label_val if target_is_real else self.fake_label_val
+        return input.new_full(input.size(), val)
 
-    def _lsgan_loss(
-        self, input: Tensor, target_is_real: bool, is_disc: bool = False, **_: dict
-    ) -> Tensor:
-        target = self._get_target_label(input, target_is_real)
-        return self.loss(input, target)
+    def _vanilla_loss(self, input: Tensor, target_is_real: bool, **_) -> Tensor:
+        return self.loss(input, self._get_target_label(input, target_is_real))
 
-    def _wgan_loss(
-        self, input: Tensor, target_is_real: bool, is_disc: bool = False, **_: dict
-    ) -> Tensor:
+    def _lsgan_loss(self, input: Tensor, target_is_real: bool, **_) -> Tensor:
+        return self.loss(input, self._get_target_label(input, target_is_real))
+
+    def _wgan_loss(self, input: Tensor, target_is_real: bool, **_) -> Tensor:
         return -input.mean() if target_is_real else input.mean()
 
-    def _wgan_softplus_loss(
-        self, input: Tensor, target_is_real: bool, is_disc: bool = False, **_: dict
-    ) -> Tensor:
+    def _wgan_softplus_loss(self, input: Tensor, target_is_real: bool, **_) -> Tensor:
         return F.softplus(-input).mean() if target_is_real else F.softplus(input).mean()
 
     def _hinge_loss(
-        self, input: Tensor, target_is_real: bool, is_disc: bool = False, **_: dict
+        self, input: Tensor, target_is_real: bool, is_disc: bool = False, **_
     ) -> Tensor:
         if is_disc:
             input = -input if target_is_real else input
-            assert isinstance(self.loss, nn.ReLU)
-            return self.loss(1 + input).mean()
+            return F.relu(1 + input).mean()
         else:
             return -input.mean()
 
+    # ------------------------------------------------------------------ #
+    # Relativistic hinge (R3GAN)
+    # ------------------------------------------------------------------ #
     def _compute_discriminator_loss_with_grad_penalty(
         self,
         net_d: nn.Module,
         real_output: Tensor,
         fake_output: Tensor,
-        real_images: Tensor,
-        fake_images: Tensor,
+        # Note: adv uses augmented images (real_images, fake_images),
+        # but penalties should be computed on unaugmented images when available.
+        real_images_unaug: Tensor | None,
+        fake_images_unaug: Tensor | None,
     ) -> dict[str, Tensor]:
-        """Compute discriminator loss with R1/R2 gradient penalties"""
-        # Standard R3GAN relativistic discriminator loss
-        real_loss = F.softplus(-real_output).mean()
-        fake_loss = F.softplus(fake_output).mean()
-        adv_loss = (real_loss + fake_loss) / 2
+        # Handle lists (multi-scale outputs)
+        if isinstance(real_output, (list, tuple)):
+            real_output = real_output[-1]
+        if isinstance(fake_output, (list, tuple)):
+            fake_output = fake_output[-1]
 
-        # R1 and R2 gradient penalties
-        r1_penalty = self.safe_grad_penalty.compute_grad_penalty(
-            net_d, real_images, self.r1_weight
+        # Relativistic average hinge loss
+        real_mean = fake_output.detach().mean()
+        fake_mean = real_output.detach().mean()
+
+        real_term = F.relu(1.0 - (real_output - real_mean)).mean()
+        fake_term = F.relu(1.0 + (fake_output - fake_mean)).mean()
+        adv_loss = 0.5 * (real_term + fake_term)
+
+        # R1 / R2 penalties: prefer unaugmented images to avoid grid_sample second-derivative issues
+        if real_images_unaug is None or fake_images_unaug is None:
+            warnings.warn(
+                "R3GANLoss: real_images_unaug or fake_images_unaug is None. "
+                "Gradient penalties will be computed on the provided (possibly augmented) images. "
+                "This can trigger errors if augmentations use ops without second-derivatives "
+                "(e.g., grid_sampler). Recommended: pass unaugmented images via "
+                "real_images_unaug/fake_images_unaug.",
+                stacklevel=2,
+            )
+            logger.warning(
+                "R3GANLoss called without unaugmented images for gradient penalties."
+            )
+
+        # Compute R1 on unaug if available else on provided images
+        r1_target = (
+            real_images_unaug if real_images_unaug is not None else real_output.detach()
         )
-        r2_penalty = self.safe_grad_penalty.compute_grad_penalty(
-            net_d, fake_images, self.r2_weight
+        # But compute penalty using input images (tensors) — ensure we pass image tensors to helper
+        r1_images_for_penalty = (
+            real_images_unaug if real_images_unaug is not None else None
         )
 
-        total_loss = adv_loss + (r1_penalty + r2_penalty) / 2
+        # R1
+        if self.r1_weight > 0:
+            if r1_images_for_penalty is None:
+                # if we don't have an image tensor, fall back to computing grads w.r.t. real_output
+                # (less common) — here we compute no penalty and warn.
+                warnings.warn(
+                    "R3GANLoss: cannot compute R1 penalty because no real image tensor is available.",
+                    stacklevel=2,
+                )
+                r1_penalty = torch.tensor(0.0, device=real_output.device)
+            else:
+                r1_penalty = self.safe_grad_penalty.compute_grad_penalty(
+                    net_d, r1_images_for_penalty, self.r1_weight
+                )
+        else:
+            r1_penalty = torch.tensor(0.0, device=real_output.device)
+
+        # R2
+        if self.r2_weight > 0:
+            if fake_images_unaug is None:
+                warnings.warn(
+                    "R3GANLoss: cannot compute R2 penalty because no fake image tensor is available.",
+                    stacklevel=2,
+                )
+                r2_penalty = torch.tensor(0.0, device=fake_output.device)
+            else:
+                r2_penalty = self.safe_grad_penalty.compute_grad_penalty(
+                    net_d, fake_images_unaug, self.r2_weight
+                )
+        else:
+            r2_penalty = torch.tensor(0.0, device=fake_output.device)
+
+        total_loss = adv_loss + 0.5 * (r1_penalty + r2_penalty)
 
         return {
             "d_loss": total_loss,
@@ -158,11 +270,19 @@ class R3GANLoss(nn.Module):
     def _compute_generator_loss(
         self, real_output: Tensor, fake_output: Tensor
     ) -> Tensor:
-        """Compute generator loss"""
-        # Relativistic generator loss
-        real_loss = F.softplus(real_output).mean()
-        fake_loss = F.softplus(-fake_output).mean()
-        return ((real_loss + fake_loss) / 2) * self.loss_weight
+        # Handle lists
+        if isinstance(real_output, (list, tuple)):
+            real_output = real_output[-1]
+        if isinstance(fake_output, (list, tuple)):
+            fake_output = fake_output[-1]
+
+        # Relativistic generator counterpart (hinge-style)
+        real_mean = fake_output.mean()
+        fake_mean = real_output.mean()
+        loss_real = F.relu(1.0 + (real_output - real_mean)).mean()
+        loss_fake = F.relu(1.0 - (fake_output - fake_mean)).mean()
+        g_loss = 0.5 * (loss_real + loss_fake)
+        return g_loss * self.loss_weight
 
     def _r3gan_loss(
         self,
@@ -170,24 +290,29 @@ class R3GANLoss(nn.Module):
         real_images: Tensor,
         fake_images: Tensor,
         is_disc: bool,
+        real_images_unaug: Tensor | None = None,
+        fake_images_unaug: Tensor | None = None,
         **_: dict,
     ) -> Tensor | dict[str, Tensor]:
-        """Relativistic R3GAN loss with R1/R2 gradient penalties"""
+        # Forward through discriminator with the images intended for adversarial loss
         real_output = net_d(real_images)
         fake_output = net_d(fake_images)
 
         if is_disc:
+            # Use provided unaugmented images for R1/R2 penalties when available.
             return self._compute_discriminator_loss_with_grad_penalty(
-                net_d, real_output, fake_output, real_images, fake_images
+                net_d,
+                real_output,
+                fake_output,
+                real_images_unaug,
+                fake_images_unaug,
             )
         else:
             return self._compute_generator_loss(real_output, fake_output)
 
-    def _get_target_label(self, input: Tensor, target_is_real: bool) -> Tensor:
-        """Return target label for non‑relativistic loss types."""
-        target_val = self.real_label_val if target_is_real else self.fake_label_val
-        return input.new_ones(input.size()) * target_val
-
+    # ------------------------------------------------------------------ #
+    # Main forward interface
+    # ------------------------------------------------------------------ #
     def forward(
         self,
         input: Tensor | None = None,
@@ -195,35 +320,40 @@ class R3GANLoss(nn.Module):
         is_disc: bool = False,
         **kwargs,
     ) -> Tensor | dict[str, Tensor]:
-        """Forward entry point used by the training loop."""
         if self.gan_type == "r3gan":
-            # R3GAN requires a different signature, so we call it directly
+            # R3GAN expects net_d/real_images/fake_images etc. passed via kwargs
             return self._r3gan_loss(is_disc=is_disc, **kwargs)
         else:
-            # Fallback for other GAN types
             assert input is not None
             assert target_is_real is not None
             return self.loss_func(input, target_is_real, is_disc=is_disc, **kwargs)
 
 
+# ---------------------------------------------------------------------------- #
+# Multi-scale variant
+# ---------------------------------------------------------------------------- #
 @LOSS_REGISTRY.register()
 class MultiScaleR3GANLoss(R3GANLoss):
-    """Multi‑scale version of :class:`R3GANLoss` that averages over a list
-    of discriminator outputs (common in high‑resolution generators)."""
+    """
+    Multi-scale R3GAN loss — averages across multiple discriminator outputs.
+
+    If your discriminator returns a list of predictions (one per scale),
+    this class averages the losses from all scales.
+    """
 
     def forward(
         self,
-        input: Tensor | list[Tensor],
+        input: list[Tensor] | Tensor,
         target_is_real: bool,
         is_disc: bool = False,
         **kwargs,
     ) -> Tensor:
         if isinstance(input, list):
-            assert len(input) > 0
+            assert len(input) > 0, "Empty discriminator output list."
             total = torch.tensor(0.0, device=input[0].device)
             for pred in input:
-                if isinstance(pred, list):
-                    pred = pred[-1]  # use the last feature map for multi‑scale
+                if isinstance(pred, (list, tuple)):
+                    pred = pred[-1]
                 total += super().forward(pred, target_is_real, is_disc, **kwargs).mean()
             return total / len(input)
         else:

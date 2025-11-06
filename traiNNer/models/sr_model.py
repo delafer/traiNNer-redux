@@ -404,8 +404,29 @@ class SRModel(BaseModel):
 
                 lq_target = None
 
+                # ------------------- #
+                #   Start GAN Logic   #
+                # ------------------- #
+                #
+                # We need to handle augmented and unaugmented images separately.
+                # The adversarial loss is computed on augmented images,
+                # but the R1/R2 penalties are computed on raw, unaugmented images
+                # to avoid the non-differentiable `grid_sampler` error.
+
+                # Store unaugmented images for penalty calculation
+                real_images_unaug = self.gt.clone()
+                fake_images_unaug = self.output.clone()
+
+                # Apply augmentations for adversarial loss
+                real_images_aug = real_images_unaug
+                fake_images_aug = fake_images_unaug
+                if self.batch_augment:
+                    real_images_aug, fake_images_aug = self.batch_augment(
+                        real_images_aug, fake_images_aug
+                    )
+
                 for label, loss in self.losses.items():
-                    target = self.gt
+                    target = real_images_aug
 
                     if loss.loss_weight < 0:
                         if lq_target is None:
@@ -538,8 +559,10 @@ class SRModel(BaseModel):
                 if isinstance(cri_gan, R3GANLoss):
                     loss_d_dict = cri_gan(
                         net_d=self.net_d,
-                        real_images=self.gt,
-                        fake_images=self.output.detach(),
+                        real_images=real_images_aug,
+                        fake_images=fake_images_aug.detach(),
+                        real_images_unaug=real_images_unaug,
+                        fake_images_unaug=fake_images_unaug.detach(),
                         is_disc=True,
                     )
                     l_d_total = loss_d_dict["d_loss"]

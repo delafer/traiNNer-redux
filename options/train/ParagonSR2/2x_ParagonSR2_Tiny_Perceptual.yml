@@ -16,7 +16,7 @@ datasets:
     type: pairedimagedataset
     dataroot_gt: /home/phips/Documents/dataset/cc0/hr
     dataroot_lq: /home/phips/Documents/dataset/cc0/lr_x2
-    lq_size: 64
+    lq_size: 32
     use_hflip: true
     use_rot: true
     num_worker_per_gpu: 8
@@ -103,7 +103,7 @@ train:
     # Adversarial (Subtle)
     - type: ganloss
       gan_type: r3gan
-      loss_weight: 0.05
+      loss_weight: 0.1
       r1_weight: 3.0
       r2_weight: 3.0
 
