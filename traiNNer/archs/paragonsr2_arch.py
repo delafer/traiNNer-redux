@@ -41,6 +41,9 @@ Usage:
     `network_g: type: paragonsr_v2_s`
 """
 
+import warnings
+from typing import Optional, cast
+
 import torch
 import torch.nn.functional as F
 from torch import nn
@@ -83,21 +86,30 @@ class ReparamConvV2(nn.Module):
 
     def get_fused_kernels(self) -> tuple[torch.Tensor, torch.Tensor]:
         """Performs the mathematical fusion of the training-time branches."""
-        fused_kernel, fused_bias = (
-            self.conv3x3.weight.clone(),
-            self.conv3x3.bias.clone(),
-        )
+        fused_kernel = self.conv3x3.weight.detach().clone()
+        bias3x3 = self.conv3x3.bias
+        if bias3x3 is None:
+            raise RuntimeError("ReparamConvV2.conv3x3 must use bias=True for fusion.")
+        fused_bias = bias3x3.detach().clone()
+
         padded_1x1_kernel = F.pad(self.conv1x1.weight, [1, 1, 1, 1])
         fused_kernel += padded_1x1_kernel
-        fused_bias += self.conv1x1.bias
+        bias1x1 = self.conv1x1.bias
+        if bias1x1 is None:
+            raise RuntimeError("ReparamConvV2.conv1x1 must use bias=True for fusion.")
+        fused_bias += bias1x1.detach()
+
         if self.dw_conv3x3 is not None:
-            dw_kernel, dw_bias = self.dw_conv3x3.weight, self.dw_conv3x3.bias
+            dw_kernel = self.dw_conv3x3.weight
+            dw_bias = self.dw_conv3x3.bias
             target_shape = self.conv3x3.weight.shape
             standard_dw_kernel = torch.zeros(target_shape, device=dw_kernel.device)
             for i in range(self.in_channels):
                 standard_dw_kernel[i, 0, :, :] = dw_kernel[i, 0, :, :]
             fused_kernel += standard_dw_kernel
-            fused_bias += dw_bias
+            if dw_bias is not None:
+                fused_bias += dw_bias.detach()
+
         return fused_kernel, fused_bias
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -136,7 +148,7 @@ class InceptionDWConv2d(nn.Module):
         self.dwconv_h = nn.Conv2d(
             gc, gc, (band_kernel_size, 1), padding=(band_kernel_size // 2, 0), groups=gc
         )
-        self.split_indexes = (in_channels - 3 * gc, gc, gc, gc)
+        self.split_indexes = [in_channels - 3 * gc, gc, gc, gc]
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x_id, x_hw, x_w, x_h = torch.split(x, self.split_indexes, dim=1)
@@ -204,7 +216,9 @@ class DynamicTransformer(nn.Module):
         super().__init__()
         hidden_dim = int(dim * expansion_ratio)
         self.project_in = nn.Conv2d(dim, hidden_dim, 1)
-        self.kernel_generator = DynamicKernelGenerator(hidden_dim)
+        self.kernel_generator: DynamicKernelGenerator | None = DynamicKernelGenerator(
+            hidden_dim
+        )
 
         self.kernel_size = 3
         self.padding = self.kernel_size // 2
@@ -232,6 +246,7 @@ class DynamicTransformer(nn.Module):
             torch.tensor(False, dtype=torch.bool),
             persistent=True,
         )
+        self._warned_identity = False
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = self.project_in(x)
@@ -240,13 +255,14 @@ class DynamicTransformer(nn.Module):
             use_dynamic = False
 
         if use_dynamic:
-            if self.kernel_generator is None:
+            kernel_generator = self.kernel_generator
+            if kernel_generator is None:
                 raise RuntimeError(
                     "Dynamic inference requested but the kernel generator was removed. "
                     "Call `enable_dynamic_inference(False)` before export or keep the generator intact."
                 )
             b, c, _h, _w = x.shape
-            kernels = self.kernel_generator(x)  # (B, C, 3, 3)
+            kernels = kernel_generator(x)  # (B, C, 3, 3)
             y = self._apply_dynamic_kernel(x, kernels, batch_size=b, channels=c)
             if self.training and self.track_running_stats:
                 self._update_tracked_kernel(kernels)
@@ -284,22 +300,41 @@ class DynamicTransformer(nn.Module):
         )
 
     def _get_tracked_kernel(self) -> torch.Tensor:
-        if bool(self.tracked_initialized.item()):
-            return self.tracked_kernel
-        return self.identity_kernel
+        tracked_initialized = cast(torch.Tensor, self.tracked_initialized)
+        tracked_kernel = cast(torch.Tensor, self.tracked_kernel)
+        identity_kernel = cast(torch.Tensor, self.identity_kernel)
+        if bool(tracked_initialized.item()):
+            self._warned_identity = False
+            return tracked_kernel
+        if not self.training and not self._warned_identity:
+            warnings.warn(
+                "DynamicTransformer is falling back to the identity kernel because "
+                "no running statistics were collected. Call `model.train()` for a "
+                "few iterations or load a checkpoint with tracked kernels before "
+                "exporting/deploying.",
+                UserWarning,
+                stacklevel=2,
+            )
+            self._warned_identity = True
+        return identity_kernel
 
     def _update_tracked_kernel(self, kernels: torch.Tensor) -> None:
         with torch.no_grad():
-            mean_kernel = kernels.mean(dim=0).unsqueeze(1).to(self.tracked_kernel.dtype)
-            if not bool(self.tracked_initialized.item()):
-                self.tracked_kernel.copy_(mean_kernel)
-                self.tracked_initialized.fill_(True)
+            tracked_kernel = cast(torch.Tensor, self.tracked_kernel)
+            tracked_initialized = cast(torch.Tensor, self.tracked_initialized)
+            mean_kernel = (
+                kernels.mean(dim=0).unsqueeze(1).to(dtype=tracked_kernel.dtype)
+            )
+            if not bool(tracked_initialized.item()):
+                tracked_kernel.copy_(mean_kernel)
+                tracked_initialized.fill_(True)
             else:
                 momentum = float(self.kernel_momentum)
                 if momentum <= 0:
-                    self.tracked_kernel.copy_(mean_kernel)
+                    tracked_kernel.copy_(mean_kernel)
                 else:
-                    self.tracked_kernel.lerp_(mean_kernel, weight=momentum)
+                    tracked_kernel.lerp_(mean_kernel, weight=momentum)
+            self._warned_identity = False
 
     def enable_dynamic_inference(self, enabled: bool = True) -> None:
         """
@@ -326,8 +361,11 @@ class DynamicTransformer(nn.Module):
         """
         Clear the accumulated static kernel statistics.
         """
-        self.tracked_kernel.zero_()
-        self.tracked_initialized.fill_(False)
+        tracked_kernel = cast(torch.Tensor, self.tracked_kernel)
+        tracked_initialized = cast(torch.Tensor, self.tracked_initialized)
+        tracked_kernel.zero_()
+        tracked_initialized.fill_(False)
+        self._warned_identity = False
 
     def export_static_depthwise(self) -> nn.Conv2d:
         """
@@ -342,7 +380,8 @@ class DynamicTransformer(nn.Module):
             groups=kernel.shape[0],
             bias=False,
         )
-        conv.weight.data.copy_(kernel)
+        with torch.no_grad():
+            conv.weight.copy_(kernel)
         return conv
 
 
@@ -450,8 +489,13 @@ class ParagonSR2(nn.Module):
                     groups=module.groups,
                     bias=True,
                 )
-                fused_conv.weight.data.copy_(w)
-                fused_conv.bias.data.copy_(b)
+                with torch.no_grad():
+                    fused_conv.weight.copy_(w)
+                    if fused_conv.bias is None:
+                        raise RuntimeError(
+                            "Reparam fusion expects fused_conv to include a bias term."
+                        )
+                    fused_conv.bias.copy_(b)
                 setattr(parent_module, child_name, fused_conv)
         return self
 
