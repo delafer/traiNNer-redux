@@ -192,9 +192,12 @@ class DynamicKernelGenerator(nn.Module):
 
 class DynamicTransformer(nn.Module):
     """
-    The heart of ParagonSR v2. This block uses a dynamically generated kernel
-    to perform content-aware feature transformation. It is the source of the
-    model's ability to adapt its spatial processing to the input image.
+    Content-adaptive transformer block with a deploy-friendly static fallback.
+
+    During training, it uses per-sample kernels generated on-the-fly to maximize
+    expressive power. A depthwise kernel tracker aggregates these dynamic kernels,
+    enabling a deterministic static inference path (required for ONNX/TensorRT
+    export) without sacrificing the benefits of dynamic training.
     """
 
     def __init__(self, dim: int, expansion_ratio: float = 2.0) -> None:
@@ -202,32 +205,145 @@ class DynamicTransformer(nn.Module):
         hidden_dim = int(dim * expansion_ratio)
         self.project_in = nn.Conv2d(dim, hidden_dim, 1)
         self.kernel_generator = DynamicKernelGenerator(hidden_dim)
-        # This layer is a placeholder for fusion. Its parameters will be part
-        # of the model's state_dict, but its forward pass is only used during inference.
-        self.dynamic_conv = ReparamConvV2(hidden_dim, hidden_dim, groups=hidden_dim)
-        # Using LeakyReLU for universal, high-speed hardware support.
+
+        self.kernel_size = 3
+        self.padding = self.kernel_size // 2
         self.act = nn.LeakyReLU(0.1, inplace=True)
         self.project_out = nn.Conv2d(hidden_dim, dim, 1)
 
+        # Deployment controls
+        self.dynamic_inference = False
+        self.track_running_stats = True
+        self.kernel_momentum = 0.05
+        self.static_mode = False
+
+        identity = torch.zeros(
+            hidden_dim, 1, self.kernel_size, self.kernel_size, dtype=torch.float32
+        )
+        identity[:, 0, self.padding, self.padding] = 1.0
+        self.register_buffer("identity_kernel", identity, persistent=True)
+        self.register_buffer(
+            "tracked_kernel",
+            torch.zeros_like(identity),
+            persistent=True,
+        )
+        self.register_buffer(
+            "tracked_initialized",
+            torch.tensor(False, dtype=torch.bool),
+            persistent=True,
+        )
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = self.project_in(x)
+        use_dynamic = self.training or self.dynamic_inference
+        if self.static_mode:
+            use_dynamic = False
 
-        if self.training:
-            b, c, h, w = x.shape
+        if use_dynamic:
+            if self.kernel_generator is None:
+                raise RuntimeError(
+                    "Dynamic inference requested but the kernel generator was removed. "
+                    "Call `enable_dynamic_inference(False)` before export or keep the generator intact."
+                )
+            b, c, _h, _w = x.shape
             kernels = self.kernel_generator(x)  # (B, C, 3, 3)
-            # The dynamic convolution is performed as a single large grouped convolution
-            # where each channel in the batch gets its own unique kernel.
-            x_reshaped = x.reshape(1, b * c, h, w)
-            kernels_reshaped = kernels.reshape(b * c, 1, 3, 3)
-            y = F.conv2d(x_reshaped, kernels_reshaped, padding=1, groups=b * c)
-            y = y.reshape(b, c, h, w)
+            y = self._apply_dynamic_kernel(x, kernels, batch_size=b, channels=c)
+            if self.training and self.track_running_stats:
+                self._update_tracked_kernel(kernels)
         else:
-            # During inference, we revert to the standard, non-dynamic reparam-conv.
-            # The "knowledge" of the kernel generator has been baked into the
-            # other model parameters through training.
-            y = self.dynamic_conv(x)
+            y = self._apply_static_kernel(x)
 
         return self.project_out(self.act(y))
+
+    def _apply_dynamic_kernel(
+        self,
+        x: torch.Tensor,
+        kernels: torch.Tensor,
+        batch_size: int,
+        channels: int,
+    ) -> torch.Tensor:
+        x_reshaped = x.reshape(1, batch_size * channels, x.shape[2], x.shape[3])
+        kernels_reshaped = kernels.reshape(
+            batch_size * channels, 1, self.kernel_size, self.kernel_size
+        )
+        y = F.conv2d(
+            x_reshaped,
+            kernels_reshaped,
+            padding=self.padding,
+            groups=batch_size * channels,
+        )
+        return y.reshape(batch_size, channels, x.shape[2], x.shape[3])
+
+    def _apply_static_kernel(self, x: torch.Tensor) -> torch.Tensor:
+        kernel = self._get_tracked_kernel().to(dtype=x.dtype, device=x.device)
+        return F.conv2d(
+            x,
+            kernel,
+            padding=self.padding,
+            groups=x.shape[1],
+        )
+
+    def _get_tracked_kernel(self) -> torch.Tensor:
+        if bool(self.tracked_initialized.item()):
+            return self.tracked_kernel
+        return self.identity_kernel
+
+    def _update_tracked_kernel(self, kernels: torch.Tensor) -> None:
+        with torch.no_grad():
+            mean_kernel = kernels.mean(dim=0).unsqueeze(1).to(self.tracked_kernel.dtype)
+            if not bool(self.tracked_initialized.item()):
+                self.tracked_kernel.copy_(mean_kernel)
+                self.tracked_initialized.fill_(True)
+            else:
+                momentum = float(self.kernel_momentum)
+                if momentum <= 0:
+                    self.tracked_kernel.copy_(mean_kernel)
+                else:
+                    self.tracked_kernel.lerp_(mean_kernel, weight=momentum)
+
+    def enable_dynamic_inference(self, enabled: bool = True) -> None:
+        """
+        Toggle dynamic kernels during evaluation.
+        """
+        self.dynamic_inference = enabled
+
+    def enable_static_mode(self, enabled: bool = True) -> None:
+        """
+        Force the transformer to use the tracked static kernel regardless of the
+        current training/eval mode. Useful when preparing a model for release.
+        """
+        self.static_mode = enabled
+
+    def set_kernel_momentum(self, momentum: float) -> None:
+        """
+        Adjust the EMA momentum used to aggregate dynamic kernels.
+        """
+        if momentum < 0 or momentum > 1:
+            raise ValueError("kernel_momentum must be in [0, 1].")
+        self.kernel_momentum = float(momentum)
+
+    def reset_tracked_kernel(self) -> None:
+        """
+        Clear the accumulated static kernel statistics.
+        """
+        self.tracked_kernel.zero_()
+        self.tracked_initialized.fill_(False)
+
+    def export_static_depthwise(self) -> nn.Conv2d:
+        """
+        Create a depthwise 3x3 convolution initialized with the tracked kernel.
+        """
+        kernel = self._get_tracked_kernel().detach()
+        conv = nn.Conv2d(
+            kernel.shape[0],
+            kernel.shape[0],
+            self.kernel_size,
+            padding=self.padding,
+            groups=kernel.shape[0],
+            bias=False,
+        )
+        conv.weight.data.copy_(kernel)
+        return conv
 
 
 class ParagonBlockV2(nn.Module):
