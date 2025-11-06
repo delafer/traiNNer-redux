@@ -36,7 +36,7 @@ network_g:
   type: paragonsr2_tiny
 
 network_d:
-  type: dunet
+  type: munet
 
 # -------------------------------------------------------------------------------------------------
 # Paths
