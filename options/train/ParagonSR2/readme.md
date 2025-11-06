@@ -5,6 +5,8 @@ Full ParagonSR2 README (for architecture release)
 
 ParagonSR2 is the successor to the original ParagonSR architecture, designed to solve a long-standing tension in single-image super-resolution: achieving high perceptual quality on difficult photographic degradations without sacrificing inference speed or deployment friendliness. This release introduces a new Magic-Conv upsampling pipeline, a dynamic transformer core that can be fused for production, and a purpose-built MUNet discriminator for stable adversarial training.
 
+License is MIT, creator is Philip Hofmann
+
 ---
 
 ## Highlights
