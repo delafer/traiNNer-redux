@@ -16,11 +16,11 @@ datasets:
     type: pairedimagedataset
     dataroot_gt: /home/phips/Documents/dataset/cc0/hr
     dataroot_lq: /home/phips/Documents/dataset/cc0/lr_x2
-    lq_size: 64
+    lq_size: 256
     use_hflip: true
     use_rot: true
     num_worker_per_gpu: 8
-    batch_size_per_gpu: 8
+    batch_size_per_gpu: 16
     accum_iter: 1
 
   val:
