@@ -1,0 +1,177 @@
+# yaml-language-server: $schema=https://raw.githubusercontent.com/the-database/traiNNer-redux/refs/heads/master/schemas/redux-config.schema.json
+# Stage 2: ParagonSR2 Nano 2x Perceptual "wow-factor" finetune
+# - Start from the Stage 1 fidelity pretrain
+# - Balanced perceptual + R3GAN + contrastive + consistency + ffloss
+# - Goal: sharp, detailed, clean, artifact-minimized outputs for end users
+
+name: 2x_ParagonSR2_Nano_Perceptual_Stage2
+scale: 2
+
+# Use modern training features for speed & stability; all are deployment-safe.
+use_amp: true            # Mixed precision for faster training and lower VRAM.
+amp_bf16: false          # Use fp16 AMP by default; switch only if needed.
+use_channels_last: true  # Better memory layout for convs on NVIDIA GPUs.
+fast_matmul: true        # Allow TF32/fast matmul; minor precision trade, faster.
+num_gpu: auto
+
+# -------------------------------------------------------------------------------------------------
+# Data (same as Stage 1 / existing Nano config)
+# -------------------------------------------------------------------------------------------------
+datasets:
+  train:
+    name: Train_Dataset
+    type: pairedimagedataset
+    dataroot_gt: /home/phips/Documents/dataset/cc0/hr
+    dataroot_lq: /home/phips/Documents/dataset/cc0/lr_x2
+    lq_size: 32                # Smaller patch; perceptual+GAN finetune focuses on local detail.
+    use_hflip: true
+    use_rot: true
+    num_worker_per_gpu: 8
+    batch_size_per_gpu: 8
+    accum_iter: 1
+
+  val:
+    name: Val_Dataset
+    type: pairedimagedataset
+    dataroot_gt: /home/phips/Documents/dataset/cc0/val_hr
+    dataroot_lq: /home/phips/Documents/dataset/cc0/val_lr_x2
+
+# -------------------------------------------------------------------------------------------------
+# Network
+# -------------------------------------------------------------------------------------------------
+network_g:
+  type: paragonsr2_nano      # Custom ParagonSR2 Nano by Philip Hofmann: compact, MagicKernel-based, deployment-friendly SR backbone.
+
+network_d:
+  type: munet                # Custom MUNet discriminator: efficient, patch-focused, pairs well with ParagonSR2 + R3GAN for stable GAN training.
+
+# -------------------------------------------------------------------------------------------------
+# Paths
+# -------------------------------------------------------------------------------------------------
+path:
+  # IMPORTANT: set this to your best Stage 1 pretrain checkpoint before launching.
+  # Example:
+  # pretrain_network_g: experiments/2x_ParagonSR2_Nano_Pretrain/models/net_g_xxxxxx.safetensors
+  pretrain_network_g: ~
+  strict_load_g: true        # Ensure we fully load the pretrain; avoids accidental partial loads.
+  resume_state: ~            # Keep explicit null; rely on --auto_resume and training_states instead.
+
+# -------------------------------------------------------------------------------------------------
+# Training
+# -------------------------------------------------------------------------------------------------
+train:
+  ema_decay: 0.999           # EMA for smoother, more stable export-ready weights.
+  grad_clip: true            # Prevents exploding gradients with rich perceptual+GAN losses.
+
+  optim_g:
+    type: AdamW
+    lr: 1.5e-4               # Proven good LR for SR + perceptual stacks.
+    weight_decay: 0.0
+    betas: [0.9, 0.99]
+
+  optim_d:
+    type: AdamW
+    lr: 1.5e-4               # Symmetric LR for D with R3GAN.
+    weight_decay: 0.0
+    betas: [0.9, 0.99]
+
+  # Cosine schedule over the finetune; simple and stable.
+  scheduler:
+    type: CosineAnnealingLR
+    T_max: 80000             # Match total_iter for a single smooth decay cycle.
+    eta_min: 1.0e-7
+
+  total_iter: 80000          # Finetune length on top of 200k pretrain; efficient but strong.
+  warmup_iter: 2000          # Gentle LR ramp; safe for both scratch & pretrain starts.
+
+  # ---
+  # Losses: balanced perceptual-GAN recipe for sharp, clean, "wow-factor" outputs.
+  # ---
+  losses:
+    # 1) Fidelity anchors (keep things sane)
+    - type: l1loss
+      loss_weight: 1.0
+      # Core pixel fidelity; prevents excessive hallucination and stabilizes all other losses.
+
+    - type: mssimloss
+      loss_weight: 0.5
+      # Encourages structural similarity and cleaner edges; moderate to avoid oversmoothing.
+
+    # 2) Perceptual realism (texture, structure, human alignment)
+    - type: perceptualloss
+      criterion: l1
+      loss_weight: 0.4
+      layer_weights:
+        'conv3_3': 1
+      # VGG-based feature loss; adds natural high-level detail and contrast.
+
+    - type: distsloss
+      loss_weight: 0.2
+      # Deep image similarity; nudges towards human-perceived realism and reduces unnatural artifacts.
+
+    # 3) Feature & color/brightness regularizers
+    - type: ContrastiveLoss
+      loss_weight: 0.1
+      temperature: 0.1
+      # Encourages meaningful feature separation; used gently to refine structure without overfitting.
+
+    - type: ConsistencyLoss
+      loss_weight: 0.3
+      criterion: chc
+      blur: true
+      saturation: 1.0
+      brightness: 0.9
+      cosim: true
+      cosim_weight: 0.5
+      # Locks brightness/chroma & local consistency; counters GAN/perceptual color shifts, keeps it clean.
+
+    # 4) Frequency sharpening
+    - type: ffloss
+      loss_weight: 0.2
+      # Frequency-based detail encouragement; complements MagicKernel, adds crispness without pure noise.
+
+    # 5) Adversarial (subtle, R3GAN)
+    - type: ganloss
+      gan_type: r3gan
+      loss_weight: 0.06
+      r1_weight: 2.5
+      r2_weight: 2.5
+      # Robust GAN term for micro-texture and "pop".
+      # 0.06 is deliberately modest: visible sharpness boost, low risk of crunchy artifacts.
+
+# -------------------------------------------------------------------------------------------------
+# Validation
+# -------------------------------------------------------------------------------------------------
+val:
+  val_enabled: true
+  val_freq: 5000              # Reasonable for monitoring without too much overhead.
+  save_img: true              # Save validation outputs to visually inspect wow-factor & cleanliness.
+
+  metrics_enabled: true
+  metrics:
+    psnr:
+      type: calculate_psnr
+      crop_border: 2
+      test_y_channel: false
+    ssim:
+      type: calculate_ssim
+      crop_border: 2
+      test_y_channel: false
+    lpips:
+      type: calculate_lpips
+      better: lower
+    dists:
+      type: calculate_dists
+      better: lower
+    topiq:
+      type: calculate_topiq
+      # These perceptual metrics help you track whether changes improve "visual goodness".
+
+# -------------------------------------------------------------------------------------------------
+# Logging
+# -------------------------------------------------------------------------------------------------
+logger:
+  print_freq: 100
+  save_checkpoint_freq: 5000
+  save_checkpoint_format: safetensors
+  use_tb_logger: true
