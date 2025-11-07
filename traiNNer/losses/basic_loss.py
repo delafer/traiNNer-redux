@@ -28,6 +28,11 @@ def charbonnier_loss(pred: Tensor, target: Tensor, eps: float = 1e-12) -> Tensor
     return torch.sqrt((pred - target) ** 2 + eps)
 
 
+@weighted_loss
+def huber_loss(pred: Tensor, target: Tensor, delta: float = 1.0) -> Tensor:
+    return F.huber_loss(pred, target, reduction="none", delta=delta)
+
+
 @LOSS_REGISTRY.register()
 class L1Loss(nn.Module):
     """L1 (mean absolute error, MAE) loss.
@@ -131,6 +136,33 @@ class CharbonnierLoss(nn.Module):
         """
         return charbonnier_loss(
             pred, target, weight, eps=self.eps, reduction=self.reduction
+        )
+
+
+@LOSS_REGISTRY.register()
+class HuberLoss(nn.Module):
+    """Huber loss with configurable delta threshold."""
+
+    def __init__(
+        self, loss_weight: float = 1.0, reduction: str = "mean", delta: float = 1.0
+    ) -> None:
+        super().__init__()
+        if reduction not in _reduction_modes:
+            raise ValueError(
+                f"Unsupported reduction mode: {reduction}. Supported ones are: {_reduction_modes}"
+            )
+        if delta <= 0:
+            raise ValueError("HuberLoss delta must be positive.")
+
+        self.loss_weight = loss_weight
+        self.reduction = reduction
+        self.delta = delta
+
+    def forward(
+        self, pred: Tensor, target: Tensor, weight: Tensor | None = None, **kwargs
+    ) -> Tensor:
+        return self.loss_weight * huber_loss(
+            pred, target, weight=weight, delta=self.delta, reduction=self.reduction
         )
 
 

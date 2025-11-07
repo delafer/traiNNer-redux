@@ -95,8 +95,14 @@ train:
       temperature: 0.1
 
     # Color & Detail
-    - type: hsluvloss
+    - type: ConsistencyLoss
       loss_weight: 0.3
+      criterion: chc
+      blur: true
+      saturation: 1.0
+      brightness: 0.9
+      cosim: true
+      cosim_weight: 0.5
     - type: ffloss
       loss_weight: 0.2
 
