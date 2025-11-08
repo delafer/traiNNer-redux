@@ -23,7 +23,7 @@ datasets:
     type: pairedimagedataset
     dataroot_gt: /home/phips/Documents/dataset/cc0/hr
     dataroot_lq: /home/phips/Documents/dataset/cc0/lr_x2
-    lq_size: 32                # Smaller patch; perceptual+GAN finetune focuses on local detail.
+    lq_size: 64
     use_hflip: true
     use_rot: true
     num_worker_per_gpu: 8
@@ -52,7 +52,7 @@ path:
   # IMPORTANT: set this to your best Stage 1 pretrain checkpoint before launching.
   # Example:
   # pretrain_network_g: experiments/2x_ParagonSR2_Nano_Pretrain/models/net_g_xxxxxx.safetensors
-  pretrain_network_g: ~
+  pretrain_network_g: models/2xparagonsr_nano_pretrain/2xParagonSR2_Nano_Pretrain.safetensors # My Nano pretrain of 200k iters for stability
   strict_load_g: true        # Ensure we fully load the pretrain; avoids accidental partial loads.
   resume_state: ~            # Keep explicit null; rely on --auto_resume and training_states instead.
 
@@ -97,16 +97,12 @@ train:
       loss_weight: 0.5
       # Encourages structural similarity and cleaner edges; moderate to avoid oversmoothing.
 
-    # 2) Perceptual realism (texture, structure, human alignment)
-    - type: perceptualloss
-      criterion: l1
-      loss_weight: 0.4
-      layer_weights:
-        'conv3_3': 1
-      # VGG-based feature loss; adds natural high-level detail and contrast.
+    # 2) Modern ConvNeXt-Tiny shallow/mid perceptual (VGG replacement)
+    - type: convnextperceptualloss
+      loss_weight: 0.2
 
     - type: distsloss
-      loss_weight: 0.2
+      loss_weight: 0.4
       # Deep image similarity; nudges towards human-perceived realism and reduces unnatural artifacts.
 
     # 3) Feature & color/brightness regularizers
@@ -133,7 +129,7 @@ train:
     # 5) Adversarial (subtle, R3GAN)
     - type: ganloss
       gan_type: r3gan
-      loss_weight: 0.06
+      loss_weight: 0.02
       r1_weight: 2.5
       r2_weight: 2.5
       # Robust GAN term for micro-texture and "pop".

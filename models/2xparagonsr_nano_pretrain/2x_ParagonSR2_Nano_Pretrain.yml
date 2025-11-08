@@ -1,5 +1,9 @@
+# GENERATE TIME: Fri Nov  7 12:58:42 2025
+# CMD:
+# train.py -opt options/train/ParagonSR2/2x_ParagonSR2_Nano_Pretrain.yml --auto_resume
+
 # yaml-language-server: $schema=https://raw.githubusercontent.com/the-database/traiNNer-redux/refs/heads/master/schemas/redux-config.schema.json
-name: 2x_ParagonSR2_Nano_Perceptual
+name: 2x_ParagonSR2_Nano_Pretrain
 scale: 2
 use_amp: true
 amp_bf16: false
@@ -16,11 +20,11 @@ datasets:
     type: pairedimagedataset
     dataroot_gt: /home/phips/Documents/dataset/cc0/hr
     dataroot_lq: /home/phips/Documents/dataset/cc0/lr_x2
-    lq_size: 32
+    lq_size: 256
     use_hflip: true
     use_rot: true
     num_worker_per_gpu: 8
-    batch_size_per_gpu: 8
+    batch_size_per_gpu: 16
     accum_iter: 1
 
   val:
@@ -34,9 +38,6 @@ datasets:
 # -------------------------------------------------------------------------------------------------
 network_g:
   type: paragonsr2_nano
-
-network_d:
-  type: munet
 
 # -------------------------------------------------------------------------------------------------
 # Paths
@@ -58,68 +59,33 @@ train:
     lr: !!float 1.5e-4
     weight_decay: 0.0
     betas: [0.9, 0.99]
-  optim_d:
-    type: AdamW
-    lr: !!float 1.5e-4
-    weight_decay: 0
-    betas: [0.9, 0.99]
 
   scheduler:
-    type: CosineAnnealingWarmRestarts
-    T_0: 150000
+    # Smooth single-cycle cosine decay for a clean TensorBoard curve (no restarts):
+    # lr_max -> lr_min over total_iter, stable PSNR/SSIM-oriented pretrain.
+    type: CosineAnnealingLR
+    T_max: 200000
     eta_min: !!float 1e-7
 
-  total_iter: 150000
+  total_iter: 200000
   warmup_iter: 2000
 
   # ---
-  # Losses: Lightweight but perceptual-friendly recipe for rapid prototyping
+  # Losses: PSNR/SSIM-oriented pretrain (no perceptual/GAN/contrastive)
   # ---
   losses:
-    # Foundational Fidelity & Structure
     - type: l1loss
       loss_weight: 1.0
     - type: mssimloss
-      loss_weight: 0.8
-
-    # Perceptual & Realism
-    - type: perceptualloss
-      criterion: l1
-      loss_weight: 0.4
-      layer_weights:
-        'conv3_3': 1
-    - type: distsloss
-      loss_weight: 0.3
-    - type: ContrastiveLoss
-      loss_weight: 0.2
-      temperature: 0.1
-
-    # Color & Detail
-    - type: ConsistencyLoss
-      loss_weight: 0.3
-      criterion: chc
-      blur: true
-      saturation: 1.0
-      brightness: 0.9
-      cosim: true
-      cosim_weight: 0.5
-    - type: ffloss
-      loss_weight: 0.2
-
-    # Adversarial (Subtle)
-    - type: ganloss
-      gan_type: r3gan
-      loss_weight: 0.08
-      r1_weight: 2.5
-      r2_weight: 2.5
+      loss_weight: 0.1
 
 # -------------------------------------------------------------------------------------------------
 # Validation
 # -------------------------------------------------------------------------------------------------
 val:
   val_enabled: true
-  val_freq: 2500
-  save_img: true
+  val_freq: 1000
+  save_img: false
 
   metrics_enabled: true
   metrics:
@@ -131,20 +97,12 @@ val:
       type: calculate_ssim
       crop_border: 2
       test_y_channel: false
-    lpips:
-      type: calculate_lpips
-      better: lower
-    dists:
-      type: calculate_dists
-      better: lower
-    topiq:
-      type: calculate_topiq
 
 # -------------------------------------------------------------------------------------------------
 # Logging
 # -------------------------------------------------------------------------------------------------
 logger:
   print_freq: 100
-  save_checkpoint_freq: 2500
+  save_checkpoint_freq: 5000
   save_checkpoint_format: safetensors
   use_tb_logger: true
