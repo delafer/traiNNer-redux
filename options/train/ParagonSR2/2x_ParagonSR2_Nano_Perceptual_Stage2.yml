@@ -94,7 +94,7 @@ train:
       # Core pixel fidelity; prevents excessive hallucination and stabilizes all other losses.
 
     - type: mssimloss
-      loss_weight: 0.5
+      loss_weight: 0.3 # from 0.5 to 0.3 at 17400 iters, text output looks too smooth
       # Encourages structural similarity and cleaner edges; moderate to avoid oversmoothing.
 
     # 2) Modern ConvNeXt-Tiny shallow/mid perceptual (VGG replacement)
@@ -102,7 +102,7 @@ train:
       loss_weight: 0.2
 
     - type: distsloss
-      loss_weight: 0.4
+      loss_weight: 0.3 # 41900 it - 0.4 -> 0.3, since still soft
       # Deep image similarity; nudges towards human-perceived realism and reduces unnatural artifacts.
 
     # 3) Feature & color/brightness regularizers
@@ -112,24 +112,24 @@ train:
       # Encourages meaningful feature separation; used gently to refine structure without overfitting.
 
     - type: ConsistencyLoss
-      loss_weight: 0.3
+      loss_weight: 0.2 # 41900 it - 0.3 -> 0.2, since still soft
       criterion: chc
-      blur: true
+      blur: false # 41900 it - true -> false, since still soft
       saturation: 1.0
-      brightness: 0.9
+      brightness: 1.0 # 41900 it - 0.9 -> 1.0, since still soft
       cosim: true
       cosim_weight: 0.5
       # Locks brightness/chroma & local consistency; counters GAN/perceptual color shifts, keeps it clean.
 
     # 4) Frequency sharpening
     - type: ffloss
-      loss_weight: 0.2
+      loss_weight: 0.25 # from 0.2 to 0.25 at 27300 iters, gently increase sharpness drivers
       # Frequency-based detail encouragement; complements MagicKernel, adds crispness without pure noise.
 
     # 5) Adversarial (subtle, R3GAN)
     - type: ganloss
       gan_type: r3gan
-      loss_weight: 0.02
+      loss_weight: 0.03 # from 0.02 to 0.03 at 27300 iters, gently increase sharpness drivers
       r1_weight: 2.5
       r2_weight: 2.5
       # Robust GAN term for micro-texture and "pop".

@@ -1,0 +1,166 @@
+# yaml-language-server: $schema=https://raw.githubusercontent.com/the-database/traiNNer-redux/refs/heads/master/schemas/redux-config.schema.json
+# Stage 2 (Clean Perceptual): ParagonSR2 Nano 2x
+# - Start from 2x_ParagonSR2_Nano_Pretrain_Clean
+# - Goal: crisp, visually pleasing, artifact-minimized perceptual model.
+# - Design:
+#     * Strong L1 anchor.
+#     * Modern perceptual (ConvNeXt) + DISTS for natural details.
+#     * Light consistency for stable color/brightness.
+#     * Moderate FFL for crispness, tuned not to cause ringing.
+#     * Very light R3GAN for micro-texture without watercolor/overshoot.
+
+name: 2x_ParagonSR2_Nano_Perceptual_Clean
+scale: 2
+
+use_amp: true
+amp_bf16: false
+use_channels_last: true
+fast_matmul: true
+num_gpu: auto
+
+# -------------------------------------------------------------------------------------------------
+# Data
+# -------------------------------------------------------------------------------------------------
+datasets:
+  train:
+    name: Train_Dataset
+    type: pairedimagedataset
+    dataroot_gt: /home/phips/Documents/dataset/cc0/hr
+    dataroot_lq: /home/phips/Documents/dataset/cc0/lr_x2
+    lq_size: 64
+    use_hflip: true
+    use_rot: true
+    num_worker_per_gpu: 8
+    batch_size_per_gpu: 8
+    accum_iter: 1
+
+  val:
+    name: Val_Dataset
+    type: pairedimagedataset
+    dataroot_gt: /home/phips/Documents/dataset/cc0/val_hr
+    dataroot_lq: /home/phips/Documents/dataset/cc0/val_lr_x2
+
+# -------------------------------------------------------------------------------------------------
+# Network
+# -------------------------------------------------------------------------------------------------
+network_g:
+  type: paragonsr2_nano
+  # Controls MagicKernelSharp2021Upsample sharpening strength inside the arch.
+  # Must be read by paragonsr2_nano and passed into MagicKernelSharp2021Upsample.
+  # For this clean perceptual stage we allow slightly stronger sharpening than pretrain.
+  upsampler_alpha: 0.7
+
+network_d:
+  type: munet
+
+# -------------------------------------------------------------------------------------------------
+# Paths
+# -------------------------------------------------------------------------------------------------
+path:
+  pretrain_network_g: /home/phips/Documents/GitHub/traiNNer-redux/experiments/2x_ParagonSR2_Nano_Pretrain_Clean/models/net_g_200000.safetensors
+  strict_load_g: true
+  resume_state: ~
+
+# -------------------------------------------------------------------------------------------------
+# Training
+# -------------------------------------------------------------------------------------------------
+train:
+  ema_decay: 0.995
+  grad_clip: true
+
+  optim_g:
+    type: AdamW
+    lr: !!float 5e-5
+    weight_decay: 0.0
+    betas: [0.9, 0.99]
+
+  optim_d:
+    type: AdamW
+    lr: !!float 5e-5
+    weight_decay: 0.0
+    betas: [0.9, 0.99]
+
+  scheduler:
+    type: MultiStepLR
+    milestones: [40000, 60000]
+    gamma: 0.5
+
+  total_iter: 80000
+  warmup_iter: 2000
+
+  # ---
+  # Losses: Clean perceptual stack (crisp, natural, low artifact risk)
+  # ---
+  losses:
+    # 1) Fidelity anchor
+    - type: l1loss
+      loss_weight: 1.0
+
+    # 2) Perceptual
+    - type: convnextperceptualloss
+      loss_weight: 0.18
+
+    - type: distsloss
+      loss_weight: 0.12
+
+    # 3) Color/brightness consistency
+    - type: ConsistencyLoss
+      loss_weight: 0.06
+      criterion: chc
+      blur: false
+      saturation: 1.0
+      brightness: 1.0
+      cosim: true
+      cosim_weight: 0.5
+
+    # 4) Light contrastive (optional, safe)
+    - type: ContrastiveLoss
+      loss_weight: 0.03
+      temperature: 0.1
+
+    # 5) Frequency sharpening (moderate, tuned to avoid ringing)
+    - type: ffloss
+      loss_weight: 0.08
+
+    # 6) Very light R3GAN for subtle "pop"
+    - type: ganloss
+      gan_type: r3gan
+      loss_weight: 0.012
+      r1_weight: 2.5
+      r2_weight: 2.5
+
+# -------------------------------------------------------------------------------------------------
+# Validation
+# -------------------------------------------------------------------------------------------------
+val:
+  val_enabled: true
+  val_freq: 5000
+  save_img: true
+
+  metrics_enabled: true
+  metrics:
+    psnr:
+      type: calculate_psnr
+      crop_border: 2
+      test_y_channel: false
+    ssim:
+      type: calculate_ssim
+      crop_border: 2
+      test_y_channel: false
+    lpips:
+      type: calculate_lpips
+      better: lower
+    dists:
+      type: calculate_dists
+      better: lower
+    topiq:
+      type: calculate_topiq
+
+# -------------------------------------------------------------------------------------------------
+# Logging
+# -------------------------------------------------------------------------------------------------
+logger:
+  print_freq: 100
+  save_checkpoint_freq: 5000
+  save_checkpoint_format: safetensors
+  use_tb_logger: true

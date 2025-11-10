@@ -106,8 +106,22 @@ class MagicKernelSharp2021Upsample(nn.Module):
         target_w = max(round(width * scale_w), 1)
         return target_h, target_w
 
-    def __init__(self, in_channels: int) -> None:
+    def __init__(self, in_channels: int, alpha: float = 1.0) -> None:
+        """
+        Args:
+            in_channels: Number of channels.
+            alpha: Sharpening strength in [0, 1].
+                - 0.0 -> no pre-sharpening (pure smooth Magic kernel).
+                - 1.0 -> full MagicKernelSharp2021 behavior as originally implemented.
+                - Values in between provide a softer, more conservative sharpening.
+        """
         super().__init__()
+
+        # Clamp alpha defensively to a sane range without failing user configs.
+        alpha = float(alpha)
+        alpha = max(alpha, 0.0)
+        alpha = min(alpha, 1.0)
+        self.alpha = alpha
 
         # Stage 1: The pre-sharpening filter
         sharp_kernel = get_magic_sharp_2021_kernel_weights()
@@ -132,8 +146,16 @@ class MagicKernelSharp2021Upsample(nn.Module):
         Returns:
             The upsampled tensor.
         """
-        # Step 1: Apply the 7-tap sharpening filter to the low-resolution input.
-        x_sharpened = self.sharpen(x)
+        # Step 1: Apply the 7-tap sharpening filter to the low-resolution input,
+        # blended with the identity via alpha to control aggressiveness.
+        # x_sharp = sharpen(x)
+        # x_sharpened = x + alpha * (x_sharp - x)
+        if self.alpha > 0.0:
+            x_sharp = self.sharpen(x)
+            x_sharpened = x + self.alpha * (x_sharp - x)
+        else:
+            # alpha == 0 -> no sharpening, behaves like a smooth Magic kernel upsampler
+            x_sharpened = x
 
         # Step 2: Decide whether a resize is required and perform a nearest-neighbour upsample if needed.
         _, _, height, width = x_sharpened.shape

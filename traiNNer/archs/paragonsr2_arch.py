@@ -443,11 +443,18 @@ class ParagonSR2(nn.Module):
         num_blocks: int = 6,
         ffn_expansion: float = 2.0,
         block_kwargs: dict | None = None,
+        upsampler_alpha: float = 1.0,
     ) -> None:
         super().__init__()
         if block_kwargs is None:
             block_kwargs = {}
         self.scale = scale
+
+        # Clamp and store upsampler_alpha (0.0 = no sharpen, 1.0 = full MagicSharp behavior).
+        upsampler_alpha = float(upsampler_alpha)
+        upsampler_alpha = max(upsampler_alpha, 0.0)
+        upsampler_alpha = min(upsampler_alpha, 1.0)
+        self.upsampler_alpha = upsampler_alpha
 
         # --- Shallow Feature Extraction ---
         self.conv_in = nn.Conv2d(in_chans, num_feat, 3, 1, 1)
@@ -465,7 +472,11 @@ class ParagonSR2(nn.Module):
         # Using the Magic Kernel Sharp 2021 provides a sharper, cleaner, and more
         # foundationally sound input for the final stage of image reconstruction,
         # avoiding common artifacts from other upsampling methods.
-        self.magic_upsampler = MagicKernelSharp2021Upsample(in_channels=num_feat)
+        # upsampler_alpha is configurable via network_g.upsampler_alpha in the YAML.
+        self.magic_upsampler = MagicKernelSharp2021Upsample(
+            in_channels=num_feat,
+            alpha=self.upsampler_alpha,
+        )
         self.upsampler = nn.Conv2d(num_feat, num_feat, 3, 1, 1)
 
         # --- Final Image Reconstruction ---
@@ -535,6 +546,7 @@ def paragonsr2_nano(scale: int = 4, **kwargs) -> ParagonSR2:
         num_blocks=2,
         ffn_expansion=1.5,
         block_kwargs={"band_kernel_size": 9},
+        upsampler_alpha=kwargs.get("upsampler_alpha", 1.0),
     )
 
 
@@ -552,6 +564,7 @@ def paragonsr2_anime(scale: int = 4, **kwargs) -> ParagonSR2:
         num_blocks=3,
         ffn_expansion=1.5,
         block_kwargs={"band_kernel_size": 15},
+        upsampler_alpha=kwargs.get("upsampler_alpha", 1.0),
     )
 
 
@@ -563,7 +576,12 @@ def paragonsr2_tiny(scale: int = 4, **kwargs) -> ParagonSR2:
     - Target Hardware (Train): ~6-8GB VRAM GPUs (GTX 1660S, RTX 3050).
     """
     return ParagonSR2(
-        scale=scale, num_feat=32, num_groups=3, num_blocks=2, ffn_expansion=2.0
+        scale=scale,
+        num_feat=32,
+        num_groups=3,
+        num_blocks=2,
+        ffn_expansion=2.0,
+        upsampler_alpha=kwargs.get("upsampler_alpha", 1.0),
     )
 
 
@@ -576,7 +594,12 @@ def paragonsr2_s(scale: int = 4, **kwargs) -> ParagonSR2:
     - Target Hardware (Train): ~12GB VRAM GPUs (RTX 3060, RTX 2080 Ti).
     """
     return ParagonSR2(
-        scale=scale, num_feat=56, num_groups=5, num_blocks=5, ffn_expansion=2.0
+        scale=scale,
+        num_feat=56,
+        num_groups=5,
+        num_blocks=5,
+        ffn_expansion=2.0,
+        upsampler_alpha=kwargs.get("upsampler_alpha", 1.0),
     )
 
 
@@ -588,7 +611,12 @@ def paragonsr2_m(scale: int = 4, **kwargs) -> ParagonSR2:
     - Target Hardware (Train): ~16-24GB VRAM GPUs (RTX 3090, RTX 4080).
     """
     return ParagonSR2(
-        scale=scale, num_feat=96, num_groups=8, num_blocks=8, ffn_expansion=2.0
+        scale=scale,
+        num_feat=96,
+        num_groups=8,
+        num_blocks=8,
+        ffn_expansion=2.0,
+        upsampler_alpha=kwargs.get("upsampler_alpha", 1.0),
     )
 
 
@@ -599,7 +627,12 @@ def paragonsr2_l(scale: int = 4, **kwargs) -> ParagonSR2:
     - Target Hardware (Train): ~24GB+ VRAM GPUs (RTX 4090).
     """
     return ParagonSR2(
-        scale=scale, num_feat=128, num_groups=10, num_blocks=10, ffn_expansion=2.0
+        scale=scale,
+        num_feat=128,
+        num_groups=10,
+        num_blocks=10,
+        ffn_expansion=2.0,
+        upsampler_alpha=kwargs.get("upsampler_alpha", 1.0),
     )
 
 
@@ -611,5 +644,10 @@ def paragonsr2_xl(scale: int = 4, **kwargs) -> ParagonSR2:
     - Target Hardware (Train): 48GB+ VRAM (NVIDIA A100, H100).
     """
     return ParagonSR2(
-        scale=scale, num_feat=160, num_groups=12, num_blocks=12, ffn_expansion=2.0
+        scale=scale,
+        num_feat=160,
+        num_groups=12,
+        num_blocks=12,
+        ffn_expansion=2.0,
+        upsampler_alpha=kwargs.get("upsampler_alpha", 1.0),
     )
