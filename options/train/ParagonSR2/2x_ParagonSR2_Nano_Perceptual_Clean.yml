@@ -1,13 +1,18 @@
 # yaml-language-server: $schema=https://raw.githubusercontent.com/the-database/traiNNer-redux/refs/heads/master/schemas/redux-config.schema.json
-# Stage 2 (Clean Perceptual): ParagonSR2 Nano 2x
-# - Start from 2x_ParagonSR2_Nano_Pretrain_Clean
-# - Goal: crisp, visually pleasing, artifact-minimized perceptual model.
-# - Design:
-#     * Strong L1 anchor.
-#     * Modern perceptual (ConvNeXt) + DISTS for natural details.
-#     * Light consistency for stable color/brightness.
-#     * Moderate FFL for crispness, tuned not to cause ringing.
-#     * Very light R3GAN for micro-texture without watercolor/overshoot.
+# 2x ParagonSR2 Nano - Perceptual Clean
+#
+# Goals:
+# - Start from 2x_ParagonSR2_Nano_Pretrain_Clean (sharp, artifact-minimized).
+# - Add perceptual guidance and a very light, stable adversarial term.
+# - Achieve crisp, visually pleasing outputs that look good to humans:
+#     * sharp, detailed, with good micro-contrast,
+#     * minimal halos, ghost lines, watercolor, or GAN "oil painting" artifacts.
+# - Keep the architecture and losses deployment-friendly:
+#     * no exotic ops,
+#     * ParagonSR2 Nano (Magic+Conv + HR head),
+#     * suitable for fuse_for_release + ONNX/TensorRT + FP16/INT8.
+#
+# This config is the recommended 2x ParagonSR2 Nano perceptual setup built on the clean pretrain.
 
 name: 2x_ParagonSR2_Nano_Perceptual_Clean
 scale: 2
@@ -45,10 +50,9 @@ datasets:
 # -------------------------------------------------------------------------------------------------
 network_g:
   type: paragonsr2_nano
-  # Controls MagicKernelSharp2021Upsample sharpening strength inside the arch.
-  # Must be read by paragonsr2_nano and passed into MagicKernelSharp2021Upsample.
-  # For this clean perceptual stage we allow slightly stronger sharpening than pretrain.
-  upsampler_alpha: 0.7
+  # Match the architecture used in the clean pretrain:
+  upsampler_alpha: 0.5
+  hr_blocks: 1
 
 network_d:
   type: munet
@@ -57,7 +61,9 @@ network_d:
 # Paths
 # -------------------------------------------------------------------------------------------------
 path:
-  pretrain_network_g: /home/phips/Documents/GitHub/traiNNer-redux/experiments/2x_ParagonSR2_Nano_Pretrain_Clean/models/net_g_200000.safetensors
+  # Use the clean pretrain as initialization:
+  pretrain_network_g: /home/phips/Documents/GitHub/traiNNer-redux/options/train/ParagonSR2/../..//experiments/2x_ParagonSR2_Nano_Pretrain_Clean/models/net_g_200000.safetensors
+  # NOTE: Adjust the above path to your actual pretrain checkpoint location.
   strict_load_g: true
   resume_state: ~
 
@@ -66,17 +72,18 @@ path:
 # -------------------------------------------------------------------------------------------------
 train:
   ema_decay: 0.995
+  ema_power: 0.75
   grad_clip: true
 
   optim_g:
     type: AdamW
-    lr: !!float 5e-5
+    lr: !!float 5.0e-5
     weight_decay: 0.0
     betas: [0.9, 0.99]
 
   optim_d:
     type: AdamW
-    lr: !!float 5e-5
+    lr: !!float 5.0e-5
     weight_decay: 0.0
     betas: [0.9, 0.99]
 
@@ -88,24 +95,26 @@ train:
   total_iter: 80000
   warmup_iter: 2000
 
-  # ---
-  # Losses: Clean perceptual stack (crisp, natural, low artifact risk)
-  # ---
+  # Losses: designed for "clean perceptual" behavior.
   losses:
     # 1) Fidelity anchor
     - type: l1loss
       loss_weight: 1.0
 
-    # 2) Perceptual
+    # 2) Very light MSSIM (optional, small to avoid oversmoothing)
+    - type: mssimloss
+      loss_weight: 0.05
+
+    # 3) Perceptual losses (modern, robust)
     - type: convnextperceptualloss
       loss_weight: 0.18
 
     - type: distsloss
-      loss_weight: 0.12
+      loss_weight: 0.15
 
-    # 3) Color/brightness consistency
+    # 4) Consistency: stabilize color/brightness, avoid weird shifts
     - type: ConsistencyLoss
-      loss_weight: 0.06
+      loss_weight: 0.08
       criterion: chc
       blur: false
       saturation: 1.0
@@ -113,19 +122,19 @@ train:
       cosim: true
       cosim_weight: 0.5
 
-    # 4) Light contrastive (optional, safe)
+    # 5) Optional light contrastive; small, structure-aware
     - type: ContrastiveLoss
-      loss_weight: 0.03
+      loss_weight: 0.05
       temperature: 0.1
 
-    # 5) Frequency sharpening (moderate, tuned to avoid ringing)
+    # 6) Frequency sharpening (moderate, to keep crispness)
     - type: ffloss
-      loss_weight: 0.08
+      loss_weight: 0.10
 
-    # 6) Very light R3GAN for subtle "pop"
+    # 7) Very light R3GAN for subtle "pop"
     - type: ganloss
       gan_type: r3gan
-      loss_weight: 0.012
+      loss_weight: 0.015
       r1_weight: 2.5
       r2_weight: 2.5
 

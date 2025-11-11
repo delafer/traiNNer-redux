@@ -124,6 +124,23 @@ class ReparamConvV2(nn.Module):
             return F.conv2d(x, w, b, stride=self.stride, padding=1, groups=self.groups)
 
 
+class ResidualBlock(nn.Module):
+    """
+    Lightweight residual block for HR refinement.
+    Uses Conv + LeakyReLU + Conv + skip, keeping it simple, fusable,
+    and export-friendly (ONNX/TensorRT/INT8).
+    """
+
+    def __init__(self, dim: int) -> None:
+        super().__init__()
+        self.conv1 = nn.Conv2d(dim, dim, 3, 1, 1, bias=True)
+        self.act = nn.LeakyReLU(0.1, inplace=True)
+        self.conv2 = nn.Conv2d(dim, dim, 3, 1, 1, bias=True)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return x + self.conv2(self.act(self.conv1(x)))
+
+
 class InceptionDWConv2d(nn.Module):
     """
     Efficiently captures features at multiple spatial scales (square, horizontal,
@@ -432,7 +449,7 @@ class ResidualGroupV2(nn.Module):
 
 
 class ParagonSR2(nn.Module):
-    """The complete ParagonSR v2.1 architecture."""
+    """The complete ParagonSR v2.1 architecture with HR refinement head."""
 
     def __init__(
         self,
@@ -443,7 +460,8 @@ class ParagonSR2(nn.Module):
         num_blocks: int = 6,
         ffn_expansion: float = 2.0,
         block_kwargs: dict | None = None,
-        upsampler_alpha: float = 1.0,
+        upsampler_alpha: float = 0.5,
+        hr_blocks: int = 1,
     ) -> None:
         super().__init__()
         if block_kwargs is None:
@@ -456,10 +474,13 @@ class ParagonSR2(nn.Module):
         upsampler_alpha = min(upsampler_alpha, 1.0)
         self.upsampler_alpha = upsampler_alpha
 
+        # HR refinement depth (non-negative int). Acts as a local corrector, not a second backbone.
+        self.hr_blocks = max(int(hr_blocks), 0)
+
         # --- Shallow Feature Extraction ---
         self.conv_in = nn.Conv2d(in_chans, num_feat, 3, 1, 1)
 
-        # --- Deep Feature Extraction (The Body) ---
+        # --- Deep Feature Extraction (The Body, LR space) ---
         self.body = nn.Sequential(
             *[
                 ResidualGroupV2(num_feat, num_blocks, ffn_expansion, **block_kwargs)
@@ -469,15 +490,24 @@ class ParagonSR2(nn.Module):
         self.conv_fuse = nn.Conv2d(num_feat, num_feat, 3, 1, 1)
 
         # --- Upsampling Block: The "Magic-Conv" ---
-        # Using the Magic Kernel Sharp 2021 provides a sharper, cleaner, and more
-        # foundationally sound input for the final stage of image reconstruction,
-        # avoiding common artifacts from other upsampling methods.
-        # upsampler_alpha is configurable via network_g.upsampler_alpha in the YAML.
+        # Using the Magic Kernel Sharp 2021 with moderated alpha provides a sharp,
+        # stable foundation while reducing overshoot/ringing risk.
         self.magic_upsampler = MagicKernelSharp2021Upsample(
             in_channels=num_feat,
             alpha=self.upsampler_alpha,
         )
-        self.upsampler = nn.Conv2d(num_feat, num_feat, 3, 1, 1)
+
+        # First HR conv after upsampling (acts as adaptation layer into HR space).
+        self.hr_conv_in = nn.Conv2d(num_feat, num_feat, 3, 1, 1)
+
+        # Lightweight HR refinement head: sequence of ResidualBlocks operating in HR.
+        # Corrects subtle ringing/aliasing while preserving structure.
+        if self.hr_blocks > 0:
+            self.hr_head = nn.Sequential(
+                *[ResidualBlock(num_feat) for _ in range(self.hr_blocks)]
+            )
+        else:
+            self.hr_head = nn.Identity()
 
         # --- Final Image Reconstruction ---
         self.conv_out = nn.Conv2d(num_feat, in_chans, 3, 1, 1)
@@ -523,11 +553,20 @@ class ParagonSR2(nn.Module):
         return self
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # Shallow + deep LR features
         x_shallow = self.conv_in(x)
         x_deep = self.body(x_shallow)
         x_fused = self.conv_fuse(x_deep) + x_shallow
+
+        # Magic-based upsampling in feature space
         x_upsampled = self.magic_upsampler(x_fused, scale_factor=self.scale)
-        return self.conv_out(self.upsampler(x_upsampled))
+
+        # HR refinement head: small residual stack as corrector
+        h = self.hr_conv_in(x_upsampled)
+        h = self.hr_head(h)
+
+        # Final RGB reconstruction
+        return self.conv_out(h)
 
 
 # --- Factory Registration for traiNNer-redux: The Recalibrated V2 Family ---
@@ -546,7 +585,8 @@ def paragonsr2_nano(scale: int = 4, **kwargs) -> ParagonSR2:
         num_blocks=2,
         ffn_expansion=1.5,
         block_kwargs={"band_kernel_size": 9},
-        upsampler_alpha=kwargs.get("upsampler_alpha", 1.0),
+        upsampler_alpha=kwargs.get("upsampler_alpha", 0.5),
+        hr_blocks=kwargs.get("hr_blocks", 1),
     )
 
 
@@ -564,7 +604,8 @@ def paragonsr2_anime(scale: int = 4, **kwargs) -> ParagonSR2:
         num_blocks=3,
         ffn_expansion=1.5,
         block_kwargs={"band_kernel_size": 15},
-        upsampler_alpha=kwargs.get("upsampler_alpha", 1.0),
+        upsampler_alpha=kwargs.get("upsampler_alpha", 0.5),
+        hr_blocks=kwargs.get("hr_blocks", 2),
     )
 
 
@@ -581,7 +622,8 @@ def paragonsr2_tiny(scale: int = 4, **kwargs) -> ParagonSR2:
         num_groups=3,
         num_blocks=2,
         ffn_expansion=2.0,
-        upsampler_alpha=kwargs.get("upsampler_alpha", 1.0),
+        upsampler_alpha=kwargs.get("upsampler_alpha", 0.5),
+        hr_blocks=kwargs.get("hr_blocks", 2),
     )
 
 
@@ -599,7 +641,8 @@ def paragonsr2_s(scale: int = 4, **kwargs) -> ParagonSR2:
         num_groups=5,
         num_blocks=5,
         ffn_expansion=2.0,
-        upsampler_alpha=kwargs.get("upsampler_alpha", 1.0),
+        upsampler_alpha=kwargs.get("upsampler_alpha", 0.5),
+        hr_blocks=kwargs.get("hr_blocks", 2),
     )
 
 
@@ -616,7 +659,8 @@ def paragonsr2_m(scale: int = 4, **kwargs) -> ParagonSR2:
         num_groups=8,
         num_blocks=8,
         ffn_expansion=2.0,
-        upsampler_alpha=kwargs.get("upsampler_alpha", 1.0),
+        upsampler_alpha=kwargs.get("upsampler_alpha", 0.5),
+        hr_blocks=kwargs.get("hr_blocks", 2),
     )
 
 
@@ -632,7 +676,8 @@ def paragonsr2_l(scale: int = 4, **kwargs) -> ParagonSR2:
         num_groups=10,
         num_blocks=10,
         ffn_expansion=2.0,
-        upsampler_alpha=kwargs.get("upsampler_alpha", 1.0),
+        upsampler_alpha=kwargs.get("upsampler_alpha", 0.5),
+        hr_blocks=kwargs.get("hr_blocks", 3),
     )
 
 
@@ -649,5 +694,6 @@ def paragonsr2_xl(scale: int = 4, **kwargs) -> ParagonSR2:
         num_groups=12,
         num_blocks=12,
         ffn_expansion=2.0,
-        upsampler_alpha=kwargs.get("upsampler_alpha", 1.0),
+        upsampler_alpha=kwargs.get("upsampler_alpha", 0.5),
+        hr_blocks=kwargs.get("hr_blocks", 3),
     )

@@ -2,7 +2,7 @@
 ####################
 # General Settings
 ####################
-name: 2x_ParagonSR_stagec_nonema_35000
+name: 2x_ParagonSR_nano_pretrain_90k_nonema_up05
 scale: 2  # 1, 2, 3, 4, 8
 use_amp: false  # Speed up training and reduce VRAM usage. NVIDIA only.
 amp_bf16: false  # Use bf16 instead of fp16 for AMP, RTX 3000 series or newer only.
@@ -29,13 +29,14 @@ datasets:
 # Generator model settings
 network_g:
   type: paragonsr2_nano
+  upsampler_alpha: 0.5
 
 ############################
 # Pretrain and Resume Paths
 ############################
 path:
   # Path of the model to run on the validation images.
-  pretrain_network_g: experiments/2x_ParagonSR2_Nano_Perceptual_Stage2C/models/resume_models/net_g_35000.safetensors
+  pretrain_network_g: experiments/2x_ParagonSR2_Nano_Pretrain_Clean/models/resume_models/net_g_90000.safetensors
 
 #############
 # Validation

@@ -1,11 +1,16 @@
 # yaml-language-server: $schema=https://raw.githubusercontent.com/the-database/traiNNer-redux/refs/heads/master/schemas/redux-config.schema.json
-# Stage 1 (Clean): ParagonSR2 Nano 2x Fidelity Pretrain - Anti-Ringing Variant
-# - Uses MagicKernelSharp2021Upsample with configurable alpha in the architecture (set there).
-# - Losses are chosen to:
-#     * Keep strong fidelity (L1).
-#     * Gently suppress ringing/ghost edges (FF + tiny TV).
-# - No perceptual, no GAN, no MSSIM here.
-# - Goal: artifact-minimized, sharp, neutral backbone for subsequent perceptual finetune.
+# 2x ParagonSR2 Nano - Clean Fidelity Pretrain
+#
+# Goals:
+# - Train a clean, sharp, artifact-minimized 2x backbone for ParagonSR2 Nano.
+# - Use the updated ParagonSR2 architecture:
+#     * LR backbone
+#     * MagicKernelSharp2021 upsampler with upsampler_alpha=0.5
+#     * 1x HR ResidualBlock refinement head (hr_blocks=1)
+# - No GAN, no perceptual loss here: this is a stable, deployment-ready base.
+# - Loss: strong L1 + very light frequency regularization to suppress ringing.
+#
+# This checkpoint is intended as pretrain_network_g for the perceptual config.
 
 name: 2x_ParagonSR2_Nano_Pretrain_Clean
 scale: 2
@@ -43,19 +48,15 @@ datasets:
 # -------------------------------------------------------------------------------------------------
 network_g:
   type: paragonsr2_nano
-  # Controls MagicKernelSharp2021Upsample sharpening strength inside the arch.
-  # Must be read by paragonsr2_nano and passed into MagicKernelSharp2021Upsample.
-  # For this clean pretrain we use a conservative value.
-  upsampler_alpha: 0.5
-
-# No discriminator for fidelity pretrain
-# network_d: omitted
+  # Explicit for clarity; these match the ParagonSR2 Nano defaults:
+  upsampler_alpha: 0.5   # sharp but controlled Magic upsampler
+  hr_blocks: 1           # tiny HR refinement head (single ResidualBlock)
 
 # -------------------------------------------------------------------------------------------------
 # Paths
 # -------------------------------------------------------------------------------------------------
 path:
-  pretrain_network_g: ~
+  pretrain_network_g: ~     # Training from scratch
   strict_load_g: true
   resume_state: ~
 
@@ -63,7 +64,8 @@ path:
 # Training
 # -------------------------------------------------------------------------------------------------
 train:
-  ema_decay: 0.995          # Optional EMA for stability; visually validate before using for export.
+  ema_decay: 0.995          # Light EMA for stability; does not change architecture behavior.
+  ema_power: 0.75
   grad_clip: true
 
   optim_g:
@@ -73,37 +75,36 @@ train:
     betas: [0.9, 0.99]
 
   scheduler:
-    type: MultiStepLR
-    milestones: [100000, 160000]
-    gamma: 0.5
+    type: CosineAnnealingLR
+    T_max: 200000
+    eta_min: !!float 1e-7
 
   total_iter: 200000
   warmup_iter: 2000
 
-  # ---
-  # Losses: Artifact-minimized fidelity stack
-  # ---
+  # Clean, artifact-aware fidelity loss:
   losses:
     - type: l1loss
       loss_weight: 1.0
 
     # Gentle frequency regularization:
-    # Helps discourage oscillatory ringing while preserving real high-frequency detail.
+    # Encourages matching HR frequency structure without encouraging oscillatory ringing.
     - type: ffloss
       loss_weight: 0.05
 
-    # Tiny TV loss:
-    # Penalizes rapid sign-flipping gradients (ringing/speckle) at very low strength.
-    - type: tvloss
-      loss_weight: 0.01
+    # If you implement and register a tvloss (TV regularizer) in traiNNer:
+    # you may enable this with a very small weight (0.005–0.01) to further
+    # discourage tiny oscillations. Keep it commented out otherwise.
+    # - type: tvloss
+    #   loss_weight: 0.01
 
 # -------------------------------------------------------------------------------------------------
 # Validation
 # -------------------------------------------------------------------------------------------------
 val:
   val_enabled: true
-  val_freq: 5000
-  save_img: true
+  val_freq: 1000
+  save_img: false
 
   metrics_enabled: true
   metrics:
