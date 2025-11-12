@@ -62,7 +62,7 @@ network_d:
 # -------------------------------------------------------------------------------------------------
 path:
   # Use the clean pretrain as initialization:
-  pretrain_network_g: /home/phips/Documents/GitHub/traiNNer-redux/options/train/ParagonSR2/../..//experiments/2x_ParagonSR2_Nano_Pretrain_Clean/models/net_g_200000.safetensors
+  pretrain_network_g: experiments/2x_ParagonSR2_Nano_Pretrain_Clean/models/net_g_ema_50000.safetensors
   # NOTE: Adjust the above path to your actual pretrain checkpoint location.
   strict_load_g: true
   resume_state: ~
@@ -97,24 +97,20 @@ train:
 
   # Losses: designed for "clean perceptual" behavior.
   losses:
-    # 1) Fidelity anchor
+    # 1) Fidelity anchor, prevents hallucination and color drift.
     - type: l1loss
       loss_weight: 1.0
 
-    # 2) Very light MSSIM (optional, small to avoid oversmoothing)
-    - type: mssimloss
-      loss_weight: 0.05
-
-    # 3) Perceptual losses (modern, robust)
+    # 2) Perceptual losses (modern, robust), encourage perceptual sharpness and natural textures.
     - type: convnextperceptualloss
-      loss_weight: 0.18
+      loss_weight: 0.15
 
     - type: distsloss
-      loss_weight: 0.15
+      loss_weight: 0.10
 
     # 4) Consistency: stabilize color/brightness, avoid weird shifts
     - type: ConsistencyLoss
-      loss_weight: 0.08
+      loss_weight: 0.05
       criterion: chc
       blur: false
       saturation: 1.0
@@ -122,21 +118,27 @@ train:
       cosim: true
       cosim_weight: 0.5
 
-    # 5) Optional light contrastive; small, structure-aware
+    # 5) small structural regularizer
     - type: ContrastiveLoss
-      loss_weight: 0.05
+      loss_weight: 0.03
       temperature: 0.1
 
-    # 6) Frequency sharpening (moderate, to keep crispness)
+    # 6) Frequency sharpening (moderate, to keep crispness), pushes for high-frequency detail; directly fights blur.
     - type: ffloss
-      loss_weight: 0.10
+      loss_weight: 0.12
 
-    # 7) Very light R3GAN for subtle "pop"
+    # 7) Very light R3GAN for subtle micro-contrast and “pop” without going painterly
     - type: ganloss
       gan_type: r3gan
-      loss_weight: 0.015
+      loss_weight: 0.02
       r1_weight: 2.5
       r2_weight: 2.5
+
+    # 8) Gradient-variance loss to suppress aliasing/jaggies
+    - type: GradientVarianceLoss
+      loss_weight: 0.04
+      patch_size: 16
+      criterion: charbonnier
 
 # -------------------------------------------------------------------------------------------------
 # Validation

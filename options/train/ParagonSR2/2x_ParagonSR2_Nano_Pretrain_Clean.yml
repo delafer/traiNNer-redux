@@ -36,6 +36,7 @@ datasets:
     num_worker_per_gpu: 8
     batch_size_per_gpu: 16
     accum_iter: 1
+    pin_memory: false
 
   val:
     name: Val_Dataset
