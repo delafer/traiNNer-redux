@@ -1,5 +1,23 @@
 # ParagonSR2
 
+ParagonSR2 is designed as a practical "no-nonsense" super-resolution system for real use, not just benchmarks.
+
+At a glance, ParagonSR2 aims to:
+- deliver high-quality, visually pleasing outputs that hold up under close inspection,
+- run fast enough for real-world deployment on consumer GPUs and modern CPUs,
+- remain robust across mixed and imperfect inputs (compression, noise, sharpening, mild blur),
+- integrate cleanly into production pipelines:
+  - dynamic-shape ONNX export,
+  - TensorRT compatibility,
+  - safe FP16/INT8 post-training quantization,
+  - deterministic, easily debuggable behavior.
+
+In other words:
+- ParagonSR2 should feel like a reliable tool you can ship to end users:
+  - capable enough to handle complex degradations,
+  - efficient enough to run interactively,
+  - predictable enough that improvements come from deliberate design, not accidents.
+
 ParagonSR2 is a practical, deployment-focused super-resolution architecture designed by Philip Hofmann and implemented for traiNNer-redux.
 
 The goals are simple:
@@ -179,6 +197,38 @@ Key improvements over ParagonSR:
   - HR residual head:
     - is a dedicated, lightweight corrector:
       - designed to adjust, not overwrite, the Magic upsample result.
+## Integrated two-stage refinement (built-in 1x restorer idea)
+
+A common practical idea for high-quality SR is a two-stage pipeline:
+
+1. Train a strong 2x SISR model.
+2. Run it on LR inputs to produce enhanced-but-imperfect outputs.
+3. Train a separate 1x restoration model:
+   - input: the 2x model outputs,
+   - target: clean HR,
+   so the 1x model learns to remove artifacts and polish details left by the first stage.
+
+ParagonSR2 embeds this concept directly into a single architecture:
+
+- The LR backbone:
+  - plays the role of the primary SISR model,
+  - learns to reconstruct structure and detail efficiently in low-resolution space.
+- The Magic Kernel Sharp 2021 upsampler:
+  - lifts features to the target resolution with a principled, sharp, alias-aware kernel.
+- The HR residual refinement head:
+  - behaves like an integrated 1x restoration stage:
+    - it only sees the upsampled representation,
+    - it is trained end-to-end to:
+      - clean halos and ringing,
+      - fix subtle artifacts,
+      - refine micro-texture and edges,
+    - without overhauling the entire image.
+
+This design gives you the benefits of a two-stage SR→restorer pipeline:
+- artifact correction is explicit and learnable,
+- complexity stays low (a small HR head, not a whole second network),
+- everything is trained jointly and exported as one compact, deployment-ready model.
+
   - This three-step structure:
     - aligns with how high-quality SR is used in practice:
       - reconstruct → upscale → polish.
