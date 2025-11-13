@@ -98,18 +98,29 @@ train:
   ema_power: 0.75
   grad_clip: true
 
+  # Optimizer for Generator (optim_g)
+  # - AdamW (standard in traiNNer-redux) with:
+  #     * mildly higher LR for faster convergence,
+  #     * moderate weight decay as regularization in this strong perceptual+GAN regime.
   optim_g:
     type: AdamW
-    lr: !!float 5.0e-5
-    weight_decay: 0.0
+    lr: !!float 1.0e-4
+    weight_decay: 1.0e-4
     betas: [0.9, 0.99]
 
+  # Optimizer for Discriminator (optim_d)
+  # - TTUR: discriminator learns slightly faster than generator.
+  # - No weight decay: keeps D flexible to track G.
   optim_d:
     type: AdamW
-    lr: !!float 5.0e-5
+    lr: !!float 1.5e-4
     weight_decay: 0.0
     betas: [0.9, 0.99]
 
+  # Scheduler:
+  # - Keep MultiStepLR as in standard traiNNer-redux templates:
+  #     * predictable and robust for ESRGAN-style training,
+  #     * easier to tune than OneCycleLR for a public baseline.
   scheduler:
     type: MultiStepLR
     milestones: [40000, 60000]
