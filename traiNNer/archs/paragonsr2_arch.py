@@ -569,14 +569,38 @@ class ParagonSR2(nn.Module):
         return self.conv_out(h)
 
 
-# --- Factory Registration for traiNNer-redux: The Recalibrated V2 Family ---
+# --- Factory Registration for traiNNer-redux: The Redesigned V2 Family ---
+#
+# Rationale: A streamlined progression of variants that provide meaningful
+# differentiation in capacity, speed, and quality while maintaining the
+# deployment-optimized architecture that makes ParagonSR2 special.
 
 
 @ARCH_REGISTRY.register()
 def paragonsr2_nano(scale: int = 4, **kwargs) -> ParagonSR2:
     """
-    V2-Nano: Ultra-light configuration for rapid prototyping and low-VRAM hardware.
-    - Target Hardware (Train): ~4GB VRAM GPUs (GTX 1650, RTX 3050 Laptop).
+    V2-Nano: Ultra-lightweight configuration for rapid prototyping and constrained hardware.
+
+    GOAL: Maximum deployment efficiency with acceptable quality for basic super-resolution.
+
+    WHEN TO USE:
+    - Prototyping new training pipelines or loss functions
+    - GPU memory constrained environments (~4GB VRAM)
+    - Real-time applications where speed is paramount
+    - Quick qualitative testing without long training times
+    - Mobile/edge deployment where model size matters
+
+    CAPACITY PROFILE:
+    - Features: 24 (minimal channel dimension)
+    - Groups×Blocks: 2×2 = 4 total transformers (minimal depth)
+    - Band Kernel: 9 (smaller context for speed)
+    - HR Blocks: 1 (basic refinement)
+
+    EXPECTED RESULTS:
+    - Fastest training and inference
+    - Basic upscaling quality
+    - Suitable for simple degradations
+    - Limited capacity for complex perceptual training
     """
     return ParagonSR2(
         scale=scale,
@@ -591,56 +615,78 @@ def paragonsr2_nano(scale: int = 4, **kwargs) -> ParagonSR2:
 
 
 @ARCH_REGISTRY.register()
-def paragonsr2_anime(scale: int = 4, **kwargs) -> ParagonSR2:
+def paragonsr2_xs(scale: int = 4, **kwargs) -> ParagonSR2:
     """
-    V2-Anime: Specialized for animation. Features wider context kernels for clean
-    line reconstruction and an efficient design for real-time performance.
-    - Target Hardware (Train): ~8-12GB VRAM GPUs (RTX 3060).
-    """
-    return ParagonSR2(
-        scale=scale,
-        num_feat=28,
-        num_groups=2,
-        num_blocks=3,
-        ffn_expansion=1.5,
-        block_kwargs={"band_kernel_size": 15},
-        upsampler_alpha=kwargs.get("upsampler_alpha", 0.5),
-        hr_blocks=kwargs.get("hr_blocks", 2),
-    )
+    V2-XS: Extra-small configuration for balanced speed and quality.
 
+    GOAL: Sweet spot between training efficiency and perceptual capability.
 
-@ARCH_REGISTRY.register()
-def paragonsr2_tiny(scale: int = 4, **kwargs) -> ParagonSR2:
-    """
-    V2-Tiny: The ideal starting point for quick tests and low-resource training.
-    Excellent for validating a training pipeline.
-    - Target Hardware (Train): ~6-8GB VRAM GPUs (GTX 1660S, RTX 3050).
+    WHEN TO USE:
+    - Initial perceptual training experiments
+    - GPU memory limited environments (~6GB VRAM)
+    - When you need better quality than Nano but still want speed
+    - Testing different loss combinations
+    - Quick baseline model training
+
+    CAPACITY PROFILE:
+    - Features: 32 (moderate channel dimension)
+    - Groups×Blocks: 2×3 = 6 total transformers (light depth)
+    - Band Kernel: 11 (balanced spatial context)
+    - HR Blocks: 1 (basic refinement)
+
+    EXPECTED RESULTS:
+    - Good training speed with improved quality over Nano
+    - Can handle basic perceptual losses
+    - Better detail reconstruction
+    - Suitable for simple perceptual fine-tuning
     """
     return ParagonSR2(
         scale=scale,
         num_feat=32,
-        num_groups=3,
-        num_blocks=2,
-        ffn_expansion=2.0,
+        num_groups=2,
+        num_blocks=3,
+        ffn_expansion=1.5,
+        block_kwargs={"band_kernel_size": 11},
         upsampler_alpha=kwargs.get("upsampler_alpha", 0.5),
-        hr_blocks=kwargs.get("hr_blocks", 2),
+        hr_blocks=kwargs.get("hr_blocks", 1),
     )
 
 
 @ARCH_REGISTRY.register()
 def paragonsr2_s(scale: int = 4, **kwargs) -> ParagonSR2:
     """
-    V2-S (Recalibrated): The flagship model, designed for high quality on
-    mainstream hardware. It leverages the intelligent V2 architecture to achieve
-    superior results within a practical training budget.
-    - Target Hardware (Train): ~12GB VRAM GPUs (RTX 3060, RTX 2080 Ti).
+    V2-S: Small configuration for mainstream perceptual training.
+
+    GOAL: Optimal balance for high-quality perceptual training on consumer hardware.
+
+    WHEN TO USE:
+    - Primary choice for perceptual model training
+    - GPU memory: RTX 3060, GTX 1660S (~8GB VRAM)
+    - When you want clear visual differences between pretrain/perceptual models
+    - Complex loss combinations (DINO, LDL, frequency losses, etc.)
+    - Production-quality model training
+    - The "goldilocks" variant for most use cases
+
+    CAPACITY PROFILE:
+    - Features: 48 (substantial channel dimension)
+    - Groups×Blocks: 3×4 = 12 total transformers (moderate depth)
+    - Band Kernel: 11 (balanced spatial context)
+    - HR Blocks: 2 (enhanced refinement)
+
+    EXPECTED RESULTS:
+    - High-quality results with proper training
+    - Excellent balance of speed and quality
+    - Can handle complex 8+ component loss functions
+    - Strong enough for meaningful perceptual improvements
+    - Suitable for final production models
     """
     return ParagonSR2(
         scale=scale,
-        num_feat=56,
-        num_groups=5,
-        num_blocks=5,
+        num_feat=48,
+        num_groups=3,
+        num_blocks=4,
         ffn_expansion=2.0,
+        block_kwargs={"band_kernel_size": 11},
         upsampler_alpha=kwargs.get("upsampler_alpha", 0.5),
         hr_blocks=kwargs.get("hr_blocks", 2),
     )
@@ -649,16 +695,37 @@ def paragonsr2_s(scale: int = 4, **kwargs) -> ParagonSR2:
 @ARCH_REGISTRY.register()
 def paragonsr2_m(scale: int = 4, **kwargs) -> ParagonSR2:
     """
-    V2-M: The prosumer choice for future hardware, offering a significant
-    jump in expressive power for higher fidelity restoration.
-    - Target Hardware (Train): ~16-24GB VRAM GPUs (RTX 3090, RTX 4080).
+    V2-M: Medium configuration for enhanced quality on better hardware.
+
+    GOAL: High-quality results for users with more VRAM and training time.
+
+    WHEN TO USE:
+    - When S variant quality isn't quite sufficient
+    - GPU memory: RTX 3070, RTX 4060 Ti (~12GB VRAM)
+    - Training models that need stronger global context understanding
+    - When artifacts-free results are critical
+    - Professional or semi-professional applications
+
+    CAPACITY PROFILE:
+    - Features: 64 (large channel dimension)
+    - Groups×Blocks: 4×6 = 24 total transformers (substantial depth)
+    - Band Kernel: 13 (enhanced spatial context)
+    - HR Blocks: 2 (enhanced refinement)
+
+    EXPECTED RESULTS:
+    - Superior quality compared to S variant
+    - Better handling of complex scenes and textures
+    - Improved artifact suppression
+    - Can handle the most demanding loss combinations
+    - Professional-grade output quality
     """
     return ParagonSR2(
         scale=scale,
-        num_feat=96,
-        num_groups=8,
-        num_blocks=8,
+        num_feat=64,
+        num_groups=4,
+        num_blocks=6,
         ffn_expansion=2.0,
+        block_kwargs={"band_kernel_size": 13},
         upsampler_alpha=kwargs.get("upsampler_alpha", 0.5),
         hr_blocks=kwargs.get("hr_blocks", 2),
     )
@@ -667,15 +734,37 @@ def paragonsr2_m(scale: int = 4, **kwargs) -> ParagonSR2:
 @ARCH_REGISTRY.register()
 def paragonsr2_l(scale: int = 4, **kwargs) -> ParagonSR2:
     """
-    V2-L: The enthusiast's choice for near-SOTA quality on high-end hardware.
-    - Target Hardware (Train): ~24GB+ VRAM GPUs (RTX 4090).
+    V2-L: Large configuration for near-SOTA quality on high-end hardware.
+
+    GOAL: Maximum quality for users who prioritize results over training efficiency.
+
+    WHEN TO USE:
+    - When you need the best possible quality
+    - GPU memory: RTX 3080, RTX 4070 Ti, RTX 4080 (~16GB VRAM)
+    - Professional video production or critical applications
+    - When training time is less important than final quality
+    - Research and development projects
+
+    CAPACITY PROFILE:
+    - Features: 96 (very large channel dimension)
+    - Groups×Blocks: 6×8 = 48 total transformers (deep architecture)
+    - Band Kernel: 15 (maximum spatial context)
+    - HR Blocks: 3 (maximum refinement)
+
+    EXPECTED RESULTS:
+    - Near state-of-the-art quality with proper training
+    - Excellent handling of complex degradations
+    - Superior artifact-free results
+    - Can push perceptual training to its limits
+    - Professional/broadcast quality output
     """
     return ParagonSR2(
         scale=scale,
-        num_feat=128,
-        num_groups=10,
-        num_blocks=10,
+        num_feat=96,
+        num_groups=6,
+        num_blocks=8,
         ffn_expansion=2.0,
+        block_kwargs={"band_kernel_size": 15},
         upsampler_alpha=kwargs.get("upsampler_alpha", 0.5),
         hr_blocks=kwargs.get("hr_blocks", 3),
     )
@@ -684,16 +773,37 @@ def paragonsr2_l(scale: int = 4, **kwargs) -> ParagonSR2:
 @ARCH_REGISTRY.register()
 def paragonsr2_xl(scale: int = 4, **kwargs) -> ParagonSR2:
     """
-    V2-XL: The ultimate research-grade model for chasing state-of-the-art
-    benchmarks, designed for top-tier accelerator cards.
-    - Target Hardware (Train): 48GB+ VRAM (NVIDIA A100, H100).
+    V2-XL: Extra-large configuration for research-grade quality.
+
+    GOAL: Maximum capacity for cutting-edge research and benchmarks.
+
+    WHEN TO USE:
+    - Research institutions and companies with significant compute resources
+    - GPU memory: RTX 4090, A100, H100 (~24GB+ VRAM)
+    - Pushing the boundaries of single-image super-resolution
+    - When no expense is spared for maximum quality
+    - Benchmark submissions and competition entries
+
+    CAPACITY PROFILE:
+    - Features: 128 (research-grade channel dimension)
+    - Groups×Blocks: 8×10 = 80 total transformers (very deep)
+    - Band Kernel: 15 (maximum spatial context)
+    - HR Blocks: 3 (maximum refinement)
+
+    EXPECTED RESULTS:
+    - State-of-the-art quality potential
+    - Maximum capacity for handling complex degradations
+    - Can learn the most subtle texture details
+    - Best-in-class perceptual quality
+    - Research/benchmark-grade results
     """
     return ParagonSR2(
         scale=scale,
-        num_feat=160,
-        num_groups=12,
-        num_blocks=12,
+        num_feat=128,
+        num_groups=8,
+        num_blocks=10,
         ffn_expansion=2.0,
+        block_kwargs={"band_kernel_size": 15},
         upsampler_alpha=kwargs.get("upsampler_alpha", 0.5),
         hr_blocks=kwargs.get("hr_blocks", 3),
     )
