@@ -1,0 +1,208 @@
+# yaml-language-server: $schema=https://raw.githubusercontent.com/the-database/traiNNer-redux/refs/heads/master/schemas/redux-config.schema.json
+# 2x ParagonSR2 Nano - Perceptual Clean V2 (DINO + LDL)
+#
+# This config is a *specialized, high-precision* variant relative to the
+# standard traiNNer-redux GAN/perceptual templates (e.g. HAT_M_gan.yml).
+#
+# Key design philosophy vs standard configs:
+# - Prioritize *artifact-free* yet *crisp* outputs suitable for real deployment.
+# - Use a compact set of *strong, modern* losses instead of many overlapping ones.
+# - Keep adversarial influence intentionally light and tightly controlled.
+#
+# Concretely different / "improved" compared to a typical baseline GAN config:
+# - Charbonnier fidelity anchor:
+#     * Uses Charbonnier instead of plain L1 as primary distortion loss.
+#     * Provides smoother, more stable gradients in GAN+perceptual regimes.
+# - DINOv2-based perceptual loss:
+#     * Replaces legacy, classification-heavy VGG-style perceptual terms with
+#       dinoperceptualloss built on DINOv2 features.
+#     * Emphasizes low/mid-level visual similarity and natural textures, helping
+#       avoid unnatural "GAN gloss" or over-semantic artifacts.
+# - Explicit LDL artifact suppression:
+#     * Adds ldlloss as a dedicated term to detect and penalize local artifacts
+#       (ringing, blotchiness, oil-paint textures) that standard setups may ignore.
+# - Structured supporting losses:
+#     * DISTS: perception-aware structural stability.
+#     * ConsistencyLoss (CHC): keeps color and brightness stable, reducing hue/banding.
+#     * FFLoss: encourages real high-frequency detail instead of simple sharpening.
+#     * GradientVarianceLoss: regularizes local gradients to suppress noise/jaggies.
+# - Conservative adversarial signal:
+#     * Uses R3GAN with a very low weight for subtle micro-contrast and "pop" without
+#       strong hallucination pressure often seen in generic ESRGAN-style setups.
+#
+# In summary:
+# - Standard configs are general-purpose and safe.
+# - This config is a targeted recipe for ParagonSR2 Nano that:
+#     * encodes stronger guarantees against GAN artifacts,
+#     * leverages modern perceptual (DINOv2) and artifact-suppression (LDL, GV) ideas,
+#     * remains deployment-friendly and interpretable for real-world SISR use.
+
+name: 2x_ParagonSR2_Nano_Perceptual_Clean_v2
+scale: 2
+
+use_amp: true
+amp_bf16: false
+use_channels_last: true
+fast_matmul: true
+num_gpu: auto
+
+# -------------------------------------------------------------------------------------------------
+# Data
+# -------------------------------------------------------------------------------------------------
+datasets:
+  train:
+    name: Train_Dataset
+    type: pairedimagedataset
+    dataroot_gt: /home/phips/Documents/dataset/cc0/hr
+    dataroot_lq: /home/phips/Documents/dataset/cc0/lr_x2
+    lq_size: 64
+    use_hflip: true
+    use_rot: true
+    num_worker_per_gpu: 8
+    batch_size_per_gpu: 8
+    accum_iter: 1
+
+  val:
+    name: Val_Dataset
+    type: pairedimagedataset
+    dataroot_gt: /home/phips/Documents/dataset/cc0/val_hr
+    dataroot_lq: /home/phips/Documents/dataset/cc0/val_lr_x2
+
+# -------------------------------------------------------------------------------------------------
+# Network
+# -------------------------------------------------------------------------------------------------
+network_g:
+  type: paragonsr2_nano
+  # Match the architecture used in the clean pretrain:
+  upsampler_alpha: 0.5
+  hr_blocks: 1
+
+network_d:
+  type: munet
+
+# -------------------------------------------------------------------------------------------------
+# Paths
+# -------------------------------------------------------------------------------------------------
+path:
+  # Use the clean pretrain as initialization:
+  pretrain_network_g: experiments/2x_ParagonSR2_Nano_Pretrain_Clean/models/net_g_ema_50000.safetensors
+  # NOTE: Adjust the above path to your actual pretrain checkpoint location.
+  strict_load_g: true
+  resume_state: ~
+
+# -------------------------------------------------------------------------------------------------
+# Training
+# -------------------------------------------------------------------------------------------------
+train:
+  ema_decay: 0.995
+  ema_power: 0.75
+  grad_clip: true
+
+  optim_g:
+    type: AdamW
+    lr: !!float 5.0e-5
+    weight_decay: 0.0
+    betas: [0.9, 0.99]
+
+  optim_d:
+    type: AdamW
+    lr: !!float 5.0e-5
+    weight_decay: 0.0
+    betas: [0.9, 0.99]
+
+  scheduler:
+    type: MultiStepLR
+    milestones: [40000, 60000]
+    gamma: 0.5
+
+  total_iter: 80000
+  warmup_iter: 2000
+
+  # Lean V2 Loss Stack
+  losses:
+    # 1) Fidelity anchor (Charbonnier instead of L1)
+    - type: charbonnierloss
+      loss_weight: 1.0
+
+    # 2) DINOv2-based perceptual anchor
+    - type: dinoperceptualloss
+      loss_weight: 0.18
+      model_name: vit_small_patch14_dinov2.lvd142m
+      layers: ["block3", "block6", "block9"]
+      layer_weights: [1.0, 0.7, 0.5]
+      use_charbonnier: true
+
+    # 3) Artifact suppression via LDL
+    #    Relies on generator + EMA outputs as wired by existing trainer.
+    - type: ldlloss
+      loss_weight: 1.0
+
+    # 4) Structural / perceptual metric (DISTS)
+    - type: distsloss
+      loss_weight: 0.10
+      as_loss: true
+      load_weights: true
+      use_input_norm: true
+
+    # 5) Color / brightness consistency (CHC)
+    - type: ConsistencyLoss
+      loss_weight: 0.05
+      criterion: chc
+      blur: false
+      saturation: 1.0
+      brightness: 1.0
+      cosim: true
+      cosim_weight: 0.5
+
+    # 6) Frequency sharpening for crisp detail
+    - type: ffloss
+      loss_weight: 0.12
+
+    # 7) Gradient-variance loss to suppress aliasing/jaggies
+    - type: GradientVarianceLoss
+      loss_weight: 0.04
+      patch_size: 16
+      criterion: charbonnier
+
+    # 8) Very light R3GAN adversarial for subtle micro-contrast and “pop”
+    - type: ganloss
+      gan_type: r3gan
+      loss_weight: 0.02
+      r1_weight: 2.5
+      r2_weight: 2.5
+
+# -------------------------------------------------------------------------------------------------
+# Validation
+# -------------------------------------------------------------------------------------------------
+val:
+  val_enabled: true
+  val_freq: 5000
+  save_img: true
+
+  metrics_enabled: true
+  metrics:
+    psnr:
+      type: calculate_psnr
+      crop_border: 2
+      test_y_channel: false
+    ssim:
+      type: calculate_ssim
+      crop_border: 2
+      test_y_channel: false
+    lpips:
+      type: calculate_lpips
+      better: lower
+    dists:
+      type: calculate_dists
+      better: lower
+    topiq:
+      type: calculate_topiq
+
+# -------------------------------------------------------------------------------------------------
+# Logging
+# -------------------------------------------------------------------------------------------------
+logger:
+  print_freq: 100
+  save_checkpoint_freq: 5000
+  save_checkpoint_format: safetensors
+  use_tb_logger: true
