@@ -41,7 +41,7 @@ name: 2x_ParagonSR2_Nano_Perceptual_Clean_v2
 scale: 2
 
 use_amp: true
-amp_bf16: false
+amp_bf16: true
 use_channels_last: true
 fast_matmul: true
 num_gpu: auto
