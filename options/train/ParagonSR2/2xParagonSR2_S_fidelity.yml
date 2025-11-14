@@ -33,12 +33,12 @@ datasets:
     # meta_info: data/meta_info/dataset1.txt
 
 
-    lq_size: 64  # During training, a square of this size is cropped from LR images. Larger is usually better but uses more VRAM. Previously gt_size, use lq_size = gt_size / scale to convert. Use multiple of 8 for best performance with AMP.
+    lq_size: 128  # During training, a square of this size is cropped from LR images. Larger is usually better but uses more VRAM. Previously gt_size, use lq_size = gt_size / scale to convert. Use multiple of 8 for best performance with AMP.
     use_hflip: true  # Randomly flip the images horizontally.
     use_rot: true  # Randomly rotate the images.
 
     num_worker_per_gpu: 8
-    batch_size_per_gpu: 4  # Increasing stabilizes training but with diminishing returns. Use multiple of 8 for best performance with AMP.
+    batch_size_per_gpu: 8  # Increasing stabilizes training but with diminishing returns. Use multiple of 8 for best performance with AMP.
     accum_iter: 1  # paper: 8  # Using values larger than 1 simulates higher batch size by trading performance for reduced VRAM usage. If accum_iter = 4 and batch_size_per_gpu = 6 then effective batch size = 4 * 6 = 24 but performance may be as much as 4 times as slow.
   # Settings for your validation dataset (optional). These settings will
   # be ignored if val_enabled is false in the Validation section below.
@@ -60,7 +60,7 @@ datasets:
 network_g:
   type: paragonsr2_s
   upsampler_alpha: 0.5
-  hr_blocks: 1
+  hr_blocks: 2
 
 #########################################################################################
 # Pretrain and Resume Paths
@@ -89,10 +89,10 @@ train:
 
   scheduler:
     type: MultiStepLR
-    milestones: [300000, 500000, 650000, 700000, 750000]
+    milestones: [200000, 300000, 350000]
     gamma: 0.5
 
-  total_iter: 800000  # Total number of iterations.
+  total_iter: 400000  # Total number of iterations.
   warmup_iter: -1  # Gradually ramp up learning rates until this iteration, to stabilize early training. Use -1 to disable.
 
   # Losses - for any loss set the loss_weight to 0 to disable it.

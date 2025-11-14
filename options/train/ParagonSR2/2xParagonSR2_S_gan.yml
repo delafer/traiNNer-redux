@@ -37,11 +37,11 @@ datasets:
     type: pairedimagedataset
     dataroot_gt: /home/phips/Documents/dataset/cc0/hr
     dataroot_lq: /home/phips/Documents/dataset/cc0/lr_x2
-    lq_size: 64
+    lq_size: 128
     use_hflip: true
     use_rot: true
     num_worker_per_gpu: 8
-    batch_size_per_gpu: 8
+    batch_size_per_gpu: 4
     accum_iter: 1
 
   val:
@@ -57,7 +57,7 @@ network_d:
   type: munet
 
 path:
-  pretrain_network_g: experiments/2x_ParagonSR2_Nano_Pretrain_Clean/models/net_g_ema_50000.safetensors
+  pretrain_network_g: experiments/2xParagonSR2_S_fidelity/models/net_g_ema_200000.safetensors
   strict_load_g: true
   resume_state: ~
 
@@ -95,11 +95,11 @@ train:
   # REASONING: MultiStepLR is standard, predictable, and highly stable, especially when combined with EMA.
   scheduler:
     type: MultiStepLR
-    milestones: [40000, 60000]
+    milestones: [100000, 150000]
     gamma: 0.5
 
-  total_iter: 80000
-  warmup_iter: 2000
+  total_iter: 200000
+  warmup_iter: 5000
 
   # -------------------------------------------------------------------------------------------------
   # Loss Stack: Lean V2 Recipe (Fewer, Better-Motivated Losses)
@@ -176,11 +176,11 @@ train:
     # 8) Very light R3GAN Adversarial Loss
     # DIFFERENCE TO DEFAULT: Default often uses 'vanilla' GAN type at loss_weight 0.1.
     # REASONING: Uses R3GAN (Relativistic) for superior gradient feedback and stability. The low
-    #            weight (0.02) is intentional—it provides micro-contrast/pop (human preference)
+    #            weight (0.04) is intentional—it provides micro-contrast/pop (human preference)
     #            without strong hallucination pressure.
     - type: ganloss
       gan_type: r3gan
-      loss_weight: 0.02
+      loss_weight: 0.04
       r1_weight: 2.5
       r2_weight: 2.5
 
