@@ -1,261 +1,342 @@
-from __future__ import annotations
+from collections.abc import Sequence
+from typing import Any
 
-from collections.abc import Iterable
-from typing import Any, List
-
+import timm
 import torch
 import torch.nn.functional as F
 from torch import Tensor, nn
 
 from traiNNer.utils.registry import LOSS_REGISTRY
 
-try:
-    import timm
-except ImportError as exc:  # pragma: no cover
-    raise ImportError(
-        "timm is required for DINOPerceptualLoss. "
-        "Please install timm or remove dinoperceptualloss from your config."
-    ) from exc
-
-
-def _create_dino_backbone(model_name: str, pretrained: bool = True) -> nn.Module:
-    """Create a DINO/DINOv2 ViT backbone for perceptual features.
-
-    Uses timm to load a vision transformer with DINO-style pretraining.
-    The model is configured for feature extraction (no classifier / head).
-
-    Args:
-        model_name: timm model name, e.g. "vit_small_patch14_dinov2.lvd142m".
-        pretrained: if True, load pretrained weights.
-
-    Returns:
-        Frozen nn.Module in eval mode.
-    """
-    # Configure model for feature extraction:
-    # - num_classes=0, global_pool="" prevents creating an unwanted head in many timm models.
-    model = timm.create_model(
-        model_name,
-        pretrained=pretrained,
-        num_classes=0,
-        global_pool="",
-    )
-
-    # Freeze backbone
-    for p in model.parameters():
-        p.requires_grad = False
-    model.eval()
-
-    return model
-
 
 @LOSS_REGISTRY.register()
 class DINOPerceptualLoss(nn.Module):
-    """DINOv2-based perceptual loss for SISR.
+    """
+    A feature-based perceptual loss using self-supervised DINO / DINOv2 / DINOv3 ViT encoders from timm.
 
-    Design goals:
-    - Modern alternative to VGG/ConvNeXt perceptual losses.
-    - Emphasize low/mid-level structure and textures.
-    - Fully frozen backbone; no gradients through DINO.
-    - AMP-safe; loss used only at train-time.
+    Key features:
+    - Robust against different timm forward output types: dict, list, tuple, tensor
+    - Supports features_only models and fallback models
+    - Works with token sequences or 4D spatial feature maps
+    - Supports layer selection by name or by index or ["last"]
+    - Charbonnier distance with optional weights per layer
+    - Optional flexible resizing to maintain patch-grid shapes
+    - Optional debug logging
 
-    YAML example:
-
-      - type: dinoperceptualloss
-        loss_weight: 0.18
-        model_name: vit_small_patch14_dinov2.lvd142m
-        layers: ["block3", "block6", "block9"]
-        layer_weights: [1.0, 0.7, 0.5]
-        use_charbonnier: true
-
-    Notes:
-    - Expects inputs in [0, 1].
-    - Internally normalized to ImageNet mean/std; adjust if using custom DINO stats.
-    - We match configured layer names as substrings of available feature keys to stay
-      robust across timm versions; if not found, we fall back to the last feature map.
+    Example config:
+        perceptual_loss:
+            type: DINOPerceptualLoss
+            loss_weight: 0.18
+            model_name: vit_small_patch16_dinov3
+            layers: ['feat2','last']
+            weights: [1.0, 0.5]
+            resize: true
     """
 
     def __init__(
         self,
         loss_weight: float = 1.0,
-        model_name: str = "vit_small_patch14_dinov2.lvd142m",
-        layers: list[str] | None = None,
-        layer_weights: list[float] | None = None,
-        use_charbonnier: bool = True,
-        eps: float = 1e-6,
+        model_name: str = "vit_small_patch16_dinov3",
+        layers: Sequence[str | int] = ("last",),
+        weights: Sequence[float] | None = None,
+        resize: bool = True,
+        debug: bool = False,
     ) -> None:
         super().__init__()
-
         self.loss_weight = float(loss_weight)
-        self.eps = float(eps)
-        self.use_charbonnier = bool(use_charbonnier)
-
-        # Logical layer identifiers we will match against extracted feature keys.
-        if layers is None:
-            layers = ["block3", "block6", "block9"]
+        self.model_name = model_name
         self.layers = list(layers)
+        self.weights = [1.0] * len(layers) if weights is None else list(weights)
+        self.flexible_resize = resize
+        self.debug = debug
 
-        if layer_weights is None:
-            # Decreasing weights for deeper features by default.
-            if len(self.layers) == 1:
-                layer_weights = [1.0]
-            else:
-                layer_weights = [1.0] + [0.7] * (len(self.layers) - 1)
-        if len(layer_weights) != len(self.layers):
-            raise ValueError(
-                f"DINOPerceptualLoss: layer_weights (len={len(layer_weights)}) "
-                f"must match layers (len={len(self.layers)})."
-            )
-
-        self.register_buffer(
-            "layer_weights",
-            torch.tensor(layer_weights, dtype=torch.float32),
-            persistent=False,
-        )
-
-        # Backbone: DINO/DINOv2 ViT from timm.
-        self.backbone = _create_dino_backbone(model_name=model_name, pretrained=True)
-
-        # Normalization buffers (ImageNet-style)
-        # If you want DINOv2-specific stats, update here accordingly.
+        # Register normalization buffers
         mean = torch.tensor([0.485, 0.456, 0.406], dtype=torch.float32).view(1, 3, 1, 1)
         std = torch.tensor([0.229, 0.224, 0.225], dtype=torch.float32).view(1, 3, 1, 1)
         self.register_buffer("mean", mean, persistent=False)
         self.register_buffer("std", std, persistent=False)
+        self.eps = 1e-6
 
+        self.backbone = self._create_backbone(model_name)
+
+        # Dynamic patch size detection
+        self.patch_size = self._detect_patch_size()
+
+        # Validate weights configuration
+        self._validate_config()
+
+        self.charbonnier = lambda x: torch.sqrt(x + self.eps**2)
+
+    # -----------------------------
+    # Backbone loading
+    # -----------------------------
+    def _create_backbone(self, name: str) -> nn.Module:
+        model = None
+        try:
+            model = timm.create_model(name, pretrained=True, features_only=True)
+        except Exception:
+            model = timm.create_model(
+                name, pretrained=True, num_classes=0, global_pool=""
+            )
+
+        for p in model.parameters():
+            p.requires_grad = False
+        model.eval()
+        return model
+
+    # -----------------------------
+    # Robust feature extraction
+    # -----------------------------
     @torch.no_grad()
     def _extract_feats(self, x: Tensor) -> dict[str, Tensor]:
-        """Extract DINO features as spatial maps.
-
-        Strategy:
-        - Normalize input.
-        - Call backbone.forward_features(x_norm).
-        - Interpret outputs:
-          * If dict: use all tensor entries; convert [B, N, C] tokens to maps.
-          * If tensor [B, N, C]: convert patch tokens to map.
-          * If tensor [B, C, H, W]: treat directly as a feature map.
-        - Store as {str_key: [B, C, H, W]}.
-
-        Returns:
-            dict mapping feature names to 4D feature maps.
-
-        Raises:
-            RuntimeError if we cannot derive any usable feature maps.
-        """
         if x.ndim != 4:
-            raise ValueError("DINOPerceptualLoss expects inputs of shape [B, C, H, W].")
+            raise ValueError("Expected [B,C,H,W]")
 
-        # Clamp and normalize
-        x = x.clamp(0.0, 1.0)
+        orig_size = x.shape[2:]
+        x = x.clamp(0, 1)
 
+        if self.flexible_resize:
+            target_size = self._find_optimal_size(*orig_size)
+            if target_size != orig_size:
+                x = F.interpolate(
+                    x,
+                    size=target_size,
+                    mode="bilinear",
+                    align_corners=False,
+                    antialias=True,
+                )
+
+        # Use registered buffers with proper dtype and device handling
         mean: Tensor = torch.as_tensor(self.mean, dtype=x.dtype, device=x.device)
         std: Tensor = torch.as_tensor(self.std, dtype=x.dtype, device=x.device)
+        x = (x - mean) / (std + self.eps)
 
-        x_norm = (x - mean) / (std + self.eps)
-
-        # forward_features is the canonical timm API for ViT-like models.
-        # Some models may return dict, some tensor.
-        feats_raw: Any = self.backbone.forward_features(x_norm)  # type: ignore[operator]
+        if hasattr(self.backbone, "forward_features"):
+            try:
+                feats_raw = self.backbone.forward_features(x)  # type: ignore[operator]
+            except Exception:
+                feats_raw = self.backbone(x)
+        else:
+            feats_raw = self.backbone(x)
 
         feats: dict[str, Tensor] = {}
 
-        # Helper to convert token sequences to spatial maps
-        def tokens_to_map(tokens: Tensor, key_prefix: str) -> None:
-            # tokens: [B, N, C] possibly with CLS token at index 0
-            if tokens.ndim != 3 or tokens.shape[1] <= 4:
+        def tokens_to_map(t: Tensor, name: str) -> None:
+            """Convert token sequences to spatial feature maps with better error handling."""
+            if t.ndim != 3 or t.shape[1] <= 1:
+                if self.debug:
+                    print(
+                        f"[DINO DEBUG] Skipping {name}: not enough tokens ({t.shape[1]}) or wrong dim ({t.ndim})"
+                    )
                 return
-            # Assume first token is CLS; drop it
-            patch_tokens = tokens[:, 1:, :]
-            b, n, c = patch_tokens.shape
-            h = int(n**0.5)
-            w = h
-            if h * w != n:
-                return
-            fmap = patch_tokens.transpose(1, 2).reshape(b, c, h, w)
-            feats[f"{key_prefix}"] = fmap
 
-        if isinstance(feats_raw, dict):
-            # Use all tensor entries
+            # Remove CLS token (first token) and check for square patch grid
+            patch_tokens = t[:, 1:, :]
+            B, N, C = patch_tokens.shape
+
+            if N <= 0:
+                if self.debug:
+                    print(f"[DINO DEBUG] Skipping {name}: no patch tokens")
+                return
+
+            # Check if token count forms a perfect square (valid patch grid)
+            h = int(N**0.5)
+            if h * h != N:
+                if self.debug:
+                    print(
+                        f"[DINO DEBUG] Skipping {name}: {N} tokens don't form perfect square grid ({h}x{h})"
+                    )
+                return
+
+            try:
+                fmap = patch_tokens.transpose(1, 2).reshape(B, C, h, h)
+                feats[name] = fmap
+                if self.debug:
+                    print(
+                        f"[DINO DEBUG] Successfully converted {name}: {B}x{C}x{h}x{h}"
+                    )
+            except Exception as e:
+                if self.debug:
+                    print(f"[DINO DEBUG] Failed to convert {name} to spatial map: {e}")
+
+        if isinstance(feats_raw, (list, tuple)):
+            for idx, t in enumerate(feats_raw):
+                if not isinstance(t, Tensor):
+                    continue
+                if t.ndim == 4:
+                    feats[f"feat{idx}"] = t
+                elif t.ndim == 3:
+                    tokens_to_map(t, f"feat{idx}")
+
+        elif isinstance(feats_raw, dict):
             for k, v in feats_raw.items():
                 if not isinstance(v, Tensor):
                     continue
-                # Token sequence
-                if v.ndim == 3:
-                    tokens_to_map(v, k)
-                # Already spatial
-                elif v.ndim == 4:
+                if v.ndim == 4:
                     feats[k] = v
+                elif v.ndim == 3:
+                    tokens_to_map(v, k)
+
         elif isinstance(feats_raw, Tensor):
-            v = feats_raw
-            if v.ndim == 3:
-                tokens_to_map(v, "block_last")
-            elif v.ndim == 4:
-                feats["block_last"] = v
+            if feats_raw.ndim == 4:
+                feats["feat0"] = feats_raw
+            elif feats_raw.ndim == 3:
+                tokens_to_map(feats_raw, "feat0")
 
         if not feats:
             raise RuntimeError(
-                "DINOPerceptualLoss: unable to extract features from DINO backbone. "
-                "Check model_name compatibility or update extractor logic."
+                f"DINOPerceptualLoss: no usable features in model '{self.model_name}'."
             )
+
+        if self.debug:
+            print(f"[DINO DEBUG] Features extracted: {list(feats.keys())}")
+            for name, tensor in feats.items():
+                print(f"[DINO DEBUG]   {name}: {tensor.shape}")
 
         return feats
 
-    def _feature_loss(self, fx: Tensor, fy: Tensor) -> Tensor:
-        """Compute per-location feature discrepancy."""
-        if fx.shape != fy.shape:
-            fy = F.interpolate(
-                fy,
-                size=fx.shape[2:],
-                mode="bilinear",
-                align_corners=False,
-            )
-        if self.use_charbonnier:
-            diff = fx - fy
-            return torch.sqrt(diff * diff + self.eps)
-        return torch.abs(fx - fy)
+    def get_available_layers(self) -> list[str]:
+        """Get list of available feature layer names for this model.
 
-    @torch.amp.custom_fwd(cast_inputs=torch.float32, device_type="cuda")  # pyright: ignore[reportPrivateImportUsage]
-    def forward(self, x: Tensor, gt: Tensor) -> dict[str, Tensor]:
-        """Compute DINO-based perceptual loss.
-
-        Returns:
-            dict with key "dino_perceptual" for integration with generic loss handler.
+        This is useful for debugging and configuration.
         """
-        # Extract GT feats without grad
+        # Create a dummy input to get feature shapes
+        dummy_input = torch.randn(1, 3, 224, 224)  # Standard ViT input size
         with torch.no_grad():
-            feats_gt_all = self._extract_feats(gt)
+            try:
+                feats = self._extract_feats(dummy_input)
+                return list(feats.keys())
+            except Exception as e:
+                if self.debug:
+                    print(f"[DINO DEBUG] Failed to get available layers: {e}")
+                return []
 
-        feats_x_all = self._extract_feats(x)
+    def forward(self, x: Tensor, gt: Tensor) -> dict[str, Tensor]:
+        """Compute DINO perceptual loss.
 
-        loss = x.new_tensor(0.0)
+        Returns dict with key 'dino_perceptual' to integrate with existing loss handling.
+        """
+        if x.ndim != 4 or gt.ndim != 4:
+            raise ValueError("DINOPerceptualLoss expects inputs of shape [B, C, H, W].")
 
-        # For each configured layer key, match by substring; fall back to last map.
-        # self.layer_weights is a 1D buffer tensor; convert to a Python list for clean typing.
-        weights: list[float] = [float(v) for v in self.layer_weights]  # type: ignore[union-attr]
+        x_feats = self._extract_feats(x)
+        y_feats = self._extract_feats(gt)
 
-        for w, layer_key in zip(weights, self.layers, strict=False):
-            # gather candidate matches
-            matched_x: list[Tensor] = [
-                v for k, v in feats_x_all.items() if layer_key in k
-            ]
-            matched_gt: list[Tensor] = [
-                v for k, v in feats_gt_all.items() if layer_key in k
-            ]
+        # Initialize as tensor to ensure consistent typing
+        total = x.new_tensor(0.0)
+        for layer, w in zip(self.layers, self.weights, strict=False):
+            fmap_x = self._get_layer(x_feats, layer)
+            fmap_y = self._get_layer(y_feats, layer)
+            diff = self.charbonnier((fmap_x - fmap_y) ** 2).mean()
+            total += w * diff
 
-            if matched_x and matched_gt:
-                fx = matched_x[0]
-                fy = matched_gt[0]
-            else:
-                # Fallback: last inserted feature map to keep behavior defined
-                fx = next(reversed(feats_x_all.values()))
-                fy = next(reversed(feats_gt_all.values()))
-
-            fl = self._feature_loss(fx, fy).mean()
-            loss = loss + w * fl
-
-        weight_sum = float(self.layer_weights.sum().item())
+        # Normalize by sum of weights to keep scale predictable
+        weight_sum = sum(self.weights)
         if weight_sum > 0:
-            loss = loss / weight_sum
+            total = total / weight_sum
 
-        loss = loss * self.loss_weight
+        total = total * self.loss_weight
 
-        return {"dino_perceptual": loss}
+        return {"dino_perceptual": total}
+
+    def _get_layer(self, feats: dict[str, Tensor], layer: str | int) -> Tensor:
+        """More precise layer selection with better error handling."""
+        keys = list(feats.keys())
+
+        if layer == "last":
+            return feats[keys[-1]]
+
+        if isinstance(layer, int):
+            layer = f"feat{layer}"
+            if layer in feats:
+                return feats[layer]
+            else:
+                raise KeyError(
+                    f"Layer index {layer} not found in available layers: {keys}"
+                )
+
+        # Exact match first
+        if layer in feats:
+            return feats[layer]
+
+        # More precise partial matching - require exact feature name match
+        import re
+
+        # Match patterns like "feat1", "layer1", etc. but not "feat11" for "feat1"
+        pattern = r"\b" + re.escape(layer) + r"\b"
+        matches = [k for k in keys if re.search(pattern, k)]
+
+        if len(matches) == 1:
+            if self.debug:
+                print(f"[DINO DEBUG] Fuzzy matched layer '{layer}' to '{matches[0]}'")
+            return feats[matches[0]]
+        elif len(matches) > 1:
+            raise ValueError(
+                f"Layer '{layer}' matches multiple keys: {matches}. Be more specific."
+            )
+        else:
+            # Fallback to last layer with warning
+            import warnings
+
+            warnings.warn(
+                f"Layer '{layer}' not found in available layers: {keys}. Using last layer instead.",
+                UserWarning,
+                stacklevel=2,
+            )
+            return feats[keys[-1]]
+
+    def _detect_patch_size(self) -> int:
+        """Automatically detect patch size from the backbone model."""
+        # Common patch sizes for different model families
+        if hasattr(self.backbone, "patch_size"):
+            return self.backbone.patch_size
+        elif hasattr(self.backbone, "patch_embed"):
+            if hasattr(self.backbone.patch_embed, "patch_size"):
+                return (
+                    self.backbone.patch_embed.patch_size[0]
+                    if isinstance(self.backbone.patch_embed.patch_size, tuple)
+                    else self.backbone.patch_embed.patch_size
+                )
+
+        # Fallback based on model name patterns (more robust than hardcoding)
+        model_name_lower = self.model_name.lower()
+        if "patch8" in model_name_lower or "vit_tiny" in model_name_lower:
+            return 8
+        elif (
+            "patch16" in model_name_lower
+            or "vit_small" in model_name_lower
+            or "dinov2" in model_name_lower
+        ):
+            return 16
+        elif "patch32" in model_name_lower or "vit_base" in model_name_lower:
+            return 32
+        else:
+            # Conservative fallback - likely to work with most models
+            if self.debug:
+                print(
+                    "[DINO DEBUG] Patch size detection failed, using conservative fallback: 16"
+                )
+            return 16
+
+    def _validate_config(self) -> None:
+        """Validate configuration and warn about potential issues."""
+        if len(self.weights) != len(self.layers):
+            import warnings
+
+            warnings.warn(
+                f"DINOPerceptualLoss: layers ({len(self.layers)}) and weights ({len(self.weights)}) length mismatch. "
+                f"Using weight=1.0 for missing entries.",
+                UserWarning,
+                stacklevel=2,
+            )
+            # Extend weights to match layers with default weight of 1.0
+            self.weights.extend([1.0] * (len(self.layers) - len(self.weights)))
+
+    # -----------------------------
+    # Patch size helper
+    # -----------------------------
+    def _find_optimal_size(self, h: int, w: int) -> tuple[int, int]:
+        patch = self.patch_size
+        h_new = (h // patch) * patch
+        w_new = (w // patch) * patch
+        return h_new if h_new > 0 else patch, w_new if w_new > 0 else patch

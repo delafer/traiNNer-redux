@@ -57,7 +57,7 @@ network_d:
   type: munet
 
 path:
-  pretrain_network_g: experiments/2xParagonSR2_S_fidelity/models/net_g_ema_200000.safetensors
+  pretrain_network_g: experiments/2xParagonSR2_S_fidelity/models/net_g_ema_400000.safetensors
   strict_load_g: true
   resume_state: ~
 
@@ -119,12 +119,22 @@ train:
     #            the "plastic" or "oil-paint" look common in VGG-trained models.
     # ALTERNATIVES: VGG, LPIPS, ConvNeXt, CLIP Contrastive. DINOv2 was chosen as the most modern,
     #               texture-focused replacement.
-    - type: dinoperceptualloss
+    - type: DINOPerceptualLoss
       loss_weight: 0.18
-      model_name: vit_small_patch14_dinov2.lvd142m
-      layers: ["block3", "block6", "block9"]
-      layer_weights: [1.0, 0.7, 0.5]
-      use_charbonnier: true
+      model_name: vit_small_patch16_dinov3
+      layers: ['feat2', 'last']
+      weights: [1.0, 0.5]
+      resize: true
+
+
+    # 2) ConvNeXt-Tiny Perceptual Anchor (Replaces DINO)
+    # DIFFERENCE TO DEFAULT: Replaces the non-flexible DINO loss. ConvNeXt is a modern CNN
+    # backbone that handles variable input sizes gracefully, providing superior texture features.
+    #- type: convnextperceptualloss
+    #  loss_weight: 0.18
+    #  layers: ['stages.1', 'stages.2', 'stages.3']
+    #  layer_weights: [1.0, 0.7, 0.5]
+    #  use_input_norm: true
 
     # 3) Artifact Suppression via Local Discriminative Loss (LDL)
     # DIFFERENCE TO DEFAULT: Default often leaves this disabled (loss_weight: 0).
