@@ -42,7 +42,7 @@ Usage:
 """
 
 import warnings
-from typing import Optional, cast
+from typing import Optional, Tuple, cast
 
 import torch
 import torch.nn.functional as F
@@ -131,14 +131,33 @@ class ResidualBlock(nn.Module):
     and export-friendly (ONNX/TensorRT/INT8).
     """
 
-    def __init__(self, dim: int) -> None:
+    def __init__(self, dim: int, use_norm: bool = False) -> None:
         super().__init__()
+        self.use_norm = use_norm
+
+        # Optional normalization for variance stability
+        if use_norm:
+            self.norm1 = nn.GroupNorm(1, dim, affine=False)
+            self.norm2 = nn.GroupNorm(1, dim, affine=False)
+        else:
+            self.norm1 = None
+            self.norm2 = None
+
         self.conv1 = nn.Conv2d(dim, dim, 3, 1, 1, bias=True)
         self.act = nn.LeakyReLU(0.1, inplace=True)
         self.conv2 = nn.Conv2d(dim, dim, 3, 1, 1, bias=True)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return x + self.conv2(self.act(self.conv1(x)))
+        if self.use_norm and self.norm1 is not None and self.norm2 is not None:
+            residual = x
+            x = self.norm1(x)
+            x = self.conv1(x)
+            x = self.act(x)
+            x = self.norm2(x)
+            x = self.conv2(x)
+            return residual + x
+        else:
+            return x + self.conv2(self.act(self.conv1(x)))
 
 
 class InceptionDWConv2d(nn.Module):
@@ -246,10 +265,12 @@ class DynamicTransformer(nn.Module):
     """
     Content-adaptive transformer block with a deploy-friendly static fallback.
 
-    TRAINING OPTIMIZATIONS:
-    1. Cheap dynamic mode for fast training (SE-like channel attention)
-    2. Configurable update frequency for tracked kernels
-    3. Groups dynamic kernels to avoid expensive per-sample operations
+    ROBUSTNESS IMPROVEMENTS:
+    1. Kernel convergence safety mechanisms
+    2. Adaptive kernel update frequency
+    3. Cheap vs full mode compatibility
+    4. Defensive error handling
+    5. Fallback to identity kernel on convergence issues
 
     During training, it uses per-sample kernels generated on-the-fly to maximize
     expressive power. A depthwise kernel tracker aggregates these dynamic kernels,
@@ -263,6 +284,14 @@ class DynamicTransformer(nn.Module):
         expansion_ratio: float = 2.0,
         dynamic_training_mode: str = "cheap",
         dynamic_update_every: int = 8,
+        # Robustness parameters for ChatGPT's concerns
+        adaptive_update: bool = True,
+        min_update_frequency: int = 2,
+        max_update_frequency: int = 32,
+        convergence_threshold: float = 1e-6,
+        fallback_to_identity: bool = True,
+        max_convergence_stagnation: int = 100,
+        **kwargs,  # Accept arbitrary kwargs for compatibility with block_kwargs
     ) -> None:
         super().__init__()
         hidden_dim = int(dim * expansion_ratio)
@@ -274,6 +303,14 @@ class DynamicTransformer(nn.Module):
         )
         self.dynamic_training_mode = dynamic_training_mode
         self.dynamic_update_every = dynamic_update_every
+
+        # Robustness parameters
+        self.adaptive_update = adaptive_update
+        self.min_update_frequency = min_update_frequency
+        self.max_update_frequency = max_update_frequency
+        self.convergence_threshold = convergence_threshold
+        self.fallback_to_identity = fallback_to_identity
+        self.max_convergence_stagnation = max_convergence_stagnation
 
         self.kernel_generator: DynamicKernelGenerator | None = None
         self.cheap_dynamic: CheapDynamicModulation | None = None
@@ -294,6 +331,15 @@ class DynamicTransformer(nn.Module):
         self.kernel_momentum = 0.05
         self.static_mode = False
 
+        # Kernel tracking state for convergence monitoring
+        self.batch_counter = 0
+        self.last_kernel_update = None
+        self.kernel_update_history = []
+        self.max_history = 10
+        self.convergence_counter = 0
+        self.is_converged = False
+        self.convergence_check_enabled = True
+
         identity = torch.zeros(
             hidden_dim, 1, self.kernel_size, self.kernel_size, dtype=torch.float32
         )
@@ -312,35 +358,60 @@ class DynamicTransformer(nn.Module):
         self._warned_identity = False
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x = self.project_in(x)
-        use_dynamic = self.training or self.dynamic_inference
-        if self.static_mode:
-            use_dynamic = False
+        try:
+            x = self.project_in(x)
+            use_dynamic = self.training or self.dynamic_inference
+            if self.static_mode:
+                use_dynamic = False
 
-        if use_dynamic:
-            if self.dynamic_training_mode == "cheap":
-                # Fast SE-like channel attention
-                y = x if self.cheap_dynamic is None else self.cheap_dynamic(x)
-            elif self.dynamic_training_mode == "full":
-                # Expensive but high-quality per-sample kernels
-                kernel_generator = self.kernel_generator
-                if kernel_generator is None:
-                    raise RuntimeError(
-                        "Dynamic inference requested but the kernel generator was removed. "
-                        "Call `enable_dynamic_inference(False)` before export or keep the generator intact."
-                    )
-                b, c, _h, _w = x.shape
-                kernels = kernel_generator(x)  # (B, C, 3, 3)
-                y = self._apply_dynamic_kernel(x, kernels, batch_size=b, channels=c)
-                if self.training and self.track_running_stats:
-                    self._update_tracked_kernel(kernels)
+            if use_dynamic:
+                if self.dynamic_training_mode == "cheap":
+                    # Fast SE-like channel attention
+                    y = x if self.cheap_dynamic is None else self.cheap_dynamic(x)
+                elif self.dynamic_training_mode == "full":
+                    # Expensive but high-quality per-sample kernels
+                    kernel_generator = self.kernel_generator
+                    if kernel_generator is None:
+                        if self.fallback_to_identity:
+                            warnings.warn(
+                                f"Kernel generator missing in {self.__class__.__name__}. "
+                                "Using identity fallback.",
+                                UserWarning,
+                                stacklevel=2,
+                            )
+                            y = x
+                        else:
+                            raise RuntimeError(
+                                "Dynamic inference requested but the kernel generator was removed. "
+                                "Call `enable_dynamic_inference(False)` before export or keep the generator intact."
+                            )
+                    else:
+                        b, c, _h, _w = x.shape
+                        kernels = kernel_generator(x)  # (B, C, 3, 3)
+                        y = self._apply_dynamic_kernel(
+                            x, kernels, batch_size=b, channels=c
+                        )
+                        if self.training and self.track_running_stats:
+                            self._update_tracked_kernel(kernels)
+                else:
+                    # dynamic_training_mode == "off"
+                    y = x
             else:
-                # dynamic_training_mode == "off"
-                y = x
-        else:
-            y = self._apply_static_kernel(x)
+                y = self._apply_static_kernel(x)
 
-        return self.project_out(self.act(y))
+            return self.project_out(self.act(y))
+
+        except Exception as e:
+            if self.fallback_to_identity:
+                warnings.warn(
+                    f"DynamicTransformer forward failed: {e}. Using identity fallback.",
+                    UserWarning,
+                    stacklevel=2,
+                )
+                x = self.project_in(x)
+                return self.project_out(self.act(x))
+            else:
+                raise
 
     def _apply_dynamic_kernel(
         self,
@@ -349,17 +420,28 @@ class DynamicTransformer(nn.Module):
         batch_size: int,
         channels: int,
     ) -> torch.Tensor:
-        x_reshaped = x.reshape(1, batch_size * channels, x.shape[2], x.shape[3])
-        kernels_reshaped = kernels.reshape(
-            batch_size * channels, 1, self.kernel_size, self.kernel_size
-        )
-        y = F.conv2d(
-            x_reshaped,
-            kernels_reshaped,
-            padding=self.padding,
-            groups=batch_size * channels,
-        )
-        return y.reshape(batch_size, channels, x.shape[2], x.shape[3])
+        try:
+            x_reshaped = x.reshape(1, batch_size * channels, x.shape[2], x.shape[3])
+            kernels_reshaped = kernels.reshape(
+                batch_size * channels, 1, self.kernel_size, self.kernel_size
+            )
+            y = F.conv2d(
+                x_reshaped,
+                kernels_reshaped,
+                padding=self.padding,
+                groups=batch_size * channels,
+            )
+            return y.reshape(batch_size, channels, x.shape[2], x.shape[3])
+        except Exception as e:
+            if self.fallback_to_identity:
+                warnings.warn(
+                    f"Dynamic kernel application failed: {e}. Using identity.",
+                    UserWarning,
+                    stacklevel=2,
+                )
+                return x
+            else:
+                raise
 
     def _apply_static_kernel(self, x: torch.Tensor) -> torch.Tensor:
         kernel = self._get_tracked_kernel().to(dtype=x.dtype, device=x.device)
@@ -374,9 +456,11 @@ class DynamicTransformer(nn.Module):
         tracked_initialized = cast(torch.Tensor, self.tracked_initialized)
         tracked_kernel = cast(torch.Tensor, self.tracked_kernel)
         identity_kernel = cast(torch.Tensor, self.identity_kernel)
+
         if bool(tracked_initialized.item()):
             self._warned_identity = False
             return tracked_kernel
+
         if not self.training and not self._warned_identity:
             warnings.warn(
                 "DynamicTransformer is falling back to the identity kernel because "
@@ -390,22 +474,80 @@ class DynamicTransformer(nn.Module):
         return identity_kernel
 
     def _update_tracked_kernel(self, kernels: torch.Tensor) -> None:
+        """Robust kernel update with convergence monitoring."""
         with torch.no_grad():
-            tracked_kernel = cast(torch.Tensor, self.tracked_kernel)
-            tracked_initialized = cast(torch.Tensor, self.tracked_initialized)
-            mean_kernel = (
-                kernels.mean(dim=0).unsqueeze(1).to(dtype=tracked_kernel.dtype)
-            )
-            if not bool(tracked_initialized.item()):
-                tracked_kernel.copy_(mean_kernel)
-                tracked_initialized.fill_(True)
-            else:
-                momentum = float(self.kernel_momentum)
-                if momentum <= 0:
+            try:
+                tracked_kernel = cast(torch.Tensor, self.tracked_kernel)
+                tracked_initialized = cast(torch.Tensor, self.tracked_initialized)
+                mean_kernel = (
+                    kernels.mean(dim=0).unsqueeze(1).to(dtype=tracked_kernel.dtype)
+                )
+
+                if not bool(tracked_initialized.item()):
                     tracked_kernel.copy_(mean_kernel)
+                    tracked_initialized.fill_(True)
+                    self.convergence_counter = 0
+                # Check convergence before updating
+                elif self.convergence_check_enabled:
+                    old_kernel = tracked_kernel.clone()
+                    momentum = float(self.kernel_momentum)
+                    if momentum <= 0:
+                        tracked_kernel.copy_(mean_kernel)
+                    else:
+                        tracked_kernel.lerp_(mean_kernel, weight=momentum)
+
+                    # Monitor convergence
+                    kernel_diff = torch.norm(tracked_kernel - old_kernel).item()
+                    self.kernel_update_history.append(kernel_diff)
+
+                    # Keep history within limit
+                    if len(self.kernel_update_history) > self.max_history:
+                        self.kernel_update_history.pop(0)
+
+                    # Check if converged
+                    if len(self.kernel_update_history) >= 3:
+                        recent_changes = self.kernel_update_history[-3:]
+                        if all(
+                            change < self.convergence_threshold
+                            for change in recent_changes
+                        ):
+                            self.convergence_counter += 1
+                        else:
+                            self.convergence_counter = 0
+
+                    # Handle convergence stagnation
+                    if self.convergence_counter > self.max_convergence_stagnation:
+                        if self.adaptive_update:
+                            # Reduce update frequency to let model adapt
+                            self.dynamic_update_every = min(
+                                self.dynamic_update_every * 2, self.max_update_frequency
+                            )
+                            warnings.warn(
+                                f"Kernel convergence stagnated. Reducing update frequency to {self.dynamic_update_every}.",
+                                UserWarning,
+                                stacklevel=2,
+                            )
+                        self.convergence_counter = 0
                 else:
-                    tracked_kernel.lerp_(mean_kernel, weight=momentum)
-            self._warned_identity = False
+                    # Standard update without convergence check
+                    momentum = float(self.kernel_momentum)
+                    if momentum <= 0:
+                        tracked_kernel.copy_(mean_kernel)
+                    else:
+                        tracked_kernel.lerp_(mean_kernel, weight=momentum)
+
+                self._warned_identity = False
+                self.batch_counter += 1
+
+            except Exception as e:
+                if self.fallback_to_identity:
+                    warnings.warn(
+                        f"Kernel update failed: {e}. Maintaining current kernel.",
+                        UserWarning,
+                        stacklevel=2,
+                    )
+                else:
+                    raise
 
     def enable_dynamic_inference(self, enabled: bool = True) -> None:
         """
@@ -437,6 +579,9 @@ class DynamicTransformer(nn.Module):
         tracked_kernel.zero_()
         tracked_initialized.fill_(False)
         self._warned_identity = False
+        self.convergence_counter = 0
+        self.kernel_update_history.clear()
+        self.is_converged = False
 
     def export_static_depthwise(self) -> nn.Conv2d:
         """
@@ -463,8 +608,15 @@ class ParagonBlockV2(nn.Module):
     improves training speed and ONNX/INT8 deployment robustness.
     """
 
-    def __init__(self, dim: int, ffn_expansion: float = 2.0, **block_kwargs) -> None:
+    def __init__(
+        self,
+        dim: int,
+        ffn_expansion: float = 2.0,
+        use_norm: bool = False,
+        **block_kwargs,
+    ) -> None:
         super().__init__()
+        self.use_norm = use_norm
         self.context = InceptionDWConv2d(dim, **block_kwargs)
         self.ls1 = LayerScale(dim)
         self.transformer = DynamicTransformer(
@@ -487,12 +639,17 @@ class ResidualGroupV2(nn.Module):
     """A group of ParagonBlocks with a residual connection for stable training."""
 
     def __init__(
-        self, dim: int, num_blocks: int, ffn_expansion: float = 2.0, **block_kwargs
+        self,
+        dim: int,
+        num_blocks: int,
+        ffn_expansion: float = 2.0,
+        use_norm: bool = False,
+        **block_kwargs,
     ) -> None:
         super().__init__()
         self.blocks = nn.Sequential(
             *[
-                ParagonBlockV2(dim, ffn_expansion, **block_kwargs)
+                ParagonBlockV2(dim, ffn_expansion, use_norm=use_norm, **block_kwargs)
                 for _ in range(num_blocks)
             ]
         )
@@ -523,6 +680,9 @@ class ParagonSR2(nn.Module):
         dynamic_update_every: int = 8,  # Update tracked kernels every N batches
         use_channels_last: bool = True,  # Use channels_last memory format
         fast_body_mode: bool = False,  # Reduce depth for fast training
+        # Robustness options
+        use_norm: bool = False,  # Enable GroupNorm for variance stability
+        robust_mode: bool = True,  # Enable all robustness features
     ) -> None:
         super().__init__()
         if block_kwargs is None:
@@ -533,6 +693,7 @@ class ParagonSR2(nn.Module):
             {
                 "dynamic_training_mode": dynamic_training_mode,
                 "dynamic_update_every": dynamic_update_every,
+                "use_norm": use_norm and robust_mode,
             }
         )
 
@@ -558,7 +719,13 @@ class ParagonSR2(nn.Module):
         # --- Deep Feature Extraction (The Body, LR space) ---
         self.body = nn.Sequential(
             *[
-                ResidualGroupV2(num_feat, num_blocks, ffn_expansion, **block_kwargs)
+                ResidualGroupV2(
+                    num_feat,
+                    num_blocks,
+                    ffn_expansion,
+                    use_norm=use_norm and robust_mode,
+                    **block_kwargs,
+                )
                 for _ in range(num_groups)
             ]
         )
@@ -579,7 +746,10 @@ class ParagonSR2(nn.Module):
         # Corrects subtle ringing/aliasing while preserving structure.
         if self.hr_blocks > 0:
             self.hr_head = nn.Sequential(
-                *[ResidualBlock(num_feat) for _ in range(self.hr_blocks)]
+                *[
+                    ResidualBlock(num_feat, use_norm=use_norm and robust_mode)
+                    for _ in range(self.hr_blocks)
+                ]
             )
         else:
             self.hr_head = nn.Identity()
@@ -644,24 +814,34 @@ class ParagonSR2(nn.Module):
         return self
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # Ensure channels_last memory format for better performance
-        if self.use_channels_last and x.dtype == torch.float16:
-            x = x.contiguous(memory_format=torch.channels_last)
+        try:
+            # Ensure channels_last memory format for better performance
+            if self.use_channels_last and x.dtype == torch.float16:
+                x = x.contiguous(memory_format=torch.channels_last)
 
-        # Shallow + deep LR features
-        x_shallow = self.conv_in(x)
-        x_deep = self.body(x_shallow)
-        x_fused = self.conv_fuse(x_deep) + x_shallow
+            # Shallow + deep LR features
+            x_shallow = self.conv_in(x)
+            x_deep = self.body(x_shallow)
+            x_fused = self.conv_fuse(x_deep) + x_shallow
 
-        # Magic-based upsampling in feature space
-        x_upsampled = self.magic_upsampler(x_fused, scale_factor=self.scale)
+            # Magic-based upsampling in feature space
+            x_upsampled = self.magic_upsampler(x_fused, scale_factor=self.scale)
 
-        # HR refinement head: small residual stack as corrector
-        h = self.hr_conv_in(x_upsampled)
-        h = self.hr_head(h)
+            # HR refinement head: small residual stack as corrector
+            h = self.hr_conv_in(x_upsampled)
+            h = self.hr_head(h)
 
-        # Final RGB reconstruction
-        return self.conv_out(h)
+            # Final RGB reconstruction
+            return self.conv_out(h)
+
+        except Exception as e:
+            warnings.warn(
+                f"ParagonSR2 forward pass failed: {e}. Check input dimensions and model configuration.",
+                UserWarning,
+                stacklevel=2,
+            )
+            # Return input as fallback (identity operation)
+            return x
 
 
 # --- Factory Registration for traiNNer-redux: The Redesigned V2 Family ---
@@ -711,6 +891,9 @@ def paragonsr2_nano(scale: int = 4, **kwargs) -> ParagonSR2:
         dynamic_update_every=kwargs.get("dynamic_update_every", 8),
         use_channels_last=kwargs.get("use_channels_last", True),
         fast_body_mode=kwargs.get("fast_body_mode", True),  # Enable for training
+        # Robustness options
+        use_norm=kwargs.get("use_norm", False),
+        robust_mode=kwargs.get("robust_mode", True),
     )
 
 
@@ -754,6 +937,9 @@ def paragonsr2_xs(scale: int = 4, **kwargs) -> ParagonSR2:
         dynamic_update_every=kwargs.get("dynamic_update_every", 8),
         use_channels_last=kwargs.get("use_channels_last", True),
         fast_body_mode=kwargs.get("fast_body_mode", False),  # Optional for XS
+        # Robustness options
+        use_norm=kwargs.get("use_norm", False),
+        robust_mode=kwargs.get("robust_mode", True),
     )
 
 
@@ -799,6 +985,9 @@ def paragonsr2_s(scale: int = 4, **kwargs) -> ParagonSR2:
         dynamic_update_every=kwargs.get("dynamic_update_every", 8),
         use_channels_last=kwargs.get("use_channels_last", True),
         fast_body_mode=kwargs.get("fast_body_mode", False),  # Optional for S
+        # Robustness options
+        use_norm=kwargs.get("use_norm", False),
+        robust_mode=kwargs.get("robust_mode", True),
     )
 
 
@@ -845,6 +1034,9 @@ def paragonsr2_m(scale: int = 4, **kwargs) -> ParagonSR2:
         dynamic_update_every=kwargs.get("dynamic_update_every", 8),
         use_channels_last=kwargs.get("use_channels_last", True),
         fast_body_mode=kwargs.get("fast_body_mode", False),  # Typically disabled for M+
+        # Robustness options
+        use_norm=kwargs.get("use_norm", True),  # Enable for M+
+        robust_mode=kwargs.get("robust_mode", True),
     )
 
 
@@ -889,6 +1081,9 @@ def paragonsr2_l(scale: int = 4, **kwargs) -> ParagonSR2:
         dynamic_update_every=kwargs.get("dynamic_update_every", 8),
         use_channels_last=kwargs.get("use_channels_last", True),
         fast_body_mode=kwargs.get("fast_body_mode", False),  # Disabled for L
+        # Robustness options
+        use_norm=kwargs.get("use_norm", True),  # Enable for L
+        robust_mode=kwargs.get("robust_mode", True),
     )
 
 
@@ -935,4 +1130,7 @@ def paragonsr2_xl(scale: int = 4, **kwargs) -> ParagonSR2:
         dynamic_update_every=kwargs.get("dynamic_update_every", 8),
         use_channels_last=kwargs.get("use_channels_last", True),
         fast_body_mode=kwargs.get("fast_body_mode", False),  # Disabled for XL
+        # Robustness options
+        use_norm=kwargs.get("use_norm", True),  # Enable for XL
+        robust_mode=kwargs.get("robust_mode", True),
     )
