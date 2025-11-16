@@ -178,21 +178,18 @@ class LayerScale(nn.Module):
     """
     A key stabilization technique for deep networks. It applies a learnable
     scaling factor to the output of a residual block, preventing signal explosion.
-
-    OPTIMIZED: Uses broadcast multiply instead of expensive permute operations
-    for 10-20% speedup while preserving all stabilization benefits.
     """
 
     def __init__(self, dim: int, init_values: float = 1e-5) -> None:
         super().__init__()
-        # Store as 1xC x1x1 to enable broadcasting and channels_last efficiency
-        self.gamma = nn.Parameter(
-            torch.full((1, dim, 1, 1), float(init_values), dtype=torch.float32)
-        )
+        self.gamma = nn.Parameter(init_values * torch.ones(dim))
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # Fast broadcast multiply - no permute, no memory copies
-        return x * self.gamma
+        return (
+            (x.permute(0, 2, 3, 1).contiguous() * self.gamma)
+            .permute(0, 3, 1, 2)
+            .contiguous()
+        )
 
 
 # --- V2.1 Core Innovation ---
@@ -222,34 +219,9 @@ class DynamicKernelGenerator(nn.Module):
         return kernels.reshape(batch_size, dim, self.kernel_size, self.kernel_size)
 
 
-class CheapDynamicModulation(nn.Module):
-    """
-    Cheap SE-like channel attention for fast training.
-    Provides most of the benefits of dynamic kernels at fraction of the cost.
-    """
-
-    def __init__(self, dim: int, reduction: int = 4) -> None:
-        super().__init__()
-        self.net = nn.Sequential(
-            nn.AdaptiveAvgPool2d(1),
-            nn.Conv2d(dim, max(1, dim // reduction), 1, bias=True),
-            nn.ReLU(inplace=True),
-            nn.Conv2d(max(1, dim // reduction), dim, 1, bias=True),
-            nn.Sigmoid(),
-        )
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return x * self.net(x)
-
-
 class DynamicTransformer(nn.Module):
     """
     Content-adaptive transformer block with a deploy-friendly static fallback.
-
-    TRAINING OPTIMIZATIONS:
-    1. Cheap dynamic mode for fast training (SE-like channel attention)
-    2. Configurable update frequency for tracked kernels
-    3. Groups dynamic kernels to avoid expensive per-sample operations
 
     During training, it uses per-sample kernels generated on-the-fly to maximize
     expressive power. A depthwise kernel tracker aggregates these dynamic kernels,
@@ -257,31 +229,13 @@ class DynamicTransformer(nn.Module):
     export) without sacrificing the benefits of dynamic training.
     """
 
-    def __init__(
-        self,
-        dim: int,
-        expansion_ratio: float = 2.0,
-        dynamic_training_mode: str = "cheap",
-        dynamic_update_every: int = 8,
-    ) -> None:
+    def __init__(self, dim: int, expansion_ratio: float = 2.0) -> None:
         super().__init__()
         hidden_dim = int(dim * expansion_ratio)
         self.project_in = nn.Conv2d(dim, hidden_dim, 1)
-
-        # Dynamic mode options: "cheap", "full", "off"
-        assert dynamic_training_mode in ["cheap", "full", "off"], (
-            f"Invalid dynamic_training_mode: {dynamic_training_mode}"
+        self.kernel_generator: DynamicKernelGenerator | None = DynamicKernelGenerator(
+            hidden_dim
         )
-        self.dynamic_training_mode = dynamic_training_mode
-        self.dynamic_update_every = dynamic_update_every
-
-        self.kernel_generator: DynamicKernelGenerator | None = None
-        self.cheap_dynamic: CheapDynamicModulation | None = None
-
-        if dynamic_training_mode == "full":
-            self.kernel_generator = DynamicKernelGenerator(hidden_dim)
-        elif dynamic_training_mode == "cheap":
-            self.cheap_dynamic = CheapDynamicModulation(hidden_dim)
 
         self.kernel_size = 3
         self.padding = self.kernel_size // 2
@@ -318,25 +272,17 @@ class DynamicTransformer(nn.Module):
             use_dynamic = False
 
         if use_dynamic:
-            if self.dynamic_training_mode == "cheap":
-                # Fast SE-like channel attention
-                y = x if self.cheap_dynamic is None else self.cheap_dynamic(x)
-            elif self.dynamic_training_mode == "full":
-                # Expensive but high-quality per-sample kernels
-                kernel_generator = self.kernel_generator
-                if kernel_generator is None:
-                    raise RuntimeError(
-                        "Dynamic inference requested but the kernel generator was removed. "
-                        "Call `enable_dynamic_inference(False)` before export or keep the generator intact."
-                    )
-                b, c, _h, _w = x.shape
-                kernels = kernel_generator(x)  # (B, C, 3, 3)
-                y = self._apply_dynamic_kernel(x, kernels, batch_size=b, channels=c)
-                if self.training and self.track_running_stats:
-                    self._update_tracked_kernel(kernels)
-            else:
-                # dynamic_training_mode == "off"
-                y = x
+            kernel_generator = self.kernel_generator
+            if kernel_generator is None:
+                raise RuntimeError(
+                    "Dynamic inference requested but the kernel generator was removed. "
+                    "Call `enable_dynamic_inference(False)` before export or keep the generator intact."
+                )
+            b, c, _h, _w = x.shape
+            kernels = kernel_generator(x)  # (B, C, 3, 3)
+            y = self._apply_dynamic_kernel(x, kernels, batch_size=b, channels=c)
+            if self.training and self.track_running_stats:
+                self._update_tracked_kernel(kernels)
         else:
             y = self._apply_static_kernel(x)
 
@@ -467,9 +413,7 @@ class ParagonBlockV2(nn.Module):
         super().__init__()
         self.context = InceptionDWConv2d(dim, **block_kwargs)
         self.ls1 = LayerScale(dim)
-        self.transformer = DynamicTransformer(
-            dim, expansion_ratio=ffn_expansion, **block_kwargs
-        )
+        self.transformer = DynamicTransformer(dim, expansion_ratio=ffn_expansion)
         self.ls2 = LayerScale(dim)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -518,24 +462,10 @@ class ParagonSR2(nn.Module):
         block_kwargs: dict | None = None,
         upsampler_alpha: float = 0.5,
         hr_blocks: int = 1,
-        # Performance optimization flags
-        dynamic_training_mode: str = "cheap",  # "cheap", "full", "off"
-        dynamic_update_every: int = 8,  # Update tracked kernels every N batches
-        use_channels_last: bool = True,  # Use channels_last memory format
-        fast_body_mode: bool = False,  # Reduce depth for fast training
     ) -> None:
         super().__init__()
         if block_kwargs is None:
             block_kwargs = {}
-
-        # Add performance flags to block kwargs
-        block_kwargs.update(
-            {
-                "dynamic_training_mode": dynamic_training_mode,
-                "dynamic_update_every": dynamic_update_every,
-            }
-        )
-
         self.scale = scale
 
         # Clamp and store upsampler_alpha (0.0 = no sharpen, 1.0 = full MagicSharp behavior).
@@ -546,11 +476,6 @@ class ParagonSR2(nn.Module):
 
         # HR refinement depth (non-negative int). Acts as a local corrector, not a second backbone.
         self.hr_blocks = max(int(hr_blocks), 0)
-
-        # Fast body mode: temporarily reduce depth for faster training
-        if fast_body_mode:
-            num_groups = max(1, num_groups // 2)
-            num_blocks = max(1, num_blocks // 2)
 
         # --- Shallow Feature Extraction ---
         self.conv_in = nn.Conv2d(in_chans, num_feat, 3, 1, 1)
@@ -586,22 +511,6 @@ class ParagonSR2(nn.Module):
 
         # --- Final Image Reconstruction ---
         self.conv_out = nn.Conv2d(num_feat, in_chans, 3, 1, 1)
-
-        # Performance optimization flags
-        self.use_channels_last = use_channels_last and torch.cuda.is_available()
-
-        if self.use_channels_last:
-            # Convert model to channels_last for better memory locality
-            try:
-                for module in self.modules():
-                    if hasattr(module, "weight") and module.weight is not None:
-                        if module.weight.dtype in [torch.float16, torch.float32]:
-                            module.weight.data = module.weight.contiguous(
-                                memory_format=torch.channels_last
-                            )
-            except RuntimeError:
-                # Some modules might not support channels_last, continue anyway
-                pass
 
     def fuse_for_release(self):
         """Fuses all ReparamConvV2 blocks for deployment."""
@@ -644,10 +553,6 @@ class ParagonSR2(nn.Module):
         return self
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # Ensure channels_last memory format for better performance
-        if self.use_channels_last and x.dtype == torch.float16:
-            x = x.contiguous(memory_format=torch.channels_last)
-
         # Shallow + deep LR features
         x_shallow = self.conv_in(x)
         x_deep = self.body(x_shallow)
@@ -706,11 +611,6 @@ def paragonsr2_nano(scale: int = 4, **kwargs) -> ParagonSR2:
         block_kwargs={"band_kernel_size": 9},
         upsampler_alpha=kwargs.get("upsampler_alpha", 0.5),
         hr_blocks=kwargs.get("hr_blocks", 1),
-        # Performance optimizations for training speed
-        dynamic_training_mode=kwargs.get("dynamic_training_mode", "cheap"),
-        dynamic_update_every=kwargs.get("dynamic_update_every", 8),
-        use_channels_last=kwargs.get("use_channels_last", True),
-        fast_body_mode=kwargs.get("fast_body_mode", True),  # Enable for training
     )
 
 
@@ -749,11 +649,6 @@ def paragonsr2_xs(scale: int = 4, **kwargs) -> ParagonSR2:
         block_kwargs={"band_kernel_size": 11},
         upsampler_alpha=kwargs.get("upsampler_alpha", 0.5),
         hr_blocks=kwargs.get("hr_blocks", 1),
-        # Performance optimizations for training speed
-        dynamic_training_mode=kwargs.get("dynamic_training_mode", "cheap"),
-        dynamic_update_every=kwargs.get("dynamic_update_every", 8),
-        use_channels_last=kwargs.get("use_channels_last", True),
-        fast_body_mode=kwargs.get("fast_body_mode", False),  # Optional for XS
     )
 
 
@@ -794,11 +689,6 @@ def paragonsr2_s(scale: int = 4, **kwargs) -> ParagonSR2:
         block_kwargs={"band_kernel_size": 11},
         upsampler_alpha=kwargs.get("upsampler_alpha", 0.5),
         hr_blocks=kwargs.get("hr_blocks", 2),
-        # Performance optimizations for training speed
-        dynamic_training_mode=kwargs.get("dynamic_training_mode", "cheap"),
-        dynamic_update_every=kwargs.get("dynamic_update_every", 8),
-        use_channels_last=kwargs.get("use_channels_last", True),
-        fast_body_mode=kwargs.get("fast_body_mode", False),  # Optional for S
     )
 
 
@@ -838,13 +728,6 @@ def paragonsr2_m(scale: int = 4, **kwargs) -> ParagonSR2:
         block_kwargs={"band_kernel_size": 13},
         upsampler_alpha=kwargs.get("upsampler_alpha", 0.5),
         hr_blocks=kwargs.get("hr_blocks", 2),
-        # Performance optimizations for training speed
-        dynamic_training_mode=kwargs.get(
-            "dynamic_training_mode", "full"
-        ),  # Full for M+
-        dynamic_update_every=kwargs.get("dynamic_update_every", 8),
-        use_channels_last=kwargs.get("use_channels_last", True),
-        fast_body_mode=kwargs.get("fast_body_mode", False),  # Typically disabled for M+
     )
 
 
@@ -884,11 +767,6 @@ def paragonsr2_l(scale: int = 4, **kwargs) -> ParagonSR2:
         block_kwargs={"band_kernel_size": 15},
         upsampler_alpha=kwargs.get("upsampler_alpha", 0.5),
         hr_blocks=kwargs.get("hr_blocks", 3),
-        # Performance optimizations for training speed
-        dynamic_training_mode=kwargs.get("dynamic_training_mode", "full"),  # Full for L
-        dynamic_update_every=kwargs.get("dynamic_update_every", 8),
-        use_channels_last=kwargs.get("use_channels_last", True),
-        fast_body_mode=kwargs.get("fast_body_mode", False),  # Disabled for L
     )
 
 
@@ -928,11 +806,4 @@ def paragonsr2_xl(scale: int = 4, **kwargs) -> ParagonSR2:
         block_kwargs={"band_kernel_size": 15},
         upsampler_alpha=kwargs.get("upsampler_alpha", 0.5),
         hr_blocks=kwargs.get("hr_blocks", 3),
-        # Performance optimizations for training speed
-        dynamic_training_mode=kwargs.get(
-            "dynamic_training_mode", "full"
-        ),  # Full for XL
-        dynamic_update_every=kwargs.get("dynamic_update_every", 8),
-        use_channels_last=kwargs.get("use_channels_last", True),
-        fast_body_mode=kwargs.get("fast_body_mode", False),  # Disabled for XL
     )

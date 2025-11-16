@@ -18,6 +18,31 @@
 #
 # The primary distinction is the shift from a 'score-chasing' approach to a 'human-preference, clean-output' approach.
 
+# -------------------------------------------------------------------------------------------------
+# PERFORMANCE OPTIMIZATION STRATEGY: FAST TRAINING → QUALITY FINE-TUNING
+# -------------------------------------------------------------------------------------------------
+#
+# **Two-Phase Training Approach (RECOMMENDED for fastest training with good quality):**
+#
+# **PHASE 1 - Fast Training (0-150k iterations):**
+#   dynamic_training_mode: "cheap"    # Fast SE-like channel attention vs. expensive per-sample kernels
+#   fast_body_mode: true              # Half the depth (3→1.5 groups, 4→2 blocks) for faster training
+#   use_channels_last: true           # Already enabled - GPU memory optimization
+#   dynamic_update_every: 8           # Update tracked kernels every 8 batches vs. every 1
+#   → EXPECTED: 1.8-3× faster training, minimal quality loss
+#
+# **PHASE 2 - Quality Fine-tuning (150k-200k iterations):**
+#   dynamic_training_mode: "full"     # Full per-sample dynamic kernels for maximum quality
+#   fast_body_mode: false             # Restore full depth (original 3×4 architecture)
+#   dynamic_update_every: 1           # Update tracked kernels every batch
+#   → EXPECTED: Recovers most quality lost in fast training phase
+#
+# **Alternative Options:**
+#   dynamic_training_mode: "off"      # Static kernels only (fastest, lowest quality)
+#   fast_body_mode: true              # Always use reduced depth (fastest, lower quality)
+#
+# **To use fast training mode, uncomment and set these network_g parameters:**
+
 name: 2xParagonSR2_S_gan
 scale: 2
 
@@ -52,6 +77,30 @@ datasets:
 
 network_g:
   type: paragonsr2_s
+
+  # === PERFORMANCE OPTIMIZATION FLAGS (UNCOMMENT TO ENABLE FAST TRAINING) ===
+  # Training Strategy Options (choose ONE approach):
+
+  # OPTION 1: FAST TRAINING (Recommended for first 150k iterations)
+  dynamic_training_mode: "cheap"      # Fast SE-like channel attention (1.5-3× speedup)
+  fast_body_mode: true                # Half depth architecture for speed
+  dynamic_update_every: 8             # Less frequent kernel tracking
+  use_channels_last: true             # Already enabled above
+
+  # OPTION 2: QUALITY MODE (For final fine-tuning)
+  # dynamic_training_mode: "full"       # Full per-sample dynamic kernels
+  # fast_body_mode: false               # Full depth architecture
+  # dynamic_update_every: 1             # Frequent kernel tracking
+
+  # OPTION 3: MAXIMUM SPEED (Experimental, fastest training)
+  # dynamic_training_mode: "off"        # No dynamic processing
+  # fast_body_mode: true                # Half depth architecture
+  # dynamic_update_every: 8             # Less frequent kernel tracking
+
+  # OPTION 4: MAXIMUM QUALITY (Slowest but highest quality)
+  # dynamic_training_mode: "full"       # Full per-sample dynamic kernels
+  # fast_body_mode: false               # Full depth architecture
+  # dynamic_update_every: 1             # Frequent kernel tracking
 
 network_d:
   type: munet
@@ -112,24 +161,6 @@ train:
     - type: charbonnierloss
       loss_weight: 1.0
 
-    # 2) DINOv2-based Perceptual Anchor
-    # DIFFERENCE TO DEFAULT: Default uses VGG-based 'perceptualloss' (often with L1) or ConvNeXt.
-    # REASONING: DINOv2 features are less coupled to high-level ImageNet semantics than VGG. They
-    #            encourage superior low- and mid-level structure/texture fidelity, helping avoid
-    #            the "plastic" or "oil-paint" look common in VGG-trained models.
-    # ALTERNATIVES: VGG, LPIPS, ConvNeXt, CLIP Contrastive. DINOv2 was chosen as the most modern,
-    #               texture-focused replacement.
-    # NOTE: Optimized configuration - vit_small_patch14_dinov2 with single 'last' layer for optimal speed/quality ratio
-    #       Previously: vit_small_patch16_dinov3 with multi-layer (very slow)
-    #       Benefits: Smaller model (patch14), faster inference, 95% quality retention for SISR
-    #- type: DINOPerceptualLoss
-    #  loss_weight: 0.18
-    #  model_name: vit_small_patch14_dinov2  # Best available small/fast DINO model
-    #  layers: ['last']                      # Single layer for optimal speed/quality trade-off
-    #  weights: [1.0]
-    #  resize: true
-
-
     # 2) ConvNeXt-Tiny Perceptual Anchor (Superior to DINO for SISR)
     # WHY CONVNEXT-TINY > DINO for Super-Resolution:
     #
@@ -162,6 +193,15 @@ train:
       eps: 1.0e-6
 
     # 2) DINOv2-based Perceptual Anchor (Disabled due to input size constraints)
+    # DIFFERENCE TO DEFAULT: Default uses VGG-based 'perceptualloss' (often with L1) or ConvNeXt.
+    # REASONING: DINOv2 features are less coupled to high-level ImageNet semantics than VGG. They
+    #            encourage superior low- and mid-level structure/texture fidelity, helping avoid
+    #            the "plastic" or "oil-paint" look common in VGG-trained models.
+    # ALTERNATIVES: VGG, LPIPS, ConvNeXt, CLIP Contrastive. DINOv2 was chosen as the most modern,
+    #               texture-focused replacement.
+    # NOTE: Optimized configuration - vit_small_patch14_dinov2 with single 'last' layer for optimal speed/quality ratio
+    #       Previously: vit_small_patch16_dinov3 with multi-layer (very slow)
+    #       Benefits: Smaller model (patch14), faster inference, 95% quality retention for SISR
     # ISSUE: vit_small_patch14_dinov2 requires strict input sizes (multiple of 14)
     #        Current crop size 256 is incompatible, causing runtime errors
     # ALTERNATIVE: Would need to either resize inputs or use compatible crop sizes
