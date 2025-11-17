@@ -66,7 +66,7 @@ datasets:
     use_hflip: true
     use_rot: true
     num_worker_per_gpu: 8
-    batch_size_per_gpu: 4
+    batch_size_per_gpu: 8
     accum_iter: 1
 
   val:
@@ -84,7 +84,8 @@ network_g:
   # OPTION 1: FAST TRAINING (Recommended for first 150k iterations)
   dynamic_training_mode: "cheap"      # Fast SE-like channel attention (1.5-3× speedup)
   fast_body_mode: true                # Half depth architecture for speed
-  dynamic_update_every: 8             # Less frequent kernel tracking
+  use_norm: true
+  dynamic_update_every: 16             # Less frequent kernel tracking
   use_channels_last: true             # Already enabled above
 
   # OPTION 2: QUALITY MODE (For final fine-tuning)
@@ -127,6 +128,7 @@ train:
     lr: !!float 1.0e-4
     weight_decay: 1.0e-4 # Added: Moderate Weight Decay (1e-4) on G for regularization.
     betas: [0.9, 0.99]
+    epsilon: 1e-6
 
   # Optimizer for Discriminator (optim_d)
   # DIFFERENCE TO DEFAULT: Default uses LR 1e-4. We use 1.5e-4.
@@ -148,7 +150,7 @@ train:
     gamma: 0.5
 
   total_iter: 200000
-  warmup_iter: 5000
+  warmup_iter: 1000
 
   # -------------------------------------------------------------------------------------------------
   # Loss Stack: Lean V2 Recipe (Fewer, Better-Motivated Losses)
