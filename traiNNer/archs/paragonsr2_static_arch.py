@@ -492,6 +492,29 @@ class ParagonSR2Static(nn.Module):
 
 
 @ARCH_REGISTRY.register()
+def paragonsr2_static_micro(scale: int = 4, **kwargs) -> ParagonSR2Static:
+    """
+    Micro variant: extremely small / fast. Useful for fast experimentation
+    or real-time upscaling where extreme latency constraints exist.
+    Designed to still learn compression artifacts if those appear in LR data.
+    """
+    return ParagonSR2Static(
+        scale=scale,
+        num_feat=16,
+        num_groups=1,
+        num_blocks=1,
+        ffn_expansion=1.2,
+        block_kwargs={"band_kernel_size": 7},
+        upsampler_alpha=kwargs.get("upsampler_alpha", 0.5),
+        hr_blocks=kwargs.get("hr_blocks", 0),
+        use_channels_last=kwargs.get("use_channels_last", True),
+        fast_body_mode=kwargs.get("fast_body_mode", True),
+        use_norm=kwargs.get("use_norm", False),
+        use_channel_mod=kwargs.get("use_channel_mod", True),
+    )
+
+
+@ARCH_REGISTRY.register()
 def paragonsr2_static_nano(scale: int = 4, **kwargs) -> ParagonSR2Static:
     """
     Nano variant: extremely small, best for quick prototyping and very limited VRAM.
