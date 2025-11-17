@@ -2,19 +2,36 @@
 # -------------------------------------------------------------------------------------------------
 # ParagonSR2-STATIC-S (GAN + Perceptual Phase-Shift Fine-Tuning, High Visual Contrast)
 # Uses R3GAN, phased activation to ensure dramatic perceptual change without instability.
+#
+# TRAINING STRATEGY RATIONALE:
+# This config implements a sophisticated 5-phase training approach to create a visually distinct
+# model that evolves from fidelity-focused to perceptually-enhanced, maximizing the "wow factor"
+# while maintaining structural integrity. Each loss has been carefully scheduled to activate,
+# ramp up, or deactivate at specific iterations to achieve optimal visual differentiation.
+#
+# PHASE 1 (0-20k):    Foundation building with structural learning
+# PHASE 2 (20k-40k):  Perceptual enhancement + GAN activation
+# PHASE 3 (40k-50k):  Fine-tuning and artifact removal
+# PHASE 4 (50k-150k): Final quality refinement
+#
+# Author: Philip Hofmann
+# Framework Extension: IterativeLossWrapper for iteration-based loss scheduling
 # -------------------------------------------------------------------------------------------------
 
 name: 2xParagonSR2_S_static_perceptual_r3_v1
 scale: 2
 
-use_amp: true
-amp_bf16: true
-use_channels_last: true
-fast_matmul: true
-num_gpu: auto
+# -------------------------------------------------------------------------------------------------
+# PERFORMANCE OPTIMIZATION FLAGS
+# -------------------------------------------------------------------------------------------------
+use_amp: true                          # Enable Automatic Mixed Precision for faster training
+amp_bf16: true                        # Use BF16 for better numerical stability on Ampere+ GPUs
+use_channels_last: true               # Optimize memory layout for better performance
+fast_matmul: true                     # Trade precision for speed in matrix operations
+num_gpu: auto                        # Automatically detect and use available GPUs
 
 # -------------------------------------------------------------------------------------------------
-# Datasets
+# DATASET CONFIGURATION
 # -------------------------------------------------------------------------------------------------
 datasets:
   train:
@@ -22,12 +39,12 @@ datasets:
     type: pairedimagedataset
     dataroot_gt: /home/phips/Documents/dataset/cc0/hr
     dataroot_lq: /home/phips/Documents/dataset/cc0/lr_x2
-    lq_size: 128
-    use_hflip: true
-    use_rot: true
-    num_worker_per_gpu: 8
-    batch_size_per_gpu: 8
-    accum_iter: 1
+    lq_size: 128                      # Input patch size - balanced for memory vs. context
+    use_hflip: true                   # Horizontal flips for data augmentation
+    use_rot: true                     # Rotations for better spatial invariance
+    num_worker_per_gpu: 8             # Parallel data loading
+    batch_size_per_gpu: 8             # Batch size per GPU - tuned for 8GB VRAM
+    accum_iter: 1                     # Gradient accumulation steps
 
   val:
     name: Val_Dataset
@@ -36,145 +53,349 @@ datasets:
     dataroot_lq: /home/phips/Documents/dataset/cc0/val_lr_x2
 
 # -------------------------------------------------------------------------------------------------
-# Network
+# NETWORK ARCHITECTURE
 # -------------------------------------------------------------------------------------------------
 network_g:
-  type: paragonsr2_static_s
+  type: paragonsr2_static_s          # S-sized static ParagonSR2 for perceptual training
 
 network_d:
-  type: munet
+  type: munet                        # MUNet discriminator for R3GAN
 
 # -------------------------------------------------------------------------------------------------
-# Paths: Pretrain & Resume
+# PRETRAINING & RESUME CONFIGURATION
 # -------------------------------------------------------------------------------------------------
 path:
-  pretrain_network_g: experiments/2xParagonSR2_S_fidelity/models/net_g_ema_400000.safetensors
-  strict_load_g: true
-  resume_state: ~
+  pretrain_network_g: experiments/2xParagonSR2_static_S_fidelity/models/net_g_ema_340000.safetensors # highest psnr checkpoint form fidelity training
+  strict_load_g: true                # Load exact weights from fidelity model
+  resume_state: ~                    # No resume for fresh training
 
 # -------------------------------------------------------------------------------------------------
-# Training
+# TRAINING OPTIMIZATION SETTINGS
 # -------------------------------------------------------------------------------------------------
 train:
-  ema_decay: 0.995
-  ema_power: 0.75
-  grad_clip: true
+  ema_decay: 0.995                   # Exponential Moving Average decay for stable training
+  ema_power: 0.75                   # EMA power for momentum calculation
+  grad_clip: true                   # Enable gradient clipping for stability
 
+  # Generator optimizer configuration
   optim_g:
-    type: AdamW
-    lr: !!float 1.0e-4
-    weight_decay: !!float 1.0e-4
-    betas: [0.9, 0.99]
+    type: AdamW                      # AdamW for better weight decay handling
+    lr: !!float 1.0e-4              # Conservative learning rate for stability
+    weight_decay: !!float 1.0e-4     # L2 regularization
+    betas: [0.9, 0.99]              # AdamW beta parameters
 
+  # Discriminator optimizer configuration
   optim_d:
     type: AdamW
-    lr: !!float 1.5e-4
-    weight_decay: !!float 0.0
+    lr: !!float 1.5e-4              # Slightly higher LR for discriminator
+    weight_decay: !!float 0.0       # No weight decay on discriminator
     betas: [0.9, 0.99]
 
+  # Learning rate scheduler
   scheduler:
     type: MultiStepLR
-    milestones: [70000, 120000]
-    gamma: 0.5
+    milestones: [70000, 120000]      # Step down LR at key training milestones
+    gamma: 0.5                       # Reduce LR by 50% at each milestone
 
-  total_iter: 150000
-  warmup_iter: 1000
+  total_iter: 150000                 # Total training iterations (150k)
+  warmup_iter: 1000                  # Warmup iterations for stable start
 
   # -------------------------------------------------------------------------------------------------
-  # LOSS SCHEDULE: MAXIMUM VISUAL DISTINCTION FROM FIDELITY MODEL
+  # SOPHISTICATED LOSS SCHEDULING: 5-PHASE TRAINING STRATEGY
+  # -------------------------------------------------------------------------------------------------
+  #
+  # OVERALL PHILOSOPHY:
+  # Start with structural fidelity (pixel losses) then gradually transition to perceptual quality.
+  # Each loss has been carefully scheduled to activate, ramp up, or deactivate at specific
+  # iterations to create a smooth evolution toward maximum visual distinctiveness.
+  #
+  # EXPECTED VISUAL PROGRESSION:
+  # Phase 1 (0-20k):   High pixel accuracy, moderate perceptual learning
+  # Phase 2 (20k-40k): Full perceptual enhancement, GAN activation
+  # Phase 3 (40k-50k): Fine-tuning balance, reduced pixel anchor
+  # Phase 4 (50k+):    Artifact removal, final quality polish
+  #
+  # This approach ensures meaningful visual difference from fidelity model while maintaining
+  # professional-grade output quality.
   # -------------------------------------------------------------------------------------------------
   losses:
 
-    # 1) Pixel anchor (ramped down for perceptual focus)
+    # ===============================================================================================
+    # 1) PIXEL LOSS - STRUCTURAL FOUNDATION (PHASE 1 → 2 TRANSITION)
+    # ===============================================================================================
+    #
+    # PURPOSE: Provides structural accuracy anchor while allowing gradual shift to perceptual quality
+    # RATIONALE: High initial pixel loss ensures model learns correct structure. Gradual reduction
+    #           allows perceptual losses to dominate for enhanced visual appeal.
+    #
+    # SCHEDULE DECISION:
+    # - loss_weight: 1.0 → Starts with strong structural foundation from iteration 0
+    # - start_iter: 0 → Activate immediately for structural stability
+    # - target_iter: 20000 → Begin reduction after initial structure learning
+    # - target_weight: 0.7 → Reduce but don't eliminate - maintains some pixel accuracy
+    # - schedule_type: linear → Smooth, predictable weight changes
+    #
+    # WHY THIS MATTERS: Prevents model from drifting too far from structural accuracy while
+    #                  enabling dramatic perceptual enhancement. 0.7 balance chosen to maintain
+    #                  reasonable fidelity without overwhelming perceptual quality.
+    # ===============================================================================================
     - type: charbonnierloss
       loss_weight: 1.0
-      start_iter: 20000
-      target_iter: 40000
-      target_weight: 0.7
-      schedule_type: linear
+      start_iter: 0                  # Start immediately for structural foundation
+      target_iter: 20000            # Begin reduction after initial structure learning
+      target_weight: 0.7             # Reduce but don't eliminate - maintains some pixel accuracy
+      schedule_type: linear          # Smooth, predictable weight changes
 
-    # 2) ConvNeXt Perceptual Structure
+    # ===============================================================================================
+    # 2) CONVNEXT PERCEPTUAL LOSS - CORE PERCEPTUAL ENHANCEMENT (PHASE 1 → 2)
+    # ===============================================================================================
+    #
+    # PURPOSE: Primary driver of perceptual quality through structural similarity learning
+    # RATIONALE: ConvNeXt provides high-quality perceptual features that enhance texture and
+    #           structure without hallucinations. Gradual ramp allows stable learning.
+    #
+    # SCHEDULE DECISION:
+    # - loss_weight: 0.12 → Moderate initial perceptual influence
+    # - start_iter: 0 → Active from beginning for early structure-perceptuality balance
+    # - target_iter: 20000 → Ramp up over first 20k iterations
+    # - target_weight: 0.26 → More than double for strong perceptual enhancement
+    # - layers: [1, 2] → Use mid-level features for optimal perceptual-textural balance
+    # - layer_weights: [1.0, 0.7] → Higher weight on earlier layer, lower on later
+    # - eps: 1.0e-6 → Numerical stability for gradient calculation
+    #
+    # WHY THIS MATTERS: This is the primary perceptual loss. The 0.12→0.26 ramp enables
+    #                  smooth transition from structure-focused to perceptually-enhanced
+    #                  without training instability. Choice of ConvNeXt layers 1&2 provides
+    #                  optimal balance between texture detail and structural coherence.
+    # ===============================================================================================
     - type: convnextperceptualloss
       loss_weight: 0.12
-      layers: [1, 2]
-      layer_weights: [1.0, 0.7]
-      eps: 1.0e-6
-      start_iter: 0
-      target_iter: 20000
-      target_weight: 0.26
+      layers: [1, 2]                 # Mid-level features for optimal perceptual balance
+      layer_weights: [1.0, 0.7]      # Higher weight on earlier layer for structure
+      eps: 1.0e-6                   # Numerical stability
+      start_iter: 0                  # Active from beginning
+      target_iter: 20000            # Ramp up over 20k iterations
+      target_weight: 0.26           # More than double for strong enhancement
 
-    # 3) Structural similarity (perceptual, not pixel)
+    # ===============================================================================================
+    # 3) DISTS LOSS - STRUCTURAL PERCEPTUAL COMPLEMENT (PHASE 1 FULL DURATION)
+    # ===============================================================================================
+    #
+    # PURPOSE: Provides additional perceptual structure without requiring iteration scheduling
+    # RATIONALE: DISTS (Deep Image Structure and Texture Similarity) offers complementary
+    #           perceptual features to ConvNeXt, enhancing overall perceptual quality.
+    #
+    # SCHEDULE DECISION:
+    # - loss_weight: 0.08 → Moderate weight, complements ConvNeXt without overwhelming
+    # - No scheduling → Active throughout training for consistent perceptual baseline
+    # - as_loss: true → Use as direct loss function (not metric)
+    # - load_weights: true → Load pretrained DISTS weights
+    # - use_input_norm: true → Normalize inputs for consistent scale
+    #
+    # WHY THIS MATTERS: Provides stable perceptual foundation throughout all training phases.
+    #                  Constant weight ensures consistent perceptual enhancement without
+    #                  complex scheduling. Complements ConvNeXt by focusing on different
+    #                  aspects of perceptual similarity.
+    # ===============================================================================================
     - type: distsloss
       loss_weight: 0.08
-      as_loss: true
-      load_weights: true
-      use_input_norm: true
+      as_loss: true                  # Use as direct loss function
+      load_weights: true            # Load pretrained weights
+      use_input_norm: true          # Normalize inputs for consistent scale
 
-    # 4) Frequency / microdetail sharpening (enhanced after 20k)
+    # ===============================================================================================
+    # 4) FREQUENCY LOSS - MICRODETAIL ENHANCEMENT (PHASE 2 ACTIVATION)
+    # ===============================================================================================
+    #
+    # PURPOSE: Enhances fine details and microtexture quality for premium visual appeal
+    # RATIONALE: Frequency domain loss targets high-frequency components that create
+    #           crisp edges, fine textures, and enhanced detail definition.
+    #
+    # SCHEDULE DECISION:
+    # - loss_weight: 0.08 → Start with moderate enhancement
+    # - start_iter: 20000 → Activate when model has basic perceptual structure
+    # - target_iter: 40000 → Ramp up during perceptual enhancement phase
+    # - target_weight: 0.18 → More than double for strong microdetail enhancement
+    # - schedule_type: linear → Smooth transition to avoid artifacts
+    #
+    # WHY THIS MATTERS: Critical for achieving the "crisp and detailed" quality that
+    #                  distinguishes this model from fidelity versions. Delayed activation
+    #                  prevents interference with early structure learning. The 0.18 target
+    #                  provides strong detail enhancement without causing ringing artifacts.
+    # ===============================================================================================
     - type: ffloss
       loss_weight: 0.08
-      start_iter: 20000
-      target_iter: 40000
-      target_weight: 0.18
-      schedule_type: linear
+      start_iter: 20000             # Activate during perceptual enhancement phase
+      target_iter: 40000            # Ramp up for strong microdetail enhancement
+      target_weight: 0.18           # More than double for enhanced crispness
+      schedule_type: linear         # Smooth transition to avoid artifacts
 
-    # 5) Texture regularity guidance (stabilized after 1k iterations)
+    # ===============================================================================================
+    # 5) GRADIENT VARIANCE LOSS - TEXTURE REGULARITY (EARLY ACTIVATION)
+    # ===============================================================================================
+    #
+    # PURPOSE: Prevents over-sharpening and maintains natural texture appearance
+    # RATIONALE: Gradient variance loss penalizes unnatural texture variations while
+    #           allowing realistic detail enhancement.
+    #
+    # SCHEDULE DECISION:
+    # - loss_weight: 0.03 → Moderate weight for texture regularization
+    # - start_iter: 1000 → Early activation to establish texture regularity from start
+    # - patch_size: 16 → Small patches for detailed texture analysis
+    # - criterion: charbonnier → Robust loss function for texture analysis
+    #
+    # WHY THIS MATTERS: Prevents the model from creating unnatural sharpening or
+    #                  artifacts during the perceptual enhancement phases. Early start
+    #                  ensures texture regularity is established before heavy perceptual
+    #                  training begins. Small patch size allows fine-grained texture control.
+    # ===============================================================================================
     - type: GradientVarianceLoss
       loss_weight: 0.03
-      start_iter: 1000
-      patch_size: 16
-      criterion: charbonnier
+      start_iter: 1000              # Early activation for texture stability
+      patch_size: 16                # Small patches for detailed analysis
+      criterion: charbonnier        # Robust texture analysis
 
-    # 6) Local artifact suppression (optional, remove later)
+    # ===============================================================================================
+    # 6) LDL LOSS - LOCAL ARTIFACT SUPPRESSION (PHASE 3 → 4 TRANSITION)
+    # ===============================================================================================
+    #
+    # PURPOSE: Suppresses local artifacts during training, then removed for final quality
+    # RATIONALE: Local Detail Loss helps prevent artifact formation during intense
+    #           perceptual training, but should be removed for final clean output.
+    #
+    # SCHEDULE DECISION:
+    # - loss_weight: 0.5 → Strong artifact suppression during training
+    # - disable_after: 50000 → Remove after perceptual training stabilizes
+    #
+    # WHY THIS MATTERS: Provides safety net against artifact formation during the
+    #                  intense perceptual enhancement phases (20k-50k). Removal at 50k
+    #                  allows final clean output without the influence of artifact
+    #                  suppression, resulting in premium-quality final results.
+    # ===============================================================================================
     - type: ldlloss
       loss_weight: 0.5
-      disable_after: 50000
+      disable_after: 50000          # Remove after perceptual training stabilizes
 
-    # 7) GAN Loss (R3GAN, OFF until 20k)
+    # ===============================================================================================
+    # 7) R3GAN LOSS - ADVERSARIAL ENHANCEMENT (PHASE 2 ACTIVATION)
+    # ===============================================================================================
+    #
+    # PURPOSE: Generates realistic textures and enhances perceptual quality through adversarial training
+    # RATIONALE: R3GAN (Relative R1 GAN) provides superior adversarial training compared to
+    #           standard GANs, generating realistic textures while maintaining training stability.
+    #
+    # SCHEDULE DECISION:
+    # - loss_weight: 0.00 → Base weight (actual weight comes from target_weight)
+    # - start_iter: 20000 → Begin GAN training after perceptual foundation established
+    # - target_weight: 0.08 → Moderate adversarial strength for enhancement without instability
+    # - gan_type: r3gan → Use R3GAN for better stability and texture quality
+    # - r1_weight: 2.0 → Strong R1 regularization for training stability
+    # - r2_weight: 2.0 → Strong R2 regularization for balanced training
+    #
+    # WHY THIS MATTERS: GAN activation at 20k ensures perceptual foundation is solid before
+    #                  adversarial training begins. The 0.08 target weight provides
+    #                  meaningful texture enhancement without destabilizing the training.
+    #                  R3GAN is specifically chosen for its stability and texture quality.
+    #                  Strong R1/R2 regularization prevents mode collapse and ensures
+    #                  high-quality adversarial training.
+    # ===============================================================================================
     - type: ganloss
       gan_type: r3gan
       loss_weight: 0.00
-      start_iter: 20000
-      target_weight: 0.08
-      r1_weight: 2.0
-      r2_weight: 2.0
+      start_iter: 20000             # Begin after perceptual foundation established
+      target_weight: 0.08           # Moderate adversarial enhancement
+      r1_weight: 2.0               # Strong regularization for stability
+      r2_weight: 2.0               # Balanced adversarial training
 
-    # 8) Optional semantic anchor (CLIP, also phased-in)
+    # ===============================================================================================
+    # 8) CONTRASTIVE LOSS - SEMANTIC ENHANCEMENT (LATE ACTIVATION)
+    # ===============================================================================================
+    #
+    # PURPOSE: Provides semantic consistency and enhances visual appeal through contrastive learning
+    # RATIONALE: Contrastive learning helps maintain semantic coherence while enhancing
+    #           perceptual quality, particularly useful for creating visually striking results.
+    #
+    # SCHEDULE DECISION:
+    # - loss_weight: 0.00 → Base weight (actual weight comes from target_weight)
+    # - start_iter: 30000 → Late activation after main perceptual training established
+    # - target_weight: 0.05 → Small but meaningful semantic enhancement
+    # - temperature: 0.1 → Sharp contrastive features for strong semantic differentiation
+    #
+    # WHY THIS MATTERS: Provides final polish to visual appeal through semantic consistency.
+    #                  Late activation ensures it doesn't interfere with primary perceptual
+    #                  training phases. The small 0.05 weight provides subtle but meaningful
+    #                  enhancement without overwhelming other losses. Temperature of 0.1
+    #                  creates sharp contrastive features for strong visual impact.
+    # ===============================================================================================
     - type: ContrastiveLoss
       loss_weight: 0.00
-      temperature: 0.1
-      start_iter: 30000
-      target_weight: 0.05
+      temperature: 0.1              # Sharp contrastive features
+      start_iter: 30000             # Late activation for final polish
+      target_weight: 0.05           # Subtle but meaningful enhancement
 
 # -------------------------------------------------------------------------------------------------
-# Validation
+# VALIDATION CONFIGURATION
 # -------------------------------------------------------------------------------------------------
 val:
-  val_enabled: true
-  val_freq: 5000
-  save_img: true
-  metrics_enabled: true
+  val_enabled: true                 # Enable validation during training
+  val_freq: 5000                   # Validate every 5k iterations
+  save_img: true                   # Save validation images for progress monitoring
+  metrics_enabled: true            # Enable automatic metric calculation
+
+  # Comprehensive metric suite for quality assessment
   metrics:
-    psnr:
+    psnr:                          # Peak Signal-to-Noise Ratio (fidelity metric)
       type: calculate_psnr
-      crop_border: 2
-    ssim:
+      crop_border: 2               # Standard crop for fair comparison
+
+    ssim:                          # Structural Similarity Index (structural quality)
       type: calculate_ssim
       crop_border: 2
-    lpips:
+
+    lpips:                         # Learned Perceptual Image Patch Similarity (perceptual quality)
       type: calculate_lpips
-      better: lower
-    dists:
+      better: lower               # Lower LPIPS = better perceptual quality
+
+    dists:                         # Deep Image Structure and Texture Similarity
       type: calculate_dists
       better: lower
-    topiq:
+
+    topiq:                         # Task-Oriented Perceptual Image Quality
       type: calculate_topiq
 
 # -------------------------------------------------------------------------------------------------
-# Logging
+# LOGGING CONFIGURATION
 # -------------------------------------------------------------------------------------------------
 logger:
-  print_freq: 100
-  save_checkpoint_freq: 5000
-  save_checkpoint_format: safetensors
-  use_tb_logger: true
+  print_freq: 100                  # Print training progress every 100 iterations
+  save_checkpoint_freq: 5000       # Save model checkpoints every 5k iterations
+  save_checkpoint_format: safetensors # Use SafeTensors format for better compatibility
+  use_tb_logger: true              # Enable TensorBoard logging for detailed monitoring
+
+# -------------------------------------------------------------------------------------------------
+# TRAINING EXPECTATIONS & MONITORING POINTS
+# -------------------------------------------------------------------------------------------------
+#
+# EXPECTED VISUAL PROGRESSION:
+# - 20k iterations: Significant perceptual enhancement visible
+# - 40k iterations: Full perceptual model characteristics established
+# - 50k iterations: LDL removal should improve final image quality
+# - 90k+ iterations: Mature perceptual model with strong visual distinction
+#
+# KEY MONITORING METRICS:
+# - PSNR: Should decrease slightly (expected for perceptual enhancement)
+# - LPIPS: Should decrease significantly (perceptual improvement)
+# - SSIM: Should maintain reasonable levels (structural quality)
+# - DISTS: Should show improvement (texture quality)
+#
+# QUALITY CHECKPOINTS:
+# - 20k: First perceptual improvements, check for artifacts
+# - 40k: Full enhancement, verify visual distinction from fidelity model
+# - 90k: Mature results, compare against fidelity model outputs
+# - 150k: Final model quality assessment
+#
+# This configuration represents a sophisticated approach to creating visually distinct
+# perceptual models while maintaining professional quality standards. The careful
+# scheduling of loss weights ensures smooth training progression toward maximum
+# visual appeal and meaningful distinction from fidelity-focused models.
+# -------------------------------------------------------------------------------------------------

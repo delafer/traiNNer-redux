@@ -69,15 +69,30 @@ def build_loss(loss_opt: dict[str, Any]) -> nn.Module:
             extra={"markup": True},
         )
 
-    loss = LOSS_REGISTRY.get(loss_type)(**opt)
-
-    # Check if this loss needs iteration-based scheduling
-    schedule_params = ["start_iter", "target_iter", "target_weight", "disable_after"]
+    # Check if this loss needs iteration-based scheduling BEFORE creating the loss
+    schedule_params = [
+        "start_iter",
+        "target_iter",
+        "target_weight",
+        "disable_after",
+        "schedule_type",
+        "warn_on_unused",
+    ]
     has_schedule = any(param in loss_opt for param in schedule_params)
+
+    # Extract scheduling parameters to avoid passing them to loss constructor
+    schedule_config = {}
+    if has_schedule:
+        for param in schedule_params:
+            if param in opt:
+                schedule_config[param] = opt.pop(param)
+
+    # Create the loss with only the parameters it expects
+    loss = LOSS_REGISTRY.get(loss_type)(**opt)
 
     if has_schedule:
         # Wrap with IterativeLossWrapper for iteration-based scheduling
-        wrapped_loss = create_iterative_loss(loss, loss_opt)
+        wrapped_loss = create_iterative_loss(loss, {**loss_opt, **schedule_config})
         logger = get_root_logger()
         logger.info(
             "Loss [bold]%s[/bold] wrapped with IterativeLossWrapper for iteration-based scheduling.",

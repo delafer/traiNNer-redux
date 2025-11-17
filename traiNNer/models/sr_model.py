@@ -482,10 +482,19 @@ class SRModel(BaseModel):
                                 self.gt,
                                 self.opt.output_pixel_format,
                             )
-                        l_g_loss = loss(self.output, output_ema, target)
+                        # Check if LDL loss is wrapped with IterativeLossWrapper
+                        if hasattr(loss, "forward") and hasattr(loss, "loss_module"):
+                            l_g_loss = loss(
+                                self.output,
+                                output_ema,
+                                target,
+                                current_iter=current_iter,
+                            )
+                        else:
+                            l_g_loss = loss(self.output, output_ema, target)
                     elif isinstance(loss, ContrastiveLoss):
                         l_g_loss = loss(self.output, target, self.lq)
-                    # Check if loss is wrapped with IterativeLossWrapper
+                    # Check if loss is wrapped with IterativeLossWrapper for general losses
                     elif hasattr(loss, "forward") and hasattr(loss, "loss_module"):
                         # This is an IterativeLossWrapper, pass current_iter
                         l_g_loss = loss(self.output, target, current_iter=current_iter)
