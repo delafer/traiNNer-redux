@@ -10,6 +10,10 @@ from traiNNer.losses.gan_loss import (
     gradient_penalty_loss,
     r1_penalty,
 )
+from traiNNer.losses.iterative_loss_wrapper import (
+    IterativeLossWrapper,
+    create_iterative_loss,
+)
 from traiNNer.losses.loss_wrapper import ModelAsLoss
 
 # Import the new R3GAN loss classes for direct access (registered as "r3gan_loss" and "multi_scale_r3gan_loss")
@@ -48,6 +52,9 @@ def build_loss(loss_opt: dict[str, Any]) -> nn.Module:
     Args:
         opt (dict): Configuration. It must contain:
             type (str): Model type.
+
+    Returns:
+        nn.Module: Built loss, potentially wrapped with IterativeLossWrapper
     """
     opt = deepcopy(loss_opt)
     loss_type = opt.pop("type")
@@ -63,6 +70,22 @@ def build_loss(loss_opt: dict[str, Any]) -> nn.Module:
         )
 
     loss = LOSS_REGISTRY.get(loss_type)(**opt)
+
+    # Check if this loss needs iteration-based scheduling
+    schedule_params = ["start_iter", "target_iter", "target_weight", "disable_after"]
+    has_schedule = any(param in loss_opt for param in schedule_params)
+
+    if has_schedule:
+        # Wrap with IterativeLossWrapper for iteration-based scheduling
+        wrapped_loss = create_iterative_loss(loss, loss_opt)
+        logger = get_root_logger()
+        logger.info(
+            "Loss [bold]%s[/bold] wrapped with IterativeLossWrapper for iteration-based scheduling.",
+            loss.__class__.__name__,
+            extra={"markup": True},
+        )
+        return wrapped_loss
+
     logger = get_root_logger()
     logger.info(
         "Loss [bold]%s[/bold](%s) is created.",

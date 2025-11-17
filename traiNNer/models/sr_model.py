@@ -485,7 +485,12 @@ class SRModel(BaseModel):
                         l_g_loss = loss(self.output, output_ema, target)
                     elif isinstance(loss, ContrastiveLoss):
                         l_g_loss = loss(self.output, target, self.lq)
+                    # Check if loss is wrapped with IterativeLossWrapper
+                    elif hasattr(loss, "forward") and hasattr(loss, "loss_module"):
+                        # This is an IterativeLossWrapper, pass current_iter
+                        l_g_loss = loss(self.output, target, current_iter=current_iter)
                     else:
+                        # Regular loss
                         l_g_loss = loss(self.output, target)
 
                     if isinstance(l_g_loss, dict):
@@ -557,25 +562,54 @@ class SRModel(BaseModel):
             ):
                 # R3GAN loss requires a different signature
                 if isinstance(cri_gan, R3GANLoss):
-                    loss_d_dict = cri_gan(
-                        net_d=self.net_d,
-                        real_images=real_images_aug,
-                        fake_images=fake_images_aug.detach(),
-                        real_images_unaug=real_images_unaug,
-                        fake_images_unaug=fake_images_unaug.detach(),
-                        is_disc=True,
-                    )
+                    # Check if it's wrapped with IterativeLossWrapper
+                    if hasattr(cri_gan, "loss_module"):
+                        # Unwrap for R3GAN - it has its own scheduling
+                        unwrapped_loss = cri_gan.loss_module
+                        loss_d_dict = unwrapped_loss(
+                            net_d=self.net_d,
+                            real_images=real_images_aug,
+                            fake_images=fake_images_aug.detach(),
+                            real_images_unaug=real_images_unaug,
+                            fake_images_unaug=fake_images_unaug.detach(),
+                            is_disc=True,
+                        )
+                    else:
+                        loss_d_dict = cri_gan(
+                            net_d=self.net_d,
+                            real_images=real_images_aug,
+                            fake_images=fake_images_aug.detach(),
+                            real_images_unaug=real_images_unaug,
+                            fake_images_unaug=fake_images_unaug.detach(),
+                            is_disc=True,
+                        )
                     l_d_total = loss_d_dict["d_loss"]
                     loss_dict["l_d_total"] = l_d_total
                     loss_dict["r1_penalty"] = loss_d_dict["r1_penalty"]
                     loss_dict["r2_penalty"] = loss_d_dict["r2_penalty"]
                 else:
-                    # Standard GAN loss
-                    real_d_pred = self.net_d(self.gt)
-                    fake_d_pred = self.net_d(self.output.detach())
-                    l_d_real = cri_gan(real_d_pred, True, is_disc=True)
-                    l_d_fake = cri_gan(fake_d_pred, False, is_disc=True)
-                    l_d_total = l_d_real + l_d_fake
+                    # Check if it's wrapped with IterativeLossWrapper
+                    if hasattr(cri_gan, "loss_module"):
+                        # Unwrap and apply weight manually for GAN losses
+                        unwrapped_loss = cri_gan.loss_module
+                        real_d_pred = self.net_d(self.gt)
+                        fake_d_pred = self.net_d(self.output.detach())
+                        l_d_real = unwrapped_loss(real_d_pred, True, is_disc=True)
+                        l_d_fake = unwrapped_loss(fake_d_pred, False, is_disc=True)
+                        # Apply effective weight
+                        effective_weight = (
+                            cri_gan.get_current_weight(current_iter)
+                            if hasattr(cri_gan, "get_current_weight")
+                            else cri_gan.loss_weight
+                        )
+                        l_d_total = (l_d_real + l_d_fake) * effective_weight
+                    else:
+                        # Standard GAN loss
+                        real_d_pred = self.net_d(self.gt)
+                        fake_d_pred = self.net_d(self.output.detach())
+                        l_d_real = cri_gan(real_d_pred, True, is_disc=True)
+                        l_d_fake = cri_gan(fake_d_pred, False, is_disc=True)
+                        l_d_total = l_d_real + l_d_fake
                     loss_dict["l_d_real"] = l_d_real
                     loss_dict["l_d_fake"] = l_d_fake
 
