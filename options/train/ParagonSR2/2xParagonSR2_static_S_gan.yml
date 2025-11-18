@@ -223,12 +223,28 @@ train:
     #                  prevents interference with early structure learning. The 0.18 target
     #                  provides strong detail enhancement without causing ringing artifacts.
     # ===============================================================================================
+    #- type: ffloss
+    #  loss_weight: 0.08
+    #  start_iter: 20000             # Activate during perceptual enhancement phase
+    #  target_iter: 40000            # Ramp up for strong microdetail enhancement
+    #  target_weight: 0.18           # More than double for enhanced crispness
+    #  schedule_type: linear         # Smooth transition to avoid artifacts
+
+    #ffloss weight too low at 114,400, so quick adjustments and then resuming training
     - type: ffloss
-      loss_weight: 0.08
-      start_iter: 20000             # Activate during perceptual enhancement phase
-      target_iter: 40000            # Ramp up for strong microdetail enhancement
-      target_weight: 0.18           # More than double for enhanced crispness
-      schedule_type: linear         # Smooth transition to avoid artifacts
+      loss_weight: 0.15           # Increase from 0.08
+      start_iter: 114440          # Start boosting from current point
+      target_iter: 120000         # ~10k quick ramp
+      target_weight: 0.35         # Much higher target for microdetails
+      schedule_type: linear       # Smooth transition to avoid artifacts
+
+    # PS at around 134k iters ff loss is still too low, in my visual inspection this leads to rasterization where there should be high detail texture patterns, because the model doesnt learn fine texture patterns this way, leading to artificial pixel grid appearance on these surfaces. Current ff loss value of 3.21e-05 is too low in my opinion for this. For microtexture refinement i would need higher ffloss values in future runs. Maybe something like this would be more appropriate for future perceptual training runs:
+    #- type: ffloss
+    #  loss_weight: 0.20         # Higher base weight
+    #  start_iter: 0
+    #  target_iter: 20000        # Fast ramp to effectiveness
+    #  target_weight: 0.50       # Much higher target for microdetails
+
 
     # ===============================================================================================
     # 5) GRADIENT VARIANCE LOSS - TEXTURE REGULARITY (EARLY ACTIVATION)
