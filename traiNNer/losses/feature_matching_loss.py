@@ -5,6 +5,7 @@ from typing import Literal
 import torch
 from torch import nn
 
+from traiNNer.utils import get_root_logger
 from traiNNer.utils.registry import LOSS_REGISTRY
 
 
@@ -28,7 +29,7 @@ class FeatureMatchingLoss(nn.Module):
     def __init__(
         self,
         reduction: Literal["mean", "sum"] = "mean",
-        layers: list[int] | None = None,
+        layers: list[int | str] | None = None,
         criterion: Literal["l1", "l2", "charbonnier"] = "l1",
         eps: float = 1e-6,
         **_: dict,
@@ -43,6 +44,7 @@ class FeatureMatchingLoss(nn.Module):
         self.layers = layers
         self.criterion = criterion
         self.eps = eps
+        self.logger = get_root_logger()
 
     def forward(
         self, disc_real_feats: list[torch.Tensor], disc_fake_feats: list[torch.Tensor]
@@ -66,10 +68,37 @@ class FeatureMatchingLoss(nn.Module):
         if self.layers is not None:
             selected_real_feats = []
             selected_fake_feats = []
-            for layer_idx in self.layers:
-                if 0 <= layer_idx < len(disc_real_feats):
+            for layer_ref in self.layers:
+                layer_idx = None
+
+                # Handle string layer names (e.g., 'down1', 'down2', 'mid')
+                if isinstance(layer_ref, str):
+                    # Map string names to indices
+                    layer_map = {
+                        "down1": 1,  # first down block output
+                        "down2": 2,  # second down block output
+                        "mid": -1,  # midpoint/bottleneck
+                    }
+                    layer_idx = layer_map.get(layer_ref)
+                    if layer_idx is None:
+                        self.logger.warning(
+                            f"Unknown layer name '{layer_ref}', ignoring"
+                        )
+                        continue
+
+                # Handle integer indices
+                elif isinstance(layer_ref, int):
+                    layer_idx = layer_ref
+
+                # Check bounds and add to selection
+                if layer_idx is not None and 0 <= layer_idx < len(disc_real_feats):
                     selected_real_feats.append(disc_real_feats[layer_idx])
                     selected_fake_feats.append(disc_fake_feats[layer_idx])
+                elif layer_idx is not None and -len(disc_real_feats) <= layer_idx < 0:
+                    # Handle negative indexing
+                    selected_real_feats.append(disc_real_feats[layer_idx])
+                    selected_fake_feats.append(disc_fake_feats[layer_idx])
+
             disc_real_feats = selected_real_feats
             disc_fake_feats = selected_fake_feats
 
@@ -105,9 +134,9 @@ class FeatureMatchingLoss(nn.Module):
             count += 1
 
         if count == 0:
-            return torch.tensor(0.0, device=disc_real_feats[0].device)
+            device = disc_real_feats[0].device
+            return torch.tensor(0.0, device=device)
 
-        if self.reduction == "mean":
-            return loss / count
-        else:
-            return loss
+        result = loss / count if self.reduction == "mean" else loss
+        device = disc_real_feats[0].device
+        return torch.tensor(result, device=device)

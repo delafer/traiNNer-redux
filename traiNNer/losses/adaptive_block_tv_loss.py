@@ -97,7 +97,7 @@ class AdaptiveBlockTVLoss(nn.Module):
             )
 
         # Normalize
-        norm_diff = diff_map / (diff_map.mean() + self.eps)
+        norm_diff = diff_map / (diff_map.mean() + float(self.eps))
 
         # Convert to a reweighting map:
         # high inconsistency → high weight
@@ -119,7 +119,7 @@ class AdaptiveBlockTVLoss(nn.Module):
         dx = torch.cat([dx, dx_pad], dim=3)
         dy = torch.cat([dy, dy_pad], dim=2)
 
-        tv_map = torch.sqrt(dx * dx + dy * dy + self.eps)
+        tv_map = torch.sqrt(dx * dx + dy * dy + float(self.eps))
 
         # Compute adaptive weights
         weight = self._compute_checkerboard_weight(x)
