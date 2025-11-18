@@ -71,7 +71,7 @@ class AdaptiveBlockTVLoss(nn.Module):
         # reshape into (b, c, h//B, B, w//B, B)
         h, w = x.shape[2], x.shape[3]
         H = (h // B) * B
-        W = (w // B) * W
+        W = (w // B) * B
 
         # Safe crop to multiple of block size
         xc = x[:, :, :H, :W]
