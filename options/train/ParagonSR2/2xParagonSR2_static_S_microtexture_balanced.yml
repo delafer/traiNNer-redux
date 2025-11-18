@@ -222,7 +222,7 @@ train:
     #                  The gradual 75k ramp ensures stable integration of improvements.
     # ===============================================================================================
     - type: ffloss
-      loss_weight: 0.20              # MODERATE initial weight (not extreme)
+      loss_weight: 0.40              # Higher initial weight
       start_iter: 5000               # Gradual start after warmup for stability
       target_iter: 80000            # Very gradual ramp over 75k iterations
       target_weight: 0.55           # AGGRESSIVE but BALANCED target weight

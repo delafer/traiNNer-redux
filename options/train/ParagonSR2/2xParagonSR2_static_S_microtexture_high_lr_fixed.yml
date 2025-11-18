@@ -1,0 +1,155 @@
+# yaml-language-server: $schema=https://raw.githubusercontent.com/the-database/traiNNer-redux/refs/heads/master/schemas/redux-config.schema.json
+name: 2xParagonSR2_S_microtexture_high_lr_stablev2
+scale: 2
+
+use_amp: true
+amp_bf16: true
+use_channels_last: true
+fast_matmul: true
+num_gpu: auto
+
+datasets:
+  train:
+    name: Train_Dataset
+    type: pairedimagedataset
+    dataroot_gt: /home/phips/Documents/dataset/cc0/hr
+    dataroot_lq: /home/phips/Documents/dataset/cc0/lr_x2
+    lq_size: 128
+    use_hflip: true
+    use_rot: true
+    num_worker_per_gpu: 8
+    batch_size_per_gpu: 8
+    accum_iter: 1
+
+  val:
+    name: Val_Dataset
+    type: pairedimagedataset
+    dataroot_gt: /home/phips/Documents/dataset/cc0/val_hr
+    dataroot_lq: /home/phips/Documents/dataset/cc0/val_lr_x2
+
+network_g:
+  type: paragonsr2_static_s
+
+network_d:
+  type: munet
+
+path:
+  pretrain_network_g: experiments/2xParagonSR2_S_static_perceptual_r3_v1/models/net_g_ema_135000.safetensors
+  strict_load_g: true
+  resume_state: ~
+
+train:
+  ema_decay: 0.995
+  ema_power: 0.75
+  grad_clip: true
+
+  optim_g:
+    type: AdamW
+    lr: !!float 1.2e-4     # was 1.5e-4 → slight reduction for stability
+    weight_decay: !!float 1.0e-4
+    betas: [0.9, 0.99]
+
+  optim_d:
+    type: AdamW
+    lr: !!float 1.5e-4     # was 2.0e-4 → discriminator was too dominant
+    weight_decay: !!float 0.0
+    betas: [0.9, 0.99]
+
+  scheduler:
+    type: MultiStepLR
+    milestones: [70000, 110000]
+    gamma: 0.5
+
+  total_iter: 140000
+  warmup_iter: 500
+
+  losses:
+
+    - type: charbonnierloss
+      loss_weight: 0.6
+      start_iter: 0
+      target_iter: 25000     # was 15000 → smoother decay to support stability
+      target_weight: 0.4
+      schedule_type: linear
+
+    - type: convnextperceptualloss
+      loss_weight: 0.16
+      layers: [1, 2]
+      layer_weights: [1.0, 0.7]
+      eps: 1.0e-6
+      start_iter: 0
+      target_iter: 25000
+      target_weight: 0.32
+
+    - type: distsloss
+      loss_weight: 0.10
+      as_loss: true
+      load_weights: true
+      use_input_norm: true
+
+    - type: ffloss
+      loss_weight: 0.40
+      start_iter: 0
+      target_iter: 90000
+      target_weight: 0.55
+      schedule_type: linear
+
+    - type: GradientVarianceLoss
+      loss_weight: 0.05
+      start_iter: 500
+      patch_size: 16
+      criterion: charbonnier
+
+    - type: ldlloss
+      loss_weight: 0.3
+      disable_after: 90000
+
+    # NEW: total variation to suppress micro-speckle and ringing
+    - type: tvloss
+      loss_weight: 0.004    # very low weight → acts as soft regularizer
+      reduction: mean
+      eps: 1e-6
+      start_iter: 0         # active from the beginning
+      # no schedule needed
+
+    - type: ganloss
+      gan_type: r3gan
+      loss_weight: 0.00
+      start_iter: 30000     # was 20000 → slower transition for stability
+      target_weight: 0.08
+      r1_weight: 2.0
+      r2_weight: 2.0
+
+    - type: ContrastiveLoss
+      loss_weight: 0.00
+      temperature: 0.1
+      start_iter: 60000
+      target_weight: 0.05
+
+val:
+  val_enabled: true
+  val_freq: 5000
+  save_img: true
+  metrics_enabled: true
+
+  metrics:
+    psnr:
+      type: calculate_psnr
+      crop_border: 2
+    ssim:
+      type: calculate_ssim
+      crop_border: 2
+    lpips:
+      type: calculate_lpips
+      better: lower
+    dists:
+      type: calculate_dists
+      better: lower
+    topiq:
+      type: calculate_topiq
+
+logger:
+  print_freq: 100
+  save_checkpoint_freq: 5000
+  save_checkpoint_format: safetensors
+  use_tb_logger: true

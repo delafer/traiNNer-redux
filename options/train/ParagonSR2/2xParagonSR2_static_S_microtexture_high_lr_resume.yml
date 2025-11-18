@@ -1,0 +1,291 @@
+# yaml-language-server: $schema=https://raw.githubusercontent.com/the-database/traiNNer-redux/refs/heads/master/schemas/redux-config.schema.json
+# -------------------------------------------------------------------------------------------------
+# ParagonSR2-STATIC-S (High LR Resume) - Maximum Learning Aggression
+# Resume with high learning rate to create meaningful changes from pretrain
+#
+# HIGH LR STRATEGY:
+# Use high learning rate (1.5e-4) to allow model to meaningfully move away
+# from settled pretrain weights after 340k training iterations.
+#
+# MAXIMUM CHANGE APPROACH:
+# - High LR: 1.5e-4 (vs conservative 8e-5)
+# - Immediate high ffloss: 0.40 weight from start
+# - Higher initial LR burst: Brief warmup to "unstick" settled weights
+# - Expected: Visible changes within 5-10k iterations
+#
+# Author: Philip Hofmann
+# High learning rate resume for maximum visual change
+# -------------------------------------------------------------------------------------------------
+
+name: 2xParagonSR2_S_microtexture_high_lr
+scale: 2
+
+# -------------------------------------------------------------------------------------------------
+# PERFORMANCE OPTIMIZATION FLAGS
+# -------------------------------------------------------------------------------------------------
+use_amp: true                          # Enable Automatic Mixed Precision for faster training
+amp_bf16: true                        # Use BF16 for better numerical stability on Ampere+ GPUs
+use_channels_last: true               # Optimize memory layout for better performance
+fast_matmul: true                     # Trade precision for speed in matrix operations
+num_gpu: auto                        # Automatically detect and use available GPUs
+
+# -------------------------------------------------------------------------------------------------
+# DATASET CONFIGURATION
+# -------------------------------------------------------------------------------------------------
+datasets:
+  train:
+    name: Train_Dataset
+    type: pairedimagedataset
+    dataroot_gt: /home/phips/Documents/dataset/cc0/hr
+    dataroot_lq: /home/phips/Documents/dataset/cc0/lr_x2
+    lq_size: 128                      # Input patch size - balanced for memory vs. context
+    use_hflip: true                   # Horizontal flips for data augmentation
+    use_rot: true                     # Rotations for better spatial invariance
+    num_worker_per_gpu: 8             # Parallel data loading
+    batch_size_per_gpu: 8             # Batch size per GPU - tuned for 8GB VRAM
+    accum_iter: 1                     # Gradient accumulation steps
+
+  val:
+    name: Val_Dataset
+    type: pairedimagedataset
+    dataroot_gt: /home/phips/Documents/dataset/cc0/val_hr
+    dataroot_lq: /home/phips/Documents/dataset/cc0/val_lr_x2
+
+# -------------------------------------------------------------------------------------------------
+# NETWORK ARCHITECTURE
+# -------------------------------------------------------------------------------------------------
+network_g:
+  type: paragonsr2_static_s          # S-sized static ParagonSR2 for perceptual training
+
+network_d:
+  type: munet                        # MUNet discriminator for R3GAN
+
+# -------------------------------------------------------------------------------------------------
+# PRETRAINING & RESUME CONFIGURATION
+# -------------------------------------------------------------------------------------------------
+path:
+  pretrain_network_g: experiments/2xParagonSR2_S_perceptual_r3_v1/models/net_g_ema_340000.safetensors # Use current trained perceptual model as pretrain
+  strict_load_g: true                # Load exact weights from perceptual model
+  resume_state: experiments/2xParagonSR2_S_microtexture_balanced/training_states/iter_15000.state # RESUME from 15k iterations
+
+# -------------------------------------------------------------------------------------------------
+# HIGH LEARNING RATE TRAINING OPTIMIZATION
+# -------------------------------------------------------------------------------------------------
+train:
+  ema_decay: 0.995                   # Exponential Moving Average decay for stable training
+  ema_power: 0.75                   # EMA power for momentum calculation
+  grad_clip: true                   # Enable gradient clipping for stability (even more important with high LR)
+
+  # Generator optimizer configuration - HIGH LEARNING RATE
+  optim_g:
+    type: AdamW                      # AdamW for better weight decay handling
+    lr: !!float 1.5e-4              # HIGH learning rate for aggressive change
+    weight_decay: !!float 1.0e-4     # L2 regularization
+    betas: [0.9, 0.99]              # AdamW beta parameters
+
+  # Discriminator optimizer configuration
+  optim_d:
+    type: AdamW
+    lr: !!float 2.0e-4              # Higher discriminator LR to keep up
+    weight_decay: !!float 0.0       # No weight decay on discriminator
+    betas: [0.9, 0.99]
+
+  # Learning rate scheduler - High LR strategy
+  scheduler:
+    type: MultiStepLR
+    milestones: [70000, 110000]      # Aggressive milestones for high LR training
+    gamma: 0.5                       # Reduce LR by 50% at each milestone
+
+  total_iter: 140000                 # Total training iterations (140k) - same as original
+  warmup_iter: 500                   # Shorter warmup with high LR (allow aggressive start)
+
+  # -------------------------------------------------------------------------------------------------
+  # HIGH LR + IMMEDIATE FFLOSS ACTIVATION
+  # -------------------------------------------------------------------------------------------------
+  #
+  # HIGH LR PHILOSOPHY:
+  # Use high learning rate to allow model to meaningfully move away from
+  # settled pretrain weights after 340k training iterations.
+  # Combined with immediate high ffloss for maximum visual change.
+  #
+  # AGGRESSIVE LEARNING STRATEGY:
+  # - High LR: 1.5e-4 (1.9x higher than conservative 8e-5)
+  # - High ffloss: 0.40 weight from start
+  # - Shorter warmup: Allow aggressive learning immediately
+  # - Expected: Visible changes within 5-10k iterations
+  # -------------------------------------------------------------------------------------------------
+  losses:
+
+    # ===============================================================================================
+    # 1) PIXEL LOSS - MODERATE FOR HIGH LR STABILITY
+    # ===============================================================================================
+    - type: charbonnierloss
+      loss_weight: 0.6               # Slightly reduced for high LR + ffloss dominance
+      start_iter: 0                  # Active from start
+      target_iter: 15000            # Quick reduction with high LR
+      target_weight: 0.4             # Further reduced for perceptual focus
+      schedule_type: linear          # Linear transition
+
+    # ===============================================================================================
+    # 2) CONVNEXT PERCEPTUAL LOSS - ENHANCED FOR HIGH LR
+    # ===============================================================================================
+    - type: convnextperceptualloss
+      loss_weight: 0.16              # Increased to complement high LR + ffloss
+      layers: [1, 2]                 # Optimal perceptual layers
+      layer_weights: [1.0, 0.7]      # Balanced layer weighting
+      eps: 1.0e-6                   # Numerical stability
+      start_iter: 0                  # Active from start
+      target_iter: 25000            # Gradual enhancement over longer period
+      target_weight: 0.32           # Enhanced target for high LR stability
+
+    # ===============================================================================================
+    # 3) DISTS LOSS - MAINTAINED FOR HIGH LR BALANCE
+    # ===============================================================================================
+    - type: distsloss
+      loss_weight: 0.10              # Same as before for consistency
+      as_loss: true                  # Direct loss function
+      load_weights: true            # Load pretrained weights
+      use_input_norm: true          # Normalize inputs
+
+    # ===============================================================================================
+    # 4) IMMEDIATE HIGH FFLOSS - MAXIMUM MICROTEXTURE ENHANCEMENT
+    # ===============================================================================================
+    #
+    # PURPOSE: IMMEDIATE maximum ffloss activation with high LR for visible change
+    # RATIONALE: High LR + high ffloss = maximum visual impact from settled pretrain
+    #
+    # SCHEDULE DECISION:
+    # - loss_weight: 0.40 → IMMEDIATE high weight
+    # - start_iter: 0 → IMMEDIATE activation
+    # - target_iter: 90000 → Adjusted for high LR training duration
+    # - target_weight: 0.55 → Same optimal target
+    # - schedule_type: linear → Gradual enhancement
+    #
+    # EXPECTED RESULTS:
+    # - High LR + high ffloss should produce visible changes within 5-10k iterations
+    # - Model should meaningfully move away from pretrain appearance
+    # - Texture quality should improve significantly
+    #
+    # WHY THIS MATTERS: High learning rate should allow the model to actually
+    #                  change meaningfully from the settled pretrain weights,
+    #                  while high ffloss provides the microtexture enhancement
+    #                  needed to fix artificial grid patterns.
+    # ===============================================================================================
+    - type: ffloss
+      loss_weight: 0.40              # IMMEDIATE high weight
+      start_iter: 0                  # IMMEDIATE activation
+      target_iter: 90000            # Adjusted for high LR training
+      target_weight: 0.55           # Same optimal target
+      schedule_type: linear         # Gradual enhancement
+
+    # ===============================================================================================
+    # 5) GRADIENT VARIANCE LOSS - INCREASED FOR HIGH LR STABILITY
+    # ===============================================================================================
+    - type: GradientVarianceLoss
+      loss_weight: 0.05              # Increased for high LR stability
+      start_iter: 500                # Early activation for texture stability
+      patch_size: 16                # Optimal patch size for detail analysis
+      criterion: charbonnier        # Robust texture analysis
+
+    # ===============================================================================================
+    # 6) LDL LOSS - ADJUSTED FOR HIGH LR TRAINING
+    # ===============================================================================================
+    - type: ldlloss
+      loss_weight: 0.3               # Reduced for high LR + ffloss dominance
+      disable_after: 90000          # Adjusted for high LR training
+
+    # ===============================================================================================
+    # 7) R3GAN LOSS - EARLIER ACTIVATION WITH HIGH LR
+    # ===============================================================================================
+    - type: ganloss
+      gan_type: r3gan
+      loss_loss: 0.00
+      start_iter: 20000             # Earlier activation with high LR
+      target_weight: 0.08           # Standard adversarial enhancement
+      r1_weight: 2.0               # Strong regularization
+      r2_weight: 2.0               # Balanced training
+
+    # ===============================================================================================
+    # 8) CONTRASTIVE LOSS - LATE ACTIVATION
+    # ===============================================================================================
+    - type: ContrastiveLoss
+      loss_weight: 0.00
+      temperature: 0.1              # Sharp contrastive features
+      start_iter: 60000             # Late activation
+      target_weight: 0.05           # Standard weight for enhancement
+
+# -------------------------------------------------------------------------------------------------
+# VALIDATION CONFIGURATION
+# -------------------------------------------------------------------------------------------------
+val:
+  val_enabled: true                 # Enable validation during training
+  val_freq: 5000                   # Validate every 5k iterations
+  save_img: true                   # Save validation images for progress monitoring
+  metrics_enabled: true            # Enable automatic metric calculation
+
+  # Comprehensive metric suite for quality assessment
+  metrics:
+    psnr:                          # Peak Signal-to-Noise Ratio (fidelity metric)
+      type: calculate_psnr
+      crop_border: 2               # Standard crop for fair comparison
+
+    ssim:                          # Structural Similarity Index (structural quality)
+      type: calculate_ssim
+      crop_border: 2
+
+    lpips:                         # Learned Perceptual Image Patch Similarity (perceptual quality)
+      type: calculate_lpips
+      better: lower               # Lower LPIPS = better perceptual quality
+
+    dists:                         # Deep Image Structure and Texture Similarity
+      type: calculate_dists
+      better: lower
+
+    topiq:                         # Task-Oriented Perceptual Image Quality
+      type: calculate_topiq
+
+# -------------------------------------------------------------------------------------------------
+# LOGGING CONFIGURATION
+# -------------------------------------------------------------------------------------------------
+logger:
+  print_freq: 100                  # Print training progress every 100 iterations
+  save_checkpoint_freq: 5000       # Save model checkpoints every 5k iterations
+  save_checkpoint_format: safetensors # Use SafeTensors format for better compatibility
+  use_tb_logger: true              # Enable TensorBoard logging for detailed monitoring
+
+# -------------------------------------------------------------------------------------------------
+# HIGH LEARNING RATE EXPECTATIONS & MONITORING
+# -------------------------------------------------------------------------------------------------
+#
+# HIGH LR SUCCESS INDICATORS:
+# - Visible changes: Should see differences from pretrain within 5-10k iterations
+# - ffloss effectiveness: Should contribute meaningfully to loss balance
+# - Stable training: High LR should remain stable with proper monitoring
+# - Visual improvement: Texture quality should improve significantly
+#
+# EXPECTED VISUAL PROGRESSION:
+# - 5k iterations: Beginning to see differences from pretrain
+# - 10k iterations: Clear visual differences, improved textures
+# - 20k iterations: Significant improvement in microtexture quality
+# - 40k iterations: Mature high LR trained model with enhanced quality
+#
+# CRITICAL MONITORING:
+# - grad_norm_g: Watch for spikes (may need grad_clip adjustments)
+# - ffloss contribution: Should be significant with high LR
+# - Visual comparison: Regular comparison with pretrain outputs
+# - Training stability: Monitor for any instability from high LR
+#
+# HIGH LR ADVANTAGES:
+# - Faster convergence: Model can change more quickly from settled weights
+# - Better microtexture: High ffloss + high LR should improve fine details
+# - More distinct outputs: Meaningful differences from pretrain appearance
+# - Enhanced learning: Model can "unstick" from local minima
+#
+# TROUBLESHOOTING:
+# - If unstable: Reduce LR slightly (1.2e-4) or increase grad_clip
+# - If no change: LR might still be too low for this model/dataset
+# - If over-changing: Monitor visual quality and adjust if needed
+#
+# This high LR configuration should provide the aggressive learning needed
+# to create meaningful visual changes from the settled pretrain model.
+# -------------------------------------------------------------------------------------------------
