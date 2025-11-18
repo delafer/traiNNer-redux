@@ -104,27 +104,45 @@ train:
       loss_weight: 0.3
       disable_after: 90000
 
-    # NEW: total variation to suppress micro-speckle and ringing
-    - type: tvloss
-      loss_weight: 0.004    # very low weight → acts as soft regularizer
+    # HFEN - local high-frequency fidelity (small weight)
+    - type: hfenloss
+      loss_weight: 0.015        # start small (0.01-0.03 typical)
+      kernel_size: 7
+      sigma: 1.0
+      criterion: charbonnier
+      reduction: mean
+      start_iter: 0
+
+    # Adaptive, block-aware TV (replace previous tvloss)
+    - type: AdaptiveBlockTVLoss
+      loss_weight: 0.004       # as suggested earlier
+      block_size: 2
+      sharpness: 4.0
       reduction: mean
       eps: 1e-6
-      start_iter: 0         # active from the beginning
-      # no schedule needed
+      start_iter: 0
 
     - type: ganloss
       gan_type: r3gan
       loss_weight: 0.00
-      start_iter: 30000     # was 20000 → slower transition for stability
-      target_weight: 0.08
+      start_iter: 30000
+      target_weight: 0.06
       r1_weight: 2.0
       r2_weight: 2.0
+      schedule_type: linear
+      target_iter: 45000
 
     - type: ContrastiveLoss
       loss_weight: 0.00
       temperature: 0.1
       start_iter: 60000
       target_weight: 0.05
+
+    - type: featurematchingloss
+      loss_weight: 0.10     # strong stabilizer; reduces spotty hallucination
+      layers: [ 'down1', 'down2', 'mid' ]  # framework-dependent
+      criterion: charbonnier
+      start_iter: 0
 
 val:
   val_enabled: true

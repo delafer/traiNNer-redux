@@ -23,6 +23,7 @@ from traiNNer.archs.arch_info import ARCHS_WITHOUT_FP16
 from traiNNer.data.base_dataset import BaseDataset
 from traiNNer.losses import build_loss
 from traiNNer.losses.contrastive_loss import ContrastiveLoss
+from traiNNer.losses.feature_matching_loss import FeatureMatchingLoss
 from traiNNer.losses.r3gan_loss import R3GANLoss
 from traiNNer.metrics import calculate_metric
 from traiNNer.models.base_model import BaseModel
@@ -494,6 +495,22 @@ class SRModel(BaseModel):
                             l_g_loss = loss(self.output, output_ema, target)
                     elif isinstance(loss, ContrastiveLoss):
                         l_g_loss = loss(self.output, target, self.lq)
+                    elif isinstance(loss, FeatureMatchingLoss):
+                        # Feature matching loss requires discriminator features
+                        assert self.net_d is not None, (
+                            "FeatureMatchingLoss requires discriminator"
+                        )
+
+                        # Extract features from real images
+                        _real_pred, real_feats = self.net_d.forward_with_features(
+                            self.gt
+                        )
+                        # Extract features from fake images
+                        _fake_pred, fake_feats = self.net_d.forward_with_features(
+                            self.output
+                        )
+
+                        l_g_loss = loss(real_feats, fake_feats)
                     # Check if loss is wrapped with IterativeLossWrapper for general losses
                     elif hasattr(loss, "forward") and hasattr(loss, "loss_module"):
                         # This is an IterativeLossWrapper, pass current_iter

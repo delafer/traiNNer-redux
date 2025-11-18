@@ -123,10 +123,12 @@ train:
     #               texture-focused replacement.
     - type: dinoperceptualloss
       loss_weight: 0.18
-      model_name: vit_small_patch14_dinov2.lvd142m
-      layers: ["block3", "block6", "block9"]
-      layer_weights: [1.0, 0.7, 0.5]
+      model_name: vit_small_patch16_dinov3
+      layers: ["last"]  # Use final feature map (most compatible)
+      layer_weights: [1.0]
       use_charbonnier: true
+      flexible_resize: true
+
 
     # 3) Artifact Suppression via Local Discriminative Loss (LDL)
     # DIFFERENCE TO DEFAULT: Default often leaves this disabled (loss_weight: 0).
