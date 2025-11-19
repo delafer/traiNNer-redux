@@ -213,7 +213,7 @@ train:
       loss_weight: 0.5     # OPTIMIZED: Reduced from 0.6
       start_iter: 0
       target_iter: 25000   # Gradually reduce over 25k iterations
-      target_weight: 0.35  # OPTIMIZED: Reduced final weight
+      target_weight: 0.32  # OPTIMIZED: Reduced final weight
       schedule_type: linear
 
     # DISTS Loss - Deep structural similarity
@@ -230,10 +230,10 @@ train:
     # Feature Matching - NEW! Multi-branch discriminator guidance
     # OPTIMIZED: Increased weight for better stabilization
     - type: featurematchingloss
-      loss_weight: 0.15    # OPTIMIZED: Increased from 0.10 for better stabilization
+      loss_weight: 0.20
       start_iter: 0        # Immediate activation for stability
       target_iter: 0
-      target_weight: 0.15
+      target_weight: 0.20
       layers: [ 'down1', 'down2', 'mid' ]  # Key MUNet layers
       criterion: charbonnier
 
@@ -247,17 +247,17 @@ train:
       loss_weight: 0.18    # OPTIMIZED: Increased from 0.16
       start_iter: 5000     # PHASE 2: Wait 5k iterations
       target_iter: 25000
-      target_weight: 0.35  # OPTIMIZED: Increased final weight
+      target_weight: 0.37
       layers: [1, 2]       # Use layers 1 and 2 from ConvNeXt
       layer_weights: [1.0, 0.7]  # Weight for each layer
       eps: 1.0e-6
 
     # HFEN Loss - High-frequency edge preservation
     - type: hfenloss
-      loss_weight: 0.015
+      loss_weight: 0.012
       start_iter: 5000     # PHASE 2: Start with perceptual losses
       target_iter: 5000
-      target_weight: 0.015
+      target_weight: 0.012
       kernel_size: 7
       sigma: 1.0
       criterion: charbonnier
@@ -270,10 +270,10 @@ train:
     # FF Loss - Frequency feature preservation
     # OPTIMIZED: Slightly reduced weight for better balance
     - type: ffloss
-      loss_weight: 0.38    # OPTIMIZED: Reduced from 0.40
+      loss_weight: 0.38
       start_iter: 10000    # PHASE 3: Start after perceptual foundation
       target_iter: 90000
-      target_weight: 0.52  # OPTIMIZED: Slightly reduced final weight
+      target_weight: 0.56
       schedule_type: linear
 
     # Gradient Variance Loss - Microtexture preservation
@@ -288,10 +288,10 @@ train:
     # Adaptive Block TV - Artifact reduction
     # OPTIMIZED: Slightly increased weight for better artifact control
     - type: AdaptiveBlockTVLoss
-      loss_weight: 0.006   # OPTIMIZED: Increased from 0.004
+      loss_weight: 0.005   # OPTIMIZED: Increased from 0.004
       start_iter: 10000    # PHASE 3: Start with frequency losses
       target_iter: 10000
-      target_weight: 0.006
+      target_weight: 0.005
       block_size: 2
       sharpness: 4.0
       reduction: mean
@@ -308,7 +308,7 @@ train:
       start_iter: 15000    # PHASE 4: Gradual introduction
       target_iter: 30000   # Reach full strength over 15k iterations
       target_weight: 0.25  # Smooth ramp-up instead of instant
-      disable_after: 90000
+      disable_after: 100000
 
     # =============================================================================
     # PHASE 5: ADVERSARIAL TRAINING (30k+ iterations) - Photorealism
