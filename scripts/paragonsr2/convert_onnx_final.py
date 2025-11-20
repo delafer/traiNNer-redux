@@ -146,8 +146,8 @@ class SmartCalibrationDataReader(CalibrationDataReader):
             f"📊 Calibration setup: {len(self.images)} images available, using {num_samples} samples"
         )
 
-    def get_data(self):
-        """Get calibration data with retry logic."""
+    def get_next(self):
+        """Get next calibration data point."""
         if self.index >= self.num_samples:
             return None
 
@@ -162,7 +162,7 @@ class SmartCalibrationDataReader(CalibrationDataReader):
             return {self.input_name: arr}
         except Exception as e:
             print(f"⚠️  Warning: Failed to load image {img_path.name}: {e}")
-            return self.get_data()  # Retry with next image
+            return self.get_next()  # Retry with next image
 
 
 def load_model_from_checkpoint(
