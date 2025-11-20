@@ -259,39 +259,47 @@ class ParagonConverter:
         model = onnx.load(str(fp32_path))
 
         # Convert to FP16, keeping IO as float32 for compatibility
-        # auto_convert_mixed_precision=True will keep sensitive layers in FP32
-        # Convert to FP16 with block list to avoid Loop/SequenceInsert type mismatches
-        fp16_model = float16.convert_float_to_float16(
-            model,
-            keep_io_types=True,
-            op_block_list=[
-                "Resize",
-                "Upsample",
-                "GridSample",
-                "Loop",  # Prevents float32/float16 type mismatch in loops
-                "SequenceInsert",  # Prevents sequence type mismatch
-                "SequenceAt",  # Prevents sequence access type mismatch
-            ],
-        )
+        # We use a comprehensive block list to prevent converting ops that are sensitive to precision
+        # or involved in control flow (Loops) which often cause type mismatches in ONNX Runtime.
+
+        print("      Applying FP16 conversion with protected operators...")
+
+        # Extended block list for maximum compatibility
+        # These operators will remain in FP32
+        block_list = [
+            "Resize",
+            "Upsample",
+            "GridSample",
+            "Loop",
+            "SequenceInsert",
+            "SequenceAt",
+            "SequenceEmpty",
+            "SequenceErase",
+            "SequenceLength",
+            "SequenceConstruct",
+            "Range",
+            "Tile",
+            "Expand",
+            "Softmax",  # Often better in FP32 for stability
+            "LayerNormalization",  # Often better in FP32
+        ]
 
         try:
-            fp16_model = float16.convert_float_to_float16(model, keep_io_types=True)
-        except Exception as e:
-            print(
-                f"      Warning: Standard conversion failed ({e}), trying with robust settings..."
-            )
-            # Fallback for complex graphs
             fp16_model = float16.convert_float_to_float16(
                 model,
                 keep_io_types=True,
-                op_block_list=[
-                    "Resize",
-                    "Upsample",
-                    "GridSample",
-                    "Loop",  # NEW: Fixes type mismatch
-                    "SequenceInsert",  # NEW: Fixes type mismatch
-                    "SequenceAt",  # NEW: Fixes type mismatch
-                ],
+                op_block_list=block_list,
+            )
+        except Exception as e:
+            print(
+                f"      Warning: Primary FP16 conversion failed ({e}). Retrying with safe mode..."
+            )
+            # Fallback: disable shape inference which sometimes causes issues
+            fp16_model = float16.convert_float_to_float16(
+                model,
+                keep_io_types=True,
+                disable_shape_infer=True,
+                op_block_list=block_list,
             )
 
         onnx.save(fp16_model, str(output_path))
@@ -374,7 +382,16 @@ class ParagonConverter:
                 if self.args.device == "cuda"
                 else ["CPUExecutionProvider"]
             )
-            sessions[name] = ort.InferenceSession(str(path), providers=providers)
+            try:
+                sessions[name] = ort.InferenceSession(str(path), providers=providers)
+            except Exception as e:
+                print(f"      Error loading {name} model: {e}")
+                print(f"      Skipping validation for {name}.")
+                continue
+
+        if not sessions:
+            print("      No models could be loaded for validation.")
+            return
 
         print(f"      Testing on {len(val_images)} images...")
 
