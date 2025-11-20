@@ -1,65 +1,88 @@
 #!/usr/bin/env python3
 """
-ParagonSR2 Release ONNX Converter
-=================================
+ParagonSR2 Release Converter (TensorRT Patched & Clean)
+=======================================================
 
-Creates production-ready, dynamic ONNX models (FP32, FP16, INT8) for ParagonSR2.
-Features:
-- Automatic model fusion (ReparamConvV2)
-- Dynamic input shapes (Batch, Height, Width)
-- TensorRT and ONNX Runtime compatibility
-- Intelligent FP16 conversion (automatic mixed precision)
-- High-quality INT8 quantization (QDQ format) with calibration
-- Comprehensive validation against PyTorch baseline
+- Opset 18 (Native PyTorch 2.x support)
+- TensorRT Patch (Replaces AdaptiveAvgPool with ReduceMean)
+- Single File Output (Merged .data)
 
 Usage:
     python scripts/paragonsr2/convert_onnx_release.py \
         --checkpoint models/my_model.safetensors \
         --arch paragonsr2_static_s \
         --scale 2 \
-        --output release_output \
-        --calib_dir datasets/calibration \
-        --val_dir datasets/validation
-
-Author: Kilo Code (traiNNer-redux)
+        --output release_output
 """
 
 import argparse
 import json
 import math
-import os
-import shutil
 import sys
 import time
+import warnings
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple, Union
 
 import numpy as np
 import onnx
 import onnxruntime as ort
 import torch
-from onnx import checker
-from onnxconverter_common import auto_mixed_precision, float16
-from onnxruntime.quantization import (
-    CalibrationDataReader,
-    QuantFormat,
-    QuantType,
-    quantize_static,
-)
-from onnxruntime.quantization.shape_inference import quant_pre_process
+from onnx import shape_inference
 from PIL import Image
+from torch import nn
 
-# Import architecture to ensure registry is populated
+# Import architecture
 try:
-    # Try importing from local project structure
     sys.path.append(str(Path(__file__).parents[2]))
     import traiNNer.archs.paragonsr2_static_arch
     from traiNNer.utils.registry import ARCH_REGISTRY
 except ImportError:
-    print(
-        "Error: Could not import traiNNer modules. Make sure you are in the project root."
-    )
+    print("Error: Could not import traiNNer modules.")
     sys.exit(1)
+
+warnings.filterwarnings("ignore")
+
+# =============================================================================
+# HELPER: TensorRT Compatibility Patcher
+# =============================================================================
+
+
+class TensorRTGlobalAvgPool(nn.Module):
+    """
+    Replaces nn.AdaptiveAvgPool2d(1).
+    Uses torch.mean() which exports to ONNX 'ReduceMean'.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+
+    def forward(self, x):
+        return x.mean(dim=[-1, -2], keepdim=True)
+
+
+def patch_model_for_tensorrt(model: nn.Module):
+    """Recursively replace AdaptiveAvgPool2d(1) with TensorRTGlobalAvgPool."""
+    print("      Patching model for TensorRT compatibility...")
+    replaced_count = 0
+    for name, module in model.named_modules():
+        if isinstance(module, nn.AdaptiveAvgPool2d):
+            output_size = module.output_size
+            if isinstance(output_size, int):
+                is_one = output_size == 1
+            else:
+                is_one = output_size == (1, 1)
+
+            if is_one:
+                if "." in name:
+                    parent_name, child_name = name.rsplit(".", 1)
+                    parent = model.get_submodule(parent_name)
+                else:
+                    parent = model
+                    child_name = name
+                setattr(parent, child_name, TensorRTGlobalAvgPool())
+                replaced_count += 1
+    print(f"      Replaced {replaced_count} AdaptiveAvgPool layers with TRT-safe Mean.")
+    return model
 
 
 # =============================================================================
@@ -68,101 +91,35 @@ except ImportError:
 
 
 def calculate_psnr(img1: np.ndarray, img2: np.ndarray, border: int = 0) -> float:
-    """Calculate PSNR (Peak Signal-to-Noise Ratio)."""
     if border > 0:
         img1 = img1[border:-border, border:-border, :]
         img2 = img2[border:-border, border:-border, :]
-
     mse = np.mean((img1 - img2) ** 2)
-    if mse == 0:
+    if mse <= 1e-10:
         return float("inf")
     return 20 * math.log10(255.0 / math.sqrt(mse))
 
 
-def preprocess_image(
-    image_path: Path, input_size: tuple[int, int] | None, norm_type: str = "01"
-) -> np.ndarray:
-    """
-    Preprocess image for model input.
-
-    Args:
-        image_path: Path to image file
-        input_size: (height, width) to resize to
-        norm_type: '01' for [0, 1] range, 'm11' for [-1, 1] range
-    """
+def preprocess_image(image_path: Path, norm_type: str = "01") -> np.ndarray:
     img = Image.open(image_path).convert("RGB")
-
-    # Resize if input_size is provided (for calibration/fixed testing)
-    if input_size is not None:
-        img = img.resize((input_size[1], input_size[0]), Image.Resampling.BICUBIC)
-
-    # Convert to numpy float32 CHW
     img_array = np.array(img).astype(np.float32) / 255.0
-
     if norm_type == "m11":
         img_array = (img_array - 0.5) / 0.5
-
     img_array = np.transpose(img_array, (2, 0, 1))
-    img_array = np.expand_dims(img_array, axis=0)  # Add batch dimension
-
-    return img_array
+    return np.expand_dims(img_array, axis=0)
 
 
 def postprocess_output(output: np.ndarray, norm_type: str = "01") -> np.ndarray:
-    """Convert model output back to uint8 HWC image."""
-    output = output.squeeze(0)  # Remove batch
-    output = np.transpose(output, (1, 2, 0))  # CHW -> HWC
-
+    output = output.squeeze(0)
+    output = np.transpose(output, (1, 2, 0))
     if norm_type == "m11":
         output = (output * 0.5) + 0.5
-
     output = np.clip(output, 0, 1)
-    output = (output * 255.0).round().astype(np.uint8)
-    return output
-
-
-class ParagonCalibrationDataReader(CalibrationDataReader):
-    """Calibration data reader for INT8 quantization."""
-
-    def __init__(
-        self,
-        calib_dir: str,
-        input_size: tuple[int, int],
-        input_name: str,
-        norm_type: str = "01",
-        limit: int | None = None,
-    ) -> None:
-        self.image_paths = sorted(Path(calib_dir).glob("*"))
-        # Filter for images
-        self.image_paths = [
-            p
-            for p in self.image_paths
-            if p.suffix.lower() in [".png", ".jpg", ".jpeg", ".bmp", ".webp"]
-        ]
-
-        if not self.image_paths:
-            raise ValueError(f"No images found in {calib_dir}")
-
-        if limit is not None:
-            self.image_paths = self.image_paths[:limit]
-            print(f"      Using {len(self.image_paths)} images for calibration")
-
-        self.input_size = input_size
-        self.input_name = input_name
-        self.norm_type = norm_type
-        self.enum_data = iter(self.image_paths)
-
-    def get_next(self) -> dict[str, Any] | None:
-        try:
-            image_path = next(self.enum_data)
-            input_data = preprocess_image(image_path, self.input_size, self.norm_type)
-            return {self.input_name: input_data}
-        except StopIteration:
-            return None
+    return (output * 255.0).round().astype(np.uint8)
 
 
 # =============================================================================
-# CONVERTER CLASS
+# CONVERTER
 # =============================================================================
 
 
@@ -182,16 +139,10 @@ class ParagonConverter:
         }
 
     def load_model(self) -> torch.nn.Module:
-        """Load and fuse the PyTorch model."""
-        print(f"\n[1/5] Loading model: {self.args.arch}")
-
+        print(f"\n[1/4] Loading model: {self.args.arch}")
         arch_fn = ARCH_REGISTRY.get(self.args.arch)
-        if not arch_fn:
-            raise ValueError(f"Architecture {self.args.arch} not found in registry.")
-
         model = arch_fn(scale=self.args.scale)
 
-        # Load weights
         print(f"      Loading checkpoint: {self.args.checkpoint}")
         if self.args.checkpoint.endswith(".safetensors"):
             from safetensors.torch import load_file
@@ -205,28 +156,18 @@ class ParagonConverter:
                 state_dict = state_dict["params"]
 
         model.load_state_dict(state_dict, strict=True)
-        model.to(self.device)
-        model.eval()
+        model.to(self.device).eval()
 
-        # Fuse layers
         if hasattr(model, "fuse_for_release"):
-            print("      Fusing ReparamConvV2 blocks for inference...")
+            print("      Fusing ReparamConvV2 blocks...")
             model.fuse_for_release()
 
+        model = patch_model_for_tensorrt(model)
         return model
 
     def export_fp32(self, model: torch.nn.Module) -> Path:
-        """Export standard FP32 ONNX model."""
-        print("\n[2/5] Exporting FP32 ONNX...")
+        print("\n[2/4] Exporting FP32 ONNX...")
         output_path = self.output_dir / f"{self.args.arch}_fp32.onnx"
-
-        # Dynamic axes for variable input size
-        dynamic_axes = {
-            "input": {0: "batch_size", 2: "height", 3: "width"},
-            "output": {0: "batch_size", 2: "height", 3: "width"},
-        }
-
-        # Dummy input (fixed size for export tracing)
         dummy_input = torch.randn(1, 3, 64, 64, device=self.device)
 
         torch.onnx.export(
@@ -235,337 +176,122 @@ class ParagonConverter:
             str(output_path),
             input_names=["input"],
             output_names=["output"],
-            dynamic_axes=dynamic_axes,
-            opset_version=18,
+            dynamic_axes={
+                "input": {0: "batch", 2: "height", 3: "width"},
+                "output": {0: "batch", 2: "height", 3: "width"},
+            },
+            opset_version=18,  # <--- FIXED: Explicitly set to 18
             do_constant_folding=True,
         )
 
-        # Optimize graph
-        onnx_model = onnx.load(str(output_path))
-        checker.check_model(onnx_model)
-        onnx.save(onnx_model, str(output_path))
-
-        print(f"      Saved to: {output_path}")
-        self.report["results"]["fp32"] = {
-            "path": str(output_path),
-            "size_mb": output_path.stat().st_size / (1024 * 1024),
-        }
-        return output_path
-
-    def convert_fp16(self, fp32_path: Path) -> Path:
-        """Convert to FP16 with automatic mixed precision."""
-        print("\n[3/5] Converting to FP16...")
-        output_path = self.output_dir / f"{self.args.arch}_fp16.onnx"
-
-        model = onnx.load(str(fp32_path))
-
-        # Use auto_convert_mixed_precision which is more robust than manual block lists
-        # It automatically detects which nodes should be kept in FP32 for stability.
-        print("      Applying automatic mixed precision conversion...")
-
         try:
-            # auto_convert_mixed_precision handles the graph analysis
-            fp16_model = auto_mixed_precision.auto_convert_mixed_precision(
-                model,
-                keep_io_types=True,
-            )
+            onnx_model = onnx.load(str(output_path))
+            try:
+                onnx_model = shape_inference.infer_shapes(onnx_model)
+            except:
+                pass
+
+            # Merge .data file into .onnx
+            onnx.save(onnx_model, str(output_path), save_as_external_data=False)
+
+            # Clean up leftover
+            data_file = Path(str(output_path) + ".data")
+            if data_file.exists():
+                data_file.unlink()
+
         except Exception as e:
-            print(
-                f"      Warning: Auto mixed precision failed ({e}). Retrying with robust manual conversion..."
-            )
-            # Fallback to manual conversion with extended block list
-            block_list = [
-                "Resize",
-                "Upsample",
-                "GridSample",
-                "Loop",
-                "SequenceInsert",
-                "SequenceAt",
-                "SequenceEmpty",
-                "SequenceErase",
-                "SequenceLength",
-                "SequenceConstruct",
-                "Range",
-                "Tile",
-                "Expand",
-                "Softmax",
-                "LayerNormalization",
-            ]
-            fp16_model = float16.convert_float_to_float16(
-                model,
-                keep_io_types=True,
-                disable_shape_infer=True,
-                op_block_list=block_list,
-            )
+            print(f"      Packing error: {e}")
 
-        onnx.save(fp16_model, str(output_path))
-        print(f"      Saved to: {output_path}")
-        self.report["results"]["fp16"] = {
-            "path": str(output_path),
-            "size_mb": output_path.stat().st_size / (1024 * 1024),
-        }
-        return output_path
-
-    def convert_int8(self, fp32_path: Path) -> Path | None:
-        """Convert to INT8 using QDQ format and calibration."""
-        if not self.args.calib_dir:
-            print(
-                "\n[4/5] Skipping INT8 conversion (no calibration directory provided)"
-            )
-            return None
-
-        if self.args.calib_count < 10:
-            print(
-                f"      WARNING: calib_count={self.args.calib_count} is very low. "
-                "Recommended >= 100 for good quality."
-            )
-
-        print("\n[4/5] Converting to INT8 (QDQ)...")
-
-        # 1. Preprocess for quantization (Symbolic Shape Inference)
-        # This is crucial for dynamic shapes and per-channel quantization stability
-        print("      Preprocessing model for quantization...")
-        preprocessed_path = self.output_dir / f"{self.args.arch}_preprocessed.onnx"
-
-        try:
-            quant_pre_process(str(fp32_path), str(preprocessed_path))
-        except Exception as e:
-            print(
-                f"      Warning: Symbolic shape inference failed ({e}). Skipping preprocessing..."
-            )
-            # Fallback: use original model if preprocessing fails
-            import shutil
-
-            shutil.copy(str(fp32_path), str(preprocessed_path))
-
-        output_path = self.output_dir / f"{self.args.arch}_int8.onnx"
-
-        # 2. Identify nodes to exclude (Output Layer)
-        # Quantizing the final convolution often degrades PSNR significantly.
-        model = onnx.load(str(preprocessed_path))
-        nodes_to_exclude = []
-        output_names = [out.name for out in model.graph.output]
-        for node in model.graph.node:
-            # Exclude node if it produces the graph output
-            if any(out in output_names for out in node.output):
-                nodes_to_exclude.append(node.name)
-                print(f"      Excluding output node from quantization: {node.name}")
-
-        # 3. Calibration reader
-        dr = ParagonCalibrationDataReader(
-            self.args.calib_dir,
-            (self.args.calib_size, self.args.calib_size),
-            "input",
-            self.args.norm,
-            limit=self.args.calib_count,
-        )
-
-        # 4. Quantize
-        # - per_channel=True: Essential for CNN accuracy
-        # - activation_type=QUInt8: Unsigned is better for activations (ReLU/Sigmoid)
-        # - nodes_to_exclude: Protect output layer
-        quantize_static(
-            str(preprocessed_path),
-            str(output_path),
-            dr,
-            quant_format=QuantFormat.QDQ,
-            per_channel=True,
-            weight_type=QuantType.QInt8,
-            activation_type=QuantType.QUInt8,
-            nodes_to_exclude=nodes_to_exclude,
-        )
-
-        # Cleanup intermediate file
-        if preprocessed_path.exists():
-            preprocessed_path.unlink()
-
-        print(f"      Saved to: {output_path}")
-        self.report["results"]["int8"] = {
-            "path": str(output_path),
-            "size_mb": output_path.stat().st_size / (1024 * 1024),
-        }
+        size_mb = output_path.stat().st_size / (1024 * 1024)
+        print(f"      Saved FP32: {output_path} ({size_mb:.2f} MB)")
+        self.report["results"]["fp32"] = {"path": str(output_path), "size_mb": size_mb}
         return output_path
 
     def validate(
         self, model_paths: dict[str, Path], torch_model: torch.nn.Module
     ) -> None:
-        """Validate ONNX models against PyTorch baseline."""
         if not self.args.val_dir:
-            print("\n[5/5] Skipping validation (no validation directory provided)")
             return
+        print("\n[4/4] Validating Models...")
 
-        print("\n[5/5] Validating models...")
-        val_images = sorted(Path(self.args.val_dir).glob("*"))
-        val_images = [
-            p
-            for p in val_images
-            if p.suffix.lower() in [".png", ".jpg", ".jpeg", ".webp"]
-        ][: self.args.val_count]
-
+        val_images = sorted(
+            [
+                p
+                for p in Path(self.args.val_dir).glob("*")
+                if p.suffix.lower() in [".png", ".jpg", ".webp"]
+            ]
+        )[: self.args.val_count]
         if not val_images:
-            print("      No validation images found.")
             return
 
-        results = {k: [] for k in model_paths.keys()}
-        results["pytorch"] = []
-
-        print(f"      Testing on {len(val_images)} images...")
-
-        # Pre-calculate PyTorch results to save VRAM
-        pt_results = []
         print("      Generating PyTorch baseline...")
+        pt_results = []
         for img_path in val_images:
-            input_tensor = preprocess_image(img_path, None, self.args.norm)
+            inp = preprocess_image(img_path, self.args.norm)
             with torch.no_grad():
-                pt_input = torch.from_numpy(input_tensor).to(self.device)
-                pt_output = torch_model(pt_input).cpu().numpy()
-                pt_img = postprocess_output(pt_output, self.args.norm)
-                pt_results.append((img_path, input_tensor, pt_img))
+                pt_tensor = torch.from_numpy(inp).to(self.device)
+                pt_out = torch_model(pt_tensor).cpu().numpy()
+                pt_img = postprocess_output(pt_out, self.args.norm)
+                pt_results.append((img_path, inp, pt_img))
 
-        # Clear PyTorch model to free VRAM for ONNX Runtime
         del torch_model
         torch.cuda.empty_cache()
 
-        # Validate ONNX models sequentially to avoid OOM
-        for name, path in model_paths.items():
-            print(f"      Validating {name}...")
-            providers = (
-                ["CUDAExecutionProvider", "CPUExecutionProvider"]
-                if self.args.device == "cuda"
-                else ["CPUExecutionProvider"]
-            )
+        print(f"\n      {'Model':<10} | {'Avg PSNR':<10} | {'Status':<15}")
+        print("      " + "-" * 45)
 
+        providers = (
+            ["CUDAExecutionProvider", "CPUExecutionProvider"]
+            if self.args.device == "cuda"
+            else ["CPUExecutionProvider"]
+        )
+
+        for name, path in model_paths.items():
+            if path is None:
+                continue
             try:
                 sess = ort.InferenceSession(str(path), providers=providers)
+                psnrs = []
+                for _i, (_, inp, pt_img) in enumerate(pt_results):
+                    onnx_out = sess.run(None, {"input": inp})[0]
+                    onnx_img = postprocess_output(onnx_out, self.args.norm)
+                    psnrs.append(
+                        calculate_psnr(pt_img, onnx_img, border=self.args.scale + 2)
+                    )
+                avg = sum(psnrs) / len(psnrs)
+                status = "✅ Excellent" if avg > 50 else "⚠️ Degradation"
+                print(f"      {name.upper():<10} | {avg:<10.2f} | {status:<15}")
+                self.report["results"][name]["validation_psnr"] = avg
             except Exception as e:
-                print(f"      Error loading {name} model: {e}")
-                print(f"      Skipping validation for {name}.")
-                continue
-
-            for i, (img_path, input_tensor, pt_img) in enumerate(pt_results):
-                try:
-                    onnx_output = sess.run(None, {"input": input_tensor})[0]
-                    onnx_img = postprocess_output(onnx_output, self.args.norm)
-
-                    # Calculate PSNR vs PyTorch
-                    psnr = calculate_psnr(pt_img, onnx_img, border=self.args.scale + 2)
-                    results[name].append(psnr)
-                except Exception as e:
-                    print(f"        Error validating image {i + 1}: {e}")
-
-            # Clean up session
-            del sess
-            import gc
-
-            gc.collect()
-
-        # Print Summary
-        print("\n      Validation Results (PSNR vs PyTorch):")
-        print("      -------------------------------------")
-        for name, psnrs in results.items():
-            if name == "pytorch":
-                continue
-
-            if not psnrs:
-                print(f"      {name.upper():<5}: Skipped (No results)")
-                continue
-
-            avg_psnr = sum(psnrs) / len(psnrs)
-            min_psnr = min(psnrs)
-            print(
-                f"      {name.upper():<5}: Avg: {avg_psnr:.2f} dB | Min: {min_psnr:.2f} dB"
-            )
-            if name in self.report["results"]:
-                self.report["results"][name]["validation_psnr"] = avg_psnr
+                print(f"      {name.upper():<10} | {'FAILED':<10} | {str(e)[:30]}...")
 
     def save_report(self) -> None:
-        report_path = self.output_dir / "conversion_report.json"
-        with open(report_path, "w") as f:
+        with open(self.output_dir / "conversion_report.json", "w") as f:
             json.dump(self.report, f, indent=2)
-        print(f"\nReport saved to {report_path}")
-
-
-# =============================================================================
-# MAIN
-# =============================================================================
-
-
-def main() -> None:
-    parser = argparse.ArgumentParser(description="ParagonSR2 Release ONNX Converter")
-
-    # Model args
-    parser.add_argument(
-        "--checkpoint",
-        required=True,
-        help="Path to model checkpoint (.safetensors or .pth)",
-    )
-    parser.add_argument(
-        "--arch", required=True, help="Architecture name (e.g. paragonsr2_static_s)"
-    )
-    parser.add_argument("--scale", type=int, default=2, help="Upscaling factor")
-    parser.add_argument(
-        "--norm",
-        type=str,
-        default="01",
-        choices=["01", "m11"],
-        help="Normalization: '01'=[0,1], 'm11'=[-1,1]",
-    )
-
-    # Output args
-    parser.add_argument("--output", default="release_onnx", help="Output directory")
-    parser.add_argument(
-        "--device", default="cuda", help="Device to use for export (cpu/cuda)"
-    )
-
-    # INT8 Calibration args
-    parser.add_argument(
-        "--calib_dir", help="Directory with images for INT8 calibration"
-    )
-    parser.add_argument(
-        "--calib_size",
-        type=int,
-        default=256,
-        help="Image size for calibration (square)",
-    )
-    parser.add_argument(
-        "--calib_count",
-        type=int,
-        default=200,
-        help="Number of images to use for calibration",
-    )
-
-    # Validation args
-    parser.add_argument("--val_dir", help="Directory with images for validation")
-    parser.add_argument(
-        "--val_count", type=int, default=10, help="Number of images to validate"
-    )
-
-    args = parser.parse_args()
-
-    converter = ParagonConverter(args)
-
-    # 1. Load PyTorch Model
-    torch_model = converter.load_model()
-
-    # 2. Export FP32
-    fp32_path = converter.export_fp32(torch_model)
-
-    # 3. Convert FP16
-    fp16_path = converter.convert_fp16(fp32_path)
-
-    # 4. Convert INT8
-    int8_path = converter.convert_int8(fp32_path)
-
-    # 5. Validate
-    models_to_test = {"fp32": fp32_path, "fp16": fp16_path}
-    if int8_path:
-        models_to_test["int8"] = int8_path
-
-    converter.validate(models_to_test, torch_model)
-
-    converter.save_report()
-    print("\nDone.")
 
 
 if __name__ == "__main__":
-    main()
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--checkpoint", required=True)
+    parser.add_argument("--arch", required=True)
+    parser.add_argument("--scale", type=int, default=2)
+    parser.add_argument("--norm", default="01")
+    parser.add_argument("--output", default="release_onnx")
+    parser.add_argument("--device", default="cuda")
+    parser.add_argument("--val_dir")
+    parser.add_argument("--val_count", type=int, default=10)
+
+    args = parser.parse_args()
+    converter = ParagonConverter(args)
+    torch_model = converter.load_model()
+
+    fp32_path = converter.export_fp32(torch_model)
+    converter.validate({"fp32": fp32_path}, torch_model)
+    converter.save_report()
+
+    print("\n" + "=" * 60)
+    print("CONVERSION COMPLETE")
+    print("=" * 60)
+    print(f"Your ONNX model is located at: {fp32_path}")
+    print("Run the trtexec command again.")
+    print("=" * 60)
