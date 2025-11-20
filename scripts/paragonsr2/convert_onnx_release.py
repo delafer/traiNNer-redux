@@ -39,13 +39,14 @@ import onnx
 import onnxruntime as ort
 import torch
 from onnx import checker
-from onnxconverter_common import float16
+from onnxconverter_common import auto_mixed_precision, float16
 from onnxruntime.quantization import (
     CalibrationDataReader,
     QuantFormat,
     QuantType,
     quantize_static,
 )
+from onnxruntime.quantization.shape_inference import quant_pre_process
 from PIL import Image
 
 # Import architecture to ensure registry is populated
@@ -258,43 +259,38 @@ class ParagonConverter:
 
         model = onnx.load(str(fp32_path))
 
-        # Convert to FP16, keeping IO as float32 for compatibility
-        # We use a comprehensive block list to prevent converting ops that are sensitive to precision
-        # or involved in control flow (Loops) which often cause type mismatches in ONNX Runtime.
-
-        print("      Applying FP16 conversion with protected operators...")
-
-        # Extended block list for maximum compatibility
-        # These operators will remain in FP32
-        block_list = [
-            "Resize",
-            "Upsample",
-            "GridSample",
-            "Loop",
-            "SequenceInsert",
-            "SequenceAt",
-            "SequenceEmpty",
-            "SequenceErase",
-            "SequenceLength",
-            "SequenceConstruct",
-            "Range",
-            "Tile",
-            "Expand",
-            "Softmax",  # Often better in FP32 for stability
-            "LayerNormalization",  # Often better in FP32
-        ]
+        # Use auto_convert_mixed_precision which is more robust than manual block lists
+        # It automatically detects which nodes should be kept in FP32 for stability.
+        print("      Applying automatic mixed precision conversion...")
 
         try:
-            fp16_model = float16.convert_float_to_float16(
+            # auto_convert_mixed_precision handles the graph analysis
+            fp16_model = auto_mixed_precision.auto_convert_mixed_precision(
                 model,
                 keep_io_types=True,
-                op_block_list=block_list,
             )
         except Exception as e:
             print(
-                f"      Warning: Primary FP16 conversion failed ({e}). Retrying with safe mode..."
+                f"      Warning: Auto mixed precision failed ({e}). Retrying with robust manual conversion..."
             )
-            # Fallback: disable shape inference which sometimes causes issues
+            # Fallback to manual conversion with extended block list
+            block_list = [
+                "Resize",
+                "Upsample",
+                "GridSample",
+                "Loop",
+                "SequenceInsert",
+                "SequenceAt",
+                "SequenceEmpty",
+                "SequenceErase",
+                "SequenceLength",
+                "SequenceConstruct",
+                "Range",
+                "Tile",
+                "Expand",
+                "Softmax",
+                "LayerNormalization",
+            ]
             fp16_model = float16.convert_float_to_float16(
                 model,
                 keep_io_types=True,
@@ -318,10 +314,44 @@ class ParagonConverter:
             )
             return None
 
+        if self.args.calib_count < 10:
+            print(
+                f"      WARNING: calib_count={self.args.calib_count} is very low. "
+                "Recommended >= 100 for good quality."
+            )
+
         print("\n[4/5] Converting to INT8 (QDQ)...")
+
+        # 1. Preprocess for quantization (Symbolic Shape Inference)
+        # This is crucial for dynamic shapes and per-channel quantization stability
+        print("      Preprocessing model for quantization...")
+        preprocessed_path = self.output_dir / f"{self.args.arch}_preprocessed.onnx"
+
+        try:
+            quant_pre_process(str(fp32_path), str(preprocessed_path))
+        except Exception as e:
+            print(
+                f"      Warning: Symbolic shape inference failed ({e}). Skipping preprocessing..."
+            )
+            # Fallback: use original model if preprocessing fails
+            import shutil
+
+            shutil.copy(str(fp32_path), str(preprocessed_path))
+
         output_path = self.output_dir / f"{self.args.arch}_int8.onnx"
 
-        # Calibration reader
+        # 2. Identify nodes to exclude (Output Layer)
+        # Quantizing the final convolution often degrades PSNR significantly.
+        model = onnx.load(str(preprocessed_path))
+        nodes_to_exclude = []
+        output_names = [out.name for out in model.graph.output]
+        for node in model.graph.node:
+            # Exclude node if it produces the graph output
+            if any(out in output_names for out in node.output):
+                nodes_to_exclude.append(node.name)
+                print(f"      Excluding output node from quantization: {node.name}")
+
+        # 3. Calibration reader
         dr = ParagonCalibrationDataReader(
             self.args.calib_dir,
             (self.args.calib_size, self.args.calib_size),
@@ -330,19 +360,24 @@ class ParagonConverter:
             limit=self.args.calib_count,
         )
 
-        # Quantize
-        # QuantFormat.QDQ is best for TensorRT and modern ONNX Runtime
-        # PerChannel=True usually gives better accuracy for CNNs
-        # Disable per-channel quantization for weights to avoid "Axis out of range" errors
+        # 4. Quantize
+        # - per_channel=True: Essential for CNN accuracy
+        # - activation_type=QUInt8: Unsigned is better for activations (ReLU/Sigmoid)
+        # - nodes_to_exclude: Protect output layer
         quantize_static(
-            str(fp32_path),
+            str(preprocessed_path),
             str(output_path),
             dr,
             quant_format=QuantFormat.QDQ,
-            per_channel=False,  # Fixed: Disable per-channel to avoid axis errors
+            per_channel=True,
             weight_type=QuantType.QInt8,
-            activation_type=QuantType.QInt8,
+            activation_type=QuantType.QUInt8,
+            nodes_to_exclude=nodes_to_exclude,
         )
+
+        # Cleanup intermediate file
+        if preprocessed_path.exists():
+            preprocessed_path.unlink()
 
         print(f"      Saved to: {output_path}")
         self.report["results"]["int8"] = {
