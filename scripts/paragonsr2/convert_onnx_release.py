@@ -374,46 +374,55 @@ class ParagonConverter:
         results = {k: [] for k in model_paths.keys()}
         results["pytorch"] = []
 
-        # Create sessions
-        sessions = {}
+        print(f"      Testing on {len(val_images)} images...")
+
+        # Pre-calculate PyTorch results to save VRAM
+        pt_results = []
+        print("      Generating PyTorch baseline...")
+        for img_path in val_images:
+            input_tensor = preprocess_image(img_path, None, self.args.norm)
+            with torch.no_grad():
+                pt_input = torch.from_numpy(input_tensor).to(self.device)
+                pt_output = torch_model(pt_input).cpu().numpy()
+                pt_img = postprocess_output(pt_output, self.args.norm)
+                pt_results.append((img_path, input_tensor, pt_img))
+
+        # Clear PyTorch model to free VRAM for ONNX Runtime
+        del torch_model
+        torch.cuda.empty_cache()
+
+        # Validate ONNX models sequentially to avoid OOM
         for name, path in model_paths.items():
+            print(f"      Validating {name}...")
             providers = (
                 ["CUDAExecutionProvider", "CPUExecutionProvider"]
                 if self.args.device == "cuda"
                 else ["CPUExecutionProvider"]
             )
+
             try:
-                sessions[name] = ort.InferenceSession(str(path), providers=providers)
+                sess = ort.InferenceSession(str(path), providers=providers)
             except Exception as e:
                 print(f"      Error loading {name} model: {e}")
                 print(f"      Skipping validation for {name}.")
                 continue
 
-        if not sessions:
-            print("      No models could be loaded for validation.")
-            return
+            for i, (img_path, input_tensor, pt_img) in enumerate(pt_results):
+                try:
+                    onnx_output = sess.run(None, {"input": input_tensor})[0]
+                    onnx_img = postprocess_output(onnx_output, self.args.norm)
 
-        print(f"      Testing on {len(val_images)} images...")
+                    # Calculate PSNR vs PyTorch
+                    psnr = calculate_psnr(pt_img, onnx_img, border=self.args.scale + 2)
+                    results[name].append(psnr)
+                except Exception as e:
+                    print(f"        Error validating image {i + 1}: {e}")
 
-        for img_path in val_images:
-            # Prepare input
-            # Use dynamic size for validation to test dynamic shapes
-            input_tensor = preprocess_image(img_path, None, self.args.norm)
+            # Clean up session
+            del sess
+            import gc
 
-            # PyTorch Inference
-            with torch.no_grad():
-                pt_input = torch.from_numpy(input_tensor).to(self.device)
-                pt_output = torch_model(pt_input).cpu().numpy()
-                pt_img = postprocess_output(pt_output, self.args.norm)
-
-            # ONNX Inference
-            for name, sess in sessions.items():
-                onnx_output = sess.run(None, {"input": input_tensor})[0]
-                onnx_img = postprocess_output(onnx_output, self.args.norm)
-
-                # Calculate PSNR vs PyTorch
-                psnr = calculate_psnr(pt_img, onnx_img, border=self.args.scale + 2)
-                results[name].append(psnr)
+            gc.collect()
 
         # Print Summary
         print("\n      Validation Results (PSNR vs PyTorch):")
@@ -421,12 +430,18 @@ class ParagonConverter:
         for name, psnrs in results.items():
             if name == "pytorch":
                 continue
+
+            if not psnrs:
+                print(f"      {name.upper():<5}: Skipped (No results)")
+                continue
+
             avg_psnr = sum(psnrs) / len(psnrs)
             min_psnr = min(psnrs)
             print(
                 f"      {name.upper():<5}: Avg: {avg_psnr:.2f} dB | Min: {min_psnr:.2f} dB"
             )
-            self.report["results"][name]["validation_psnr"] = avg_psnr
+            if name in self.report["results"]:
+                self.report["results"][name]["validation_psnr"] = avg_psnr
 
     def save_report(self) -> None:
         report_path = self.output_dir / "conversion_report.json"
