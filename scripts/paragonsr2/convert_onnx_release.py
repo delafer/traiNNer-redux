@@ -235,7 +235,7 @@ class ParagonConverter:
             input_names=["input"],
             output_names=["output"],
             dynamic_axes=dynamic_axes,
-            opset_version=17,
+            opset_version=18,
             do_constant_folding=True,
         )
 
@@ -260,6 +260,20 @@ class ParagonConverter:
 
         # Convert to FP16, keeping IO as float32 for compatibility
         # auto_convert_mixed_precision=True will keep sensitive layers in FP32
+        # Convert to FP16 with block list to avoid Loop/SequenceInsert type mismatches
+        fp16_model = float16.convert_float_to_float16(
+            model,
+            keep_io_types=True,
+            op_block_list=[
+                "Resize",
+                "Upsample",
+                "GridSample",
+                "Loop",  # Prevents float32/float16 type mismatch in loops
+                "SequenceInsert",  # Prevents sequence type mismatch
+                "SequenceAt",  # Prevents sequence access type mismatch
+            ],
+        )
+
         try:
             fp16_model = float16.convert_float_to_float16(model, keep_io_types=True)
         except Exception as e:
@@ -274,7 +288,10 @@ class ParagonConverter:
                     "Resize",
                     "Upsample",
                     "GridSample",
-                ],  # Common sensitive ops in SR
+                    "Loop",  # NEW: Fixes type mismatch
+                    "SequenceInsert",  # NEW: Fixes type mismatch
+                    "SequenceAt",  # NEW: Fixes type mismatch
+                ],
             )
 
         onnx.save(fp16_model, str(output_path))
