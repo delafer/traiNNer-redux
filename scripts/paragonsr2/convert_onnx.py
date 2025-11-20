@@ -472,9 +472,21 @@ def export_everything() -> None:
 
         model = arch_fn(scale=args.scale)
 
-        # Load checkpoint
-        ckpt = torch.load(args.checkpoint, map_location="cpu")
-        state_dict = ckpt.get("params_ema", ckpt.get("params", ckpt))
+        # Load checkpoint (handle both .pth and .safetensors)
+        if args.checkpoint.endswith(".safetensors"):
+            try:
+                from safetensors.torch import load_file
+
+                state_dict = load_file(args.checkpoint, device="cpu")
+            except ImportError:
+                raise ImportError(
+                    "safetensors not installed. Install with: pip install safetensors"
+                )
+        else:
+            # Use weights_only=False for PyTorch 2.6 compatibility
+            ckpt = torch.load(args.checkpoint, map_location="cpu", weights_only=False)
+            state_dict = ckpt.get("params_ema", ckpt.get("params", ckpt))
+
         model.load_state_dict(state_dict, strict=True)
 
         print(f"✅ Model loaded: {args.arch} (scale={args.scale})")
@@ -525,7 +537,6 @@ def export_everything() -> None:
                 dynamic_axes=dynamic_axes,
                 do_constant_folding=True,
                 export_params=True,
-                training=onnx.onnx_pb2.ModelProto.ONNX,
             )
 
             checker.check_model(fp32_path)

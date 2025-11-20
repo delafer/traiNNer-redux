@@ -102,8 +102,8 @@ class MagicKernelSharp2021Upsample(nn.Module):
         if scale_h <= 0 or scale_w <= 0:
             raise ValueError("scale_factor values must be positive.")
 
-        target_h = max(round(height * scale_h), 1)
-        target_w = max(round(width * scale_w), 1)
+        target_h = max(int(torch.round(torch.tensor(height * scale_h))), 1)
+        target_w = max(int(torch.round(torch.tensor(width * scale_w))), 1)
         return target_h, target_w
 
     def __init__(self, in_channels: int, alpha: float = 1.0) -> None:
@@ -148,8 +148,6 @@ class MagicKernelSharp2021Upsample(nn.Module):
         """
         # Step 1: Apply the 7-tap sharpening filter to the low-resolution input,
         # blended with the identity via alpha to control aggressiveness.
-        # x_sharp = sharpen(x)
-        # x_sharpened = x + alpha * (x_sharp - x)
         if self.alpha > 0.0:
             x_sharp = self.sharpen(x)
             x_sharpened = x + self.alpha * (x_sharp - x)
@@ -157,20 +155,15 @@ class MagicKernelSharp2021Upsample(nn.Module):
             # alpha == 0 -> no sharpening, behaves like a smooth Magic kernel upsampler
             x_sharpened = x
 
-        # Step 2: Decide whether a resize is required and perform a nearest-neighbour upsample if needed.
-        _, _, height, width = x_sharpened.shape
-        target_h, target_w = self._resolve_target_size(scale_factor, height, width)
+        # Step 2: ONNX-compatible upsampling with scale factor
+        # For ONNX compatibility, we use F.interpolate with scale_factor parameter
+        x_upsampled = F.interpolate(
+            x_sharpened,
+            scale_factor=scale_factor,
+            mode="nearest",
+        )
 
-        if target_h != height or target_w != width:
-            x_upsampled = F.interpolate(
-                x_sharpened,
-                size=(target_h, target_w),
-                mode="nearest",
-            )
-        else:
-            x_upsampled = x_sharpened
-
-        # Step 3: Apply the main smooth Magic Kernel to the (optionally) upsampled data.
+        # Step 3: Apply the main smooth Magic Kernel to the upsampled data.
         # This acts as a high-quality anti-aliasing and reconstruction filter,
         # smoothing the blockiness of the nearest-neighbor resize.
         return self.resample_conv(x_upsampled)

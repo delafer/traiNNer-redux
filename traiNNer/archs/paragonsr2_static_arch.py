@@ -506,7 +506,9 @@ def paragonsr2_static_micro(scale: int = 4, **kwargs) -> ParagonSR2Static:
         ffn_expansion=1.2,
         block_kwargs={"band_kernel_size": 7},
         upsampler_alpha=kwargs.get("upsampler_alpha", 0.5),
-        hr_blocks=kwargs.get("hr_blocks", 0),
+        hr_blocks=kwargs.get(
+            "hr_blocks", 1
+        ),  # after testing, i concluded adding an hr block as default is worth it, even though a bit slower.
         use_channels_last=kwargs.get("use_channels_last", True),
         fast_body_mode=kwargs.get("fast_body_mode", True),
         use_norm=kwargs.get("use_norm", False),
