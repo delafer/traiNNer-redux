@@ -3,6 +3,7 @@ import os
 import sys
 import time
 from pathlib import Path
+from concurrent.futures import ThreadPoolExecutor
 
 try:
     from tqdm import tqdm
@@ -20,6 +21,7 @@ TRT_LOGGER = trt.Logger(trt.Logger.WARNING)
 class TRTWrapper:
     def __init__(self, engine_path):
         self.runtime = trt.Runtime(TRT_LOGGER)
+        self.stream = torch.cuda.Stream()
         
         print(f"Loading Engine: {engine_path}")
         try:
@@ -32,77 +34,42 @@ class TRTWrapper:
         self.context = self.engine.create_execution_context()
         self.input_name = "input"
         self.output_name = "output"
-        
-        # Create a dedicated CUDA stream for this context (Fixes the warning)
-        self.stream = torch.cuda.Stream()
 
     def infer(self, img_tensor, scale_factor):
         """
-        img_tensor: PyTorch tensor on CUDA, shape (1, 3, H, W). MUST BE CONTIGUOUS.
+        img_tensor: Contiguous (1, 3, H, W) on GPU
         """
-        # 1. Set Input Shape
         b, c, h, w = img_tensor.shape
         self.context.set_input_shape(self.input_name, (b, c, h, w))
         
-        # 2. Calculate Output Shape
-        target_h = int(h * scale_factor)
-        target_w = int(w * scale_factor)
+        target_h, target_w = int(h * scale_factor), int(w * scale_factor)
         
-        # 3. Allocate Output Tensor
+        # Output tensor
         output_tensor = torch.empty((b, c, target_h, target_w), dtype=torch.float32, device=img_tensor.device)
         
-        # 4. Bind Tensors
+        # Bindings
         self.context.set_tensor_address(self.input_name, img_tensor.data_ptr())
         self.context.set_tensor_address(self.output_name, output_tensor.data_ptr())
         
-        # 5. Execute on dedicated stream
+        # Async execution
         self.context.execute_async_v3(stream_handle=self.stream.cuda_stream)
         
-        # 6. Synchronize the stream
+        # Sync only this stream, not the whole device
         self.stream.synchronize()
         
         return output_tensor
 
-def process_image(img_path, wrapper, output_dir, scale):
-    filename = Path(img_path).name
-    save_path = output_dir / filename
-    
-    # 1. Read Image
-    img = cv2.imread(str(img_path))
-    if img is None:
-        print(f"  [Error] Could not read {filename}")
-        return
-        
-    # BGR -> RGB
-    img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-    
-    # 2. Preprocess
-    # Numpy -> Tensor -> Float -> Permute -> Unsqueeze -> Normalize
-    img_t = torch.from_numpy(img).cuda().float()
-    img_t = img_t.permute(2, 0, 1).unsqueeze(0)
-    img_t = img_t / 255.0
-    
-    # --- CRITICAL FIX: FORCE MEMORY REORDERING ---
-    # Without this, data_ptr() points to HWC memory, confusing TensorRT
-    img_t = img_t.contiguous() 
-    # ---------------------------------------------
-    
+def save_image_worker(image_numpy, save_path):
+    """Background worker to save image"""
     try:
-        # 3. Inference
-        out_t = wrapper.infer(img_t, scale)
-        
-        # 4. Postprocess
-        out = out_t.squeeze(0).permute(1, 2, 0).clamp_(0, 1).mul_(255.0).byte().cpu().numpy()
-        out = cv2.cvtColor(out, cv2.COLOR_RGB2BGR)
-        
-        # 5. Save
-        cv2.imwrite(str(save_path), out)
-        
+        # Color conversion happens here on CPU background thread
+        out_bgr = cv2.cvtColor(image_numpy, cv2.COLOR_RGB2BGR)
+        cv2.imwrite(str(save_path), out_bgr)
     except Exception as e:
-        print(f"  [Error] Failed to process {filename}: {e}")
+        print(f"Error saving {save_path}: {e}")
 
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Run TensorRT Inference")
+def main():
+    parser = argparse.ArgumentParser(description="High-Performance TRT Inference")
     parser.add_argument("--engine", required=True)
     parser.add_argument("--input", required=True)
     parser.add_argument("--output", default="trt_results")
@@ -127,7 +94,47 @@ if __name__ == "__main__":
         
     print(f"Processing {len(images)} images with scale {args.scale}x...")
     
-    for img in tqdm(images, desc="Upscaling"):
-        process_image(img, wrapper, out_dir, args.scale)
+    # ThreadPool for saving images in background
+    # max_workers=4 is usually enough to saturate disk I/O without hogging CPU
+    saver_pool = ThreadPoolExecutor(max_workers=4)
+    
+    # Warmup GPU (Optional but good for timing)
+    dummy = torch.zeros(1, 3, 64, 64).cuda().contiguous()
+    wrapper.infer(dummy, args.scale)
+    
+    start_time = time.time()
+    
+    for img_path in tqdm(images, desc="Upscaling"):
+        filename = img_path.name
+        save_path = out_dir / filename
         
-    print(f"\nDone! Results saved to: {out_dir}")
+        # 1. Load (Main Thread)
+        img = cv2.imread(str(img_path))
+        if img is None: continue
+        img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+        
+        # 2. To GPU
+        img_t = torch.from_numpy(img).cuda().float().permute(2, 0, 1).unsqueeze(0)
+        img_t = img_t.div_(255.0).contiguous()
+        
+        # 3. Infer (GPU)
+        # While this runs, the saver threads are saving PREVIOUS images
+        out_t = wrapper.infer(img_t, args.scale)
+        
+        # 4. Postprocess (GPU -> CPU)
+        # We move to CPU immediately so we can hand off to saver thread
+        out_np = out_t.squeeze(0).permute(1, 2, 0).clamp_(0, 1).mul_(255.0).byte().cpu().numpy()
+        
+        # 5. Async Save
+        # This returns immediately, allowing the loop to process the next image
+        saver_pool.submit(save_image_worker, out_np, save_path)
+        
+    # Wait for all saves to finish
+    saver_pool.shutdown(wait=True)
+    
+    total_time = time.time() - start_time
+    fps = len(images) / total_time
+    print(f"\nDone! {len(images)} images in {total_time:.2f}s ({fps:.2f} FPS)")
+
+if __name__ == "__main__":
+    main()
