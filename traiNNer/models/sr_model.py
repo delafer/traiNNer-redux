@@ -365,8 +365,6 @@ class SRModel(BaseModel):
     def optimize_parameters(
         self, current_iter: int, current_accum_iter: int, apply_gradient: bool
     ) -> None:
-        # https://github.com/Corpsecreate/neosr/blob/2ee3e7fe5ce485e070744158d4e31b8419103db0/neosr/models/default.py#L328
-        # assert self.optimizer_g is not None
         assert self.lq is not None
         assert self.gt is not None
         assert self.scaler_d is not None
@@ -383,42 +381,26 @@ class SRModel(BaseModel):
         self.loss_samples += n_samples
         loss_dict: dict[str, Tensor | float] = OrderedDict()
 
-        lq = rgb2pixelformat_pt(
-            self.lq, self.opt.input_pixel_format
-        )  # lq: input_pixel_format
-        rgb2pixelformat_pt(
-            self.gt, self.opt.input_pixel_format
-        )  # gt: input_pixel_format
+        lq = rgb2pixelformat_pt(self.lq, self.opt.input_pixel_format)
+        rgb2pixelformat_pt(self.gt, self.opt.input_pixel_format)
 
         with torch.autocast(
             device_type=self.device.type, dtype=self.amp_dtype, enabled=self.use_amp
         ):
             if self.optimizer_g is not None:
-                output = self.net_g(lq)  # output: output_pixel_format
+                output = self.net_g(lq)
                 self.output = pixelformat2rgb_pt(
                     output, self.gt, self.opt.output_pixel_format
-                )  # self.output: rgb
+                )
 
                 assert isinstance(self.output, Tensor)
-                # Use a known tensor (lq) to obtain the device; self.output is guaranteed to be set after generator forward
                 l_g_total = torch.tensor(0.0, device=self.lq.device)
 
                 lq_target = None
 
-                # ------------------- #
-                #   Start GAN Logic   #
-                # ------------------- #
-                #
-                # We need to handle augmented and unaugmented images separately.
-                # The adversarial loss is computed on augmented images,
-                # but the R1/R2 penalties are computed on raw, unaugmented images
-                # to avoid the non-differentiable `grid_sampler` error.
-
-                # Store unaugmented images for penalty calculation
+                # Prepare images for losses
                 real_images_unaug = self.gt.clone()
                 fake_images_unaug = self.output.clone()
-
-                # Apply augmentations for adversarial loss
                 real_images_aug = real_images_unaug
                 fake_images_aug = fake_images_unaug
                 if self.batch_augment:
@@ -444,47 +426,69 @@ class SRModel(BaseModel):
                                 )
                         target = lq_target
 
+                    # --- GAN LOSS (FIXED for Wrapper) ---
                     if label == "l_g_gan":
                         assert self.net_d is not None
-                        if isinstance(loss, R3GANLoss):
-                            l_g_loss = loss(
-                                net_d=self.net_d,
-                                real_images=self.gt,
-                                fake_images=self.output,
-                                is_disc=False,
-                            )
+
+                        # Robust check for R3GAN inside wrapper
+                        is_r3gan = isinstance(loss, R3GANLoss) or (
+                            hasattr(loss, "loss_module")
+                            and isinstance(loss.loss_module, R3GANLoss)
+                        )
+
+                        if is_r3gan:
+                            # R3GAN Signature
+                            if hasattr(loss, "loss_module"):  # Wrapped
+                                l_g_loss = loss(
+                                    net_d=self.net_d,
+                                    real_images=self.gt,
+                                    fake_images=self.output,
+                                    is_disc=False,
+                                    current_iter=current_iter,
+                                )
+                            else:  # Unwrapped
+                                l_g_loss = loss(
+                                    net_d=self.net_d,
+                                    real_images=self.gt,
+                                    fake_images=self.output,
+                                    is_disc=False,
+                                )
                         else:
+                            # Standard GAN Signature
                             fake_g_pred = self.net_d(self.output)
-                            l_g_loss = loss(fake_g_pred, True, is_disc=False)
+                            if hasattr(loss, "loss_module"):  # Wrapped
+                                l_g_loss = loss(
+                                    fake_g_pred,
+                                    True,
+                                    is_disc=False,
+                                    current_iter=current_iter,
+                                )
+                            else:  # Unwrapped
+                                l_g_loss = loss(fake_g_pred, True, is_disc=False)
 
                         if self.adaptive_d:
                             l_g_gan_ema = (
                                 self.adaptive_d_ema_decay * self.l_g_gan_ema
                                 + (1 - self.adaptive_d_ema_decay) * l_g_loss.detach()
                             )
-
                             if (
                                 l_g_gan_ema
                                 > self.l_g_gan_ema * self.adaptive_d_threshold
                             ):
                                 skip_d_update = True
                                 self.optimizers_skipped[1] = True
-                                # print(current_iter, "skip_d_update")
-
                             self.l_g_gan_ema = l_g_gan_ema
 
+                    # --- LDL LOSS ---
                     elif label == "l_g_ldl":
-                        assert self.net_g_ema is not None, (
-                            "ema_decay must be enabled for LDL loss"
-                        )
+                        assert self.net_g_ema is not None
                         with torch.inference_mode():
                             output_ema = pixelformat2rgb_pt(
                                 self.net_g_ema(lq),
                                 self.gt,
                                 self.opt.output_pixel_format,
                             )
-                        # Check if LDL loss is wrapped with IterativeLossWrapper
-                        if hasattr(loss, "forward") and hasattr(loss, "loss_module"):
+                        if hasattr(loss, "loss_module"):
                             l_g_loss = loss(
                                 self.output,
                                 output_ema,
@@ -493,28 +497,32 @@ class SRModel(BaseModel):
                             )
                         else:
                             l_g_loss = loss(self.output, output_ema, target)
-                    elif isinstance(loss, ContrastiveLoss):
-                        l_g_loss = loss(self.output, target, self.lq)
-                    # Check for FeatureMatchingLoss (Direct OR Wrapped)
+
+                    # --- CONTRASTIVE LOSS (FIXED for Wrapper) ---
+                    elif isinstance(loss, ContrastiveLoss) or (
+                        hasattr(loss, "loss_module")
+                        and isinstance(loss.loss_module, ContrastiveLoss)
+                    ):
+                        if hasattr(loss, "loss_module"):
+                            l_g_loss = loss(
+                                self.output, target, self.lq, current_iter=current_iter
+                            )
+                        else:
+                            l_g_loss = loss(self.output, target, self.lq)
+
+                    # --- FEATURE MATCHING (FIXED for Wrapper) ---
                     elif isinstance(loss, FeatureMatchingLoss) or (
                         hasattr(loss, "loss_module")
                         and isinstance(loss.loss_module, FeatureMatchingLoss)
                     ):
-                        # Feature matching loss requires discriminator features
-                        assert self.net_d is not None, (
-                            "FeatureMatchingLoss requires discriminator"
-                        )
-
-                        # Extract features from real images
+                        assert self.net_d is not None
                         _real_pred, real_feats = self.net_d.forward_with_features(
                             self.gt
                         )
-                        # Extract features from fake images
                         _fake_pred, fake_feats = self.net_d.forward_with_features(
                             self.output
                         )
 
-                        # Check if wrapped, pass current_iter
                         if hasattr(loss, "loss_module"):
                             l_g_loss = loss(
                                 real_feats, fake_feats, current_iter=current_iter
@@ -522,14 +530,13 @@ class SRModel(BaseModel):
                         else:
                             l_g_loss = loss(real_feats, fake_feats)
 
-                    # Check if loss is wrapped with IterativeLossWrapper for general losses
-                    elif hasattr(loss, "forward") and hasattr(loss, "loss_module"):
-                        # This is an IterativeLossWrapper, pass current_iter
+                    # --- GENERIC LOSSES ---
+                    elif hasattr(loss, "loss_module"):
                         l_g_loss = loss(self.output, target, current_iter=current_iter)
                     else:
-                        # Regular loss
                         l_g_loss = loss(self.output, target)
 
+                    # Accumulate Loss
                     if isinstance(l_g_loss, dict):
                         for sublabel, loss_val in l_g_loss.items():
                             if loss_val > 0:
@@ -542,13 +549,9 @@ class SRModel(BaseModel):
                         loss_dict[label] = weighted_l_g_loss
 
                 if not l_g_total.isfinite():
-                    raise RuntimeError(
-                        "Training failed: NaN/Inf found in loss. Try reducing the learning rate. If training still fails, please file an issue: https://github.com/the-database/traiNNer-redux/issues"
-                    )
+                    raise RuntimeError("Training failed: NaN/Inf found in loss.")
 
-                # add total generator loss for tensorboard tracking
                 loss_dict["l_g_total"] = l_g_total
-
                 self.scaler_g.scale(l_g_total).backward()
 
                 if apply_gradient:
@@ -562,7 +565,6 @@ class SRModel(BaseModel):
                             ]
                         )
                     ).detach()
-
                     loss_dict["grad_norm_g"] = grad_norm_g
 
                     if self.grad_clip:
@@ -578,75 +580,52 @@ class SRModel(BaseModel):
             else:
                 with torch.inference_mode():
                     self.output = self.net_g(self.lq)
-                    assert isinstance(self.output, Tensor)
 
+        # --- DISCRIMINATOR UPDATE ---
         cri_gan = self.losses.get("l_g_gan")
-
         if (
             self.net_d is not None
             and cri_gan is not None
             and self.optimizer_d is not None
             and not skip_d_update
         ):
-            # optimize net_d
             for p in self.net_d.parameters():
                 p.requires_grad = True
 
             with torch.autocast(
-                device_type=self.device.type,
-                dtype=self.amp_dtype,
-                enabled=self.use_amp,
+                device_type=self.device.type, dtype=self.amp_dtype, enabled=self.use_amp
             ):
-                # R3GAN loss requires a different signature
-                if isinstance(cri_gan, R3GANLoss):
-                    # Check if it's wrapped with IterativeLossWrapper
-                    if hasattr(cri_gan, "loss_module"):
-                        # Unwrap for R3GAN - it has its own scheduling
-                        unwrapped_loss = cri_gan.loss_module
-                        loss_d_dict = unwrapped_loss(
-                            net_d=self.net_d,
-                            real_images=real_images_aug,
-                            fake_images=fake_images_aug.detach(),
-                            real_images_unaug=real_images_unaug,
-                            fake_images_unaug=fake_images_unaug.detach(),
-                            is_disc=True,
-                        )
-                    else:
-                        loss_d_dict = cri_gan(
-                            net_d=self.net_d,
-                            real_images=real_images_aug,
-                            fake_images=fake_images_aug.detach(),
-                            real_images_unaug=real_images_unaug,
-                            fake_images_unaug=fake_images_unaug.detach(),
-                            is_disc=True,
-                        )
+                # Unwrap GAN loss safely
+                loss_module = (
+                    cri_gan.loss_module if hasattr(cri_gan, "loss_module") else cri_gan
+                )
+
+                if isinstance(loss_module, R3GANLoss):
+                    loss_d_dict = loss_module(
+                        net_d=self.net_d,
+                        real_images=real_images_aug,
+                        fake_images=fake_images_aug.detach(),
+                        real_images_unaug=real_images_unaug,
+                        fake_images_unaug=fake_images_unaug.detach(),
+                        is_disc=True,
+                    )
                     l_d_total = loss_d_dict["d_loss"]
-                    loss_dict["l_d_total"] = l_d_total
-                    loss_dict["r1_penalty"] = loss_d_dict["r1_penalty"]
-                    loss_dict["r2_penalty"] = loss_d_dict["r2_penalty"]
+                    loss_dict.update(
+                        {k: v for k, v in loss_d_dict.items() if k != "d_loss"}
+                    )
                 else:
-                    # Check if it's wrapped with IterativeLossWrapper
-                    if hasattr(cri_gan, "loss_module"):
-                        # Unwrap and apply weight manually for GAN losses
-                        unwrapped_loss = cri_gan.loss_module
-                        real_d_pred = self.net_d(self.gt)
-                        fake_d_pred = self.net_d(self.output.detach())
-                        l_d_real = unwrapped_loss(real_d_pred, True, is_disc=True)
-                        l_d_fake = unwrapped_loss(fake_d_pred, False, is_disc=True)
-                        # Apply effective weight
-                        effective_weight = (
-                            cri_gan.get_current_weight(current_iter)
-                            if hasattr(cri_gan, "get_current_weight")
-                            else cri_gan.loss_weight
-                        )
-                        l_d_total = (l_d_real + l_d_fake) * effective_weight
-                    else:
-                        # Standard GAN loss
-                        real_d_pred = self.net_d(self.gt)
-                        fake_d_pred = self.net_d(self.output.detach())
-                        l_d_real = cri_gan(real_d_pred, True, is_disc=True)
-                        l_d_fake = cri_gan(fake_d_pred, False, is_disc=True)
-                        l_d_total = l_d_real + l_d_fake
+                    real_d_pred = self.net_d(self.gt)
+                    fake_d_pred = self.net_d(self.output.detach())
+                    l_d_real = loss_module(real_d_pred, True, is_disc=True)
+                    l_d_fake = loss_module(fake_d_pred, False, is_disc=True)
+
+                    # Apply schedule weight manually for Discriminator side
+                    weight = (
+                        cri_gan.get_current_weight(current_iter)
+                        if hasattr(cri_gan, "get_current_weight")
+                        else cri_gan.loss_weight
+                    )
+                    l_d_total = (l_d_real + l_d_fake) * weight
                     loss_dict["l_d_real"] = l_d_real
                     loss_dict["l_d_fake"] = l_d_fake
 
@@ -663,7 +642,6 @@ class SRModel(BaseModel):
                         ]
                     )
                 ).detach()
-
                 loss_dict["grad_norm_d"] = grad_norm_d
 
                 if self.grad_clip:
@@ -680,7 +658,7 @@ class SRModel(BaseModel):
             val = (
                 value
                 if isinstance(value, float)
-                else value.to(dtype=torch.float32).detach()  # pyright: ignore[reportAttributeAccessIssue]
+                else value.to(dtype=torch.float32).detach()
             )
             self.log_dict[key] = self.log_dict.get(key, 0) + val * n_samples
 

@@ -141,5 +141,9 @@ class FeatureMatchingLoss(nn.Module):
             return torch.tensor(0.0, device=device)
 
         result = loss / count if self.reduction == "mean" else loss
-        device = disc_real_feats[0].device
-        return torch.tensor(result, device=device)
+
+        # result = loss / count if self.reduction == "mean" else loss
+        # device = disc_real_feats[0].device
+        # return torch.tensor(result, device=device)  # <--- THE BUG
+        # Just return the tensor directly to keep gradients alive
+        return result
