@@ -47,7 +47,10 @@ class FeatureMatchingLoss(nn.Module):
         self.logger = get_root_logger()
 
     def forward(
-        self, disc_real_feats: list[torch.Tensor], disc_fake_feats: list[torch.Tensor]
+        self,
+        disc_real_feats: list[torch.Tensor],
+        disc_fake_feats: list[torch.Tensor],
+        **kwargs,
     ) -> torch.Tensor:
         """
         Compute feature matching loss between real and fake discriminator features.

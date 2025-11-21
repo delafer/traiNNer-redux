@@ -495,7 +495,11 @@ class SRModel(BaseModel):
                             l_g_loss = loss(self.output, output_ema, target)
                     elif isinstance(loss, ContrastiveLoss):
                         l_g_loss = loss(self.output, target, self.lq)
-                    elif isinstance(loss, FeatureMatchingLoss):
+                    # Check for FeatureMatchingLoss (Direct OR Wrapped)
+                    elif isinstance(loss, FeatureMatchingLoss) or (
+                        hasattr(loss, "loss_module")
+                        and isinstance(loss.loss_module, FeatureMatchingLoss)
+                    ):
                         # Feature matching loss requires discriminator features
                         assert self.net_d is not None, (
                             "FeatureMatchingLoss requires discriminator"
@@ -510,7 +514,14 @@ class SRModel(BaseModel):
                             self.output
                         )
 
-                        l_g_loss = loss(real_feats, fake_feats)
+                        # Check if wrapped, pass current_iter
+                        if hasattr(loss, "loss_module"):
+                            l_g_loss = loss(
+                                real_feats, fake_feats, current_iter=current_iter
+                            )
+                        else:
+                            l_g_loss = loss(real_feats, fake_feats)
+
                     # Check if loss is wrapped with IterativeLossWrapper for general losses
                     elif hasattr(loss, "forward") and hasattr(loss, "loss_module"):
                         # This is an IterativeLossWrapper, pass current_iter

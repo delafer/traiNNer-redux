@@ -206,15 +206,15 @@ class MUNet(nn.Module):
         # remove channel dim for FFT, perform per-sample 2D FFT
         b, c, h, w = x.shape
         assert c == 1, "fft input must have single channel (luma)"
-        # squeeze channel
-        x2 = x.view(b, h, w)
+        # squeeze channel, but force input to Float32 because torch.fft.fft2 does not support BFloat16
+        x2 = x.view(b, h, w).float()
         # compute complex FFT
         fft = torch.fft.fft2(x2, norm="ortho")  # (B,H,W) complex
         mag = torch.abs(fft)  # (B,H,W) real
         # log scaling - stabilise
         log_mag = torch.log(mag + eps)
-        # return as (B,1,H,W)
-        return log_mag.unsqueeze(1)
+        # return as (B,1,H,W), cast back to the original dtype (BF16) to continue the network
+        return log_mag.unsqueeze(1).to(dtype=x.dtype)
 
     # -------------------------
     # forward helpers
