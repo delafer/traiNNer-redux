@@ -91,6 +91,7 @@ datasets:
 # Static-S variant uses simplified attention mechanisms for faster inference
 network_g:
   type: paragonsr2_static_micro
+  hr_blocks: 1
 
 # Discriminator: MUNet (Multi-Branch UNet)
 # Multi-branch design captures different aspects of image quality:
@@ -106,7 +107,7 @@ network_d:
 path:
   # Pretrained generator weights - None for training from scratch
   # Set to checkpoint path for fine-tuning
-  pretrain_network_g: experiments/2xParagonSR2_static_Micro_fidelity/models/net_g_ema_400000.safetensors # my fidelity pretrain
+  pretrain_network_g: experiments/2xParagonSR2_static_hrblock_Micro_fidelity/models/net_g_ema_400000.safetensors # my fidelity pretrain
 
   # Strict loading ensures parameter names must match exactly
   # Prevents loading incompatible checkpoint files

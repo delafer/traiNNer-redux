@@ -144,9 +144,9 @@ train:
   optim_g:
     type: AdamW
 
-    # Learning rate - 1.2e-4 is conservative for stable training
+    # Learning rate
     # Too high leads to instability, too low slows convergence
-    lr: !!float 1.2e-4
+    lr: !!float 1e-4
 
     # Weight decay - L2 regularization to prevent overfitting
     # 1.0e-4 is moderate, helps generalization
@@ -162,7 +162,7 @@ train:
   optim_d:
     type: AdamW
 
-    # Slightly higher LR than generator (1.5e-4 vs 1.2e-4)
+    # Slightly higher LR than generator (1.5e-4 vs 1e-4)
     # Discriminator needs to keep up with generator improvements
     lr: !!float 1.5e-4
 
@@ -232,8 +232,8 @@ train:
     # OPTIMIZED: Increased weight for better stabilization
     - type: featurematchingloss
       loss_weight: 0.20
-      start_iter: 0        # Immediate activation for stability
-      target_iter: 0
+      start_iter: 30000        # Start with gan
+      target_iter: 30000
       target_weight: 0.20
       layers: [ 'down1', 'down2', 'mid' ]  # Key MUNet layers
       criterion: charbonnier
