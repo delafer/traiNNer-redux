@@ -17,7 +17,7 @@ datasets:
     use_hflip: true
     use_rot: true
     num_worker_per_gpu: 8
-    batch_size_per_gpu: 8
+    batch_size_per_gpu: 4
     accum_iter: 1
 
   val:
@@ -99,7 +99,7 @@ train:
     - type: featurematchingloss
       loss_weight: 0.5
       start_iter: 0       # Start immediately
-      layers: [ 'down1', 'down2', 'mid' ]
+      layers: [ 'down2', 'mid' ]   # Removed 'down1' for VRAM efficiency
       criterion: charbonnier
 
     # LDL (CRITICAL for DeJPEG)

@@ -1,4 +1,4 @@
-name: 2xParagonSR2_S_DeJPEG_Stream
+name: 2xParagonSR2_S_DeJPEG_Ultimate
 scale: 2
 use_amp: true
 amp_bf16: true
@@ -10,32 +10,33 @@ datasets:
   train:
     name: Train_Dataset
     type: pairedimagedataset
-    # POINT THIS TO YOUR JPEG-DEGRADED DATASET
     dataroot_gt: /home/phips/Documents/dataset/cc0/hr
-    dataroot_lq: /home/phips/Documents/dataset/cc0/lr_x2_jpg  # <--- NEW FOLDER
+    dataroot_lq: /home/phips/Documents/dataset/cc0/lr_x2_jpg
     lq_size: 128
     use_hflip: true
     use_rot: true
     num_worker_per_gpu: 8
-    batch_size_per_gpu: 8
-    accum_iter: 1
+    # S-Model is larger -> Lower Batch Size to fit VRAM with heavy losses
+    batch_size_per_gpu: 4
+    accum_iter: 2          # Accumulate to simulate batch size 8
 
   val:
     name: Val_Dataset
     type: pairedimagedataset
     dataroot_gt: /home/phips/Documents/dataset/cc0/val_hr
-    # POINT THIS TO JPEG VAL IMAGES TO SEE REAL PROGRESS
     dataroot_lq: /home/phips/Documents/dataset/cc0/val_lr_x2_jpg
 
 network_g:
   type: paragonsr2_static_s
+  # Ensure hr_blocks matches your Pretrain (S usually has 2, Micro has 1)
+  hr_blocks: 2
 
 network_d:
   type: munet
 
 path:
-  # RESUME FROM YOUR FINISHED PERCEPTUAL MODEL
-  pretrain_network_g: experiments/2xParagonSR2_S_with_FeatureMatching_Optimized/models/net_g_ema_140000.safetensors
+  # Point to your FINISHED 'S' Perceptual Model
+  pretrain_network_g: experiments/2xParagonSR2_S_with_FeatureMatching_Optimized/models/net_g_latest.safetensors
   strict_load_g: true
   resume_state: ~
 
@@ -46,32 +47,26 @@ train:
 
   optim_g:
     type: AdamW
-    lr: !!float 5e-5      # LOWER LR (Fine-tuning)
+    lr: !!float 5e-5      # Fine-tune LR
     weight_decay: !!float 1.0e-4
     betas: [0.9, 0.99]
 
   optim_d:
     type: AdamW
-    lr: !!float 5e-5      # Match G
+    lr: !!float 5e-5
     weight_decay: 0
     betas: [0.9, 0.99]
 
   scheduler:
     type: MultiStepLR
-    milestones: [30000, 45000] # Short run
+    milestones: [30000, 45000]
     gamma: 0.5
 
-  # SHORT RUN: 50k iterations is enough to learn DeJPEG
   total_iter: 50000
   warmup_iter: 200
 
-  # =========================================================
-  # SPEED OPTIMIZED LOSS STACK
-  # Removed: DISTS, CLIP/Contrastive, HFEN (Too slow/Unnecessary)
-  # Kept: GAN, FeatureMatching, Perceptual, Charbonnier, LDL
-  # =========================================================
   losses:
-    # Base Pixel Loss
+    # 1. Base Pixel Loss
     - type: charbonnierloss
       loss_weight: 1.0
       start_iter: 0
@@ -79,32 +74,49 @@ train:
       target_weight: 0.5
       schedule_type: linear
 
-    # Perceptual (Keep ConvNeXt, it's better than VGG)
+    # 2. Perceptual (ConvNeXt)
     - type: convnextperceptualloss
       loss_weight: 0.5
       start_iter: 0
       layers: [1, 2]
       layer_weights: [1.0, 0.7]
 
-    # GAN Loss (Essential for texture)
+    # 3. DISTS (The "S" Model Special)
+    # Excellent for texture restoration. S-Model has capacity to learn this.
+    - type: distsloss
+      loss_weight: 0.05
+      start_iter: 0
+
+    # 4. Adaptive Block TV (The Anti-JPEG Special)
+    - type: AdaptiveBlockTVLoss
+      loss_weight: 0.05
+      start_iter: 0
+      block_size: 8 # Targets 8x8 JPEG blocks
+
+    # 5. GAN (R3GAN)
+    # R1/R2 at 0.0 for speed, but R3GAN logic kept for quality
     - type: ganloss
       gan_type: r3gan
       loss_weight: 0.05
-      start_iter: 0       # Start immediately (we are fine-tuning)
-      r1_weight: 1.0      # Reduced slightly for stability
-      r2_weight: 1.0
+      start_iter: 0
+      r1_weight: 0.0
+      r2_weight: 0.0
 
-    # Feature Matching (Stabilizes GAN)
+    # 6. Feature Matching
     - type: featurematchingloss
       loss_weight: 0.5
-      start_iter: 0       # Start immediately
-      layers: [ 'down1', 'down2', 'mid' ]
+      start_iter: 0
+      layers: [ 'down2', 'mid' ] # Drop down1 to save VRAM for S model
       criterion: charbonnier
 
-    # LDL (CRITICAL for DeJPEG)
-    # Prevents the GAN from sharpening JPEG artifacts
+    # 7. LDL (Anti-Artifact)
     - type: ldlloss
       loss_weight: 0.5
+      start_iter: 0
+
+      # Consistency Loss (Robustness)
+    - type: ConsistencyLoss
+      loss_weight: 0.05  # Keep weight low, it's a regularizer
       start_iter: 0
 
 val:
@@ -116,11 +128,9 @@ val:
     psnr:
       type: calculate_psnr
       crop_border: 2
-    # Removed LPIPS/DISTS/TOPIQ to speed up validation checks
-    # Visual inspection is more important for DeJPEG anyway
 
 logger:
-  print_freq: 100
+  print_freq: 20
   save_checkpoint_freq: 5000
   save_checkpoint_format: safetensors
   use_tb_logger: true
