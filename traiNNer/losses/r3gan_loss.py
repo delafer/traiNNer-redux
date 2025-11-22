@@ -298,11 +298,18 @@ class R3GANLoss(nn.Module):
         is_disc: bool,
         real_images_unaug: Tensor | None = None,
         fake_images_unaug: Tensor | None = None,
+        real_pred: Tensor | None = None,
+        fake_pred: Tensor | None = None,
         **_: dict,
     ) -> Tensor | dict[str, Tensor]:
-        # Forward through discriminator with the images intended for adversarial loss
-        real_output = net_d(real_images)
-        fake_output = net_d(fake_images)
+        # 🚀 OPTIMIZATION: Use cached discriminator outputs if provided
+        if real_pred is not None and fake_pred is not None:
+            real_output = real_pred
+            fake_output = fake_pred
+        else:
+            # Forward through discriminator with the images intended for adversarial loss
+            real_output = net_d(real_images)
+            fake_output = net_d(fake_images)
 
         if is_disc:
             # Use provided unaugmented images for R1/R2 penalties when available.
@@ -339,6 +346,8 @@ class R3GANLoss(nn.Module):
 
             real_images_unaug = loss_kwargs.pop("real_images_unaug", None)
             fake_images_unaug = loss_kwargs.pop("fake_images_unaug", None)
+            real_pred = loss_kwargs.pop("real_pred", None)
+            fake_pred = loss_kwargs.pop("fake_pred", None)
 
             if loss_kwargs:
                 unexpected = ", ".join(sorted(loss_kwargs))
@@ -353,6 +362,8 @@ class R3GANLoss(nn.Module):
                 is_disc=is_disc,
                 real_images_unaug=real_images_unaug,
                 fake_images_unaug=fake_images_unaug,
+                real_pred=real_pred,
+                fake_pred=fake_pred,
             )
 
         assert input is not None
