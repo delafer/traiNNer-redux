@@ -53,7 +53,7 @@ class SafeGradientPenalty:
 
         # Force fp32 execution for stable second-order gradients
         # Use the new autocast API (non-deprecated)
-        with torch.amp.autocast(device_type="cuda", enabled=False):
+        with torch.autocast(device_type="cuda", enabled=False):
             out = net_d(images_reqgrad.float())
 
         # If multi-scale outputs, use the last (final prediction head)
@@ -300,16 +300,23 @@ class R3GANLoss(nn.Module):
         fake_images_unaug: Tensor | None = None,
         real_pred: Tensor | None = None,
         fake_pred: Tensor | None = None,
+        _skip_discriminator: bool = False,
         **_: dict,
     ) -> Tensor | dict[str, Tensor]:
-        # 🚀 OPTIMIZATION: Use cached discriminator outputs if provided
-        if real_pred is not None and fake_pred is not None:
-            real_output = real_pred
-            fake_output = fake_pred
-        else:
+        # Critical fix: During discriminator step, always re-compute discriminator outputs
+        # to avoid using results computed when discriminator was frozen (no gradients)
+        # Performance optimization: Skip discriminator computation during generator step
+        if _skip_discriminator:
+            # During generator step, return zero loss - discriminator will be updated in discriminator step
+            return torch.tensor(0.0, device=real_images.device)
+        elif is_disc or real_pred is None or fake_pred is None:
             # Forward through discriminator with the images intended for adversarial loss
             real_output = net_d(real_images)
             fake_output = net_d(fake_images)
+        else:
+            # Only use cached results during generator step if available
+            real_output = real_pred
+            fake_output = fake_pred
 
         if is_disc:
             # Use provided unaugmented images for R1/R2 penalties when available.
@@ -349,10 +356,20 @@ class R3GANLoss(nn.Module):
             real_pred = loss_kwargs.pop("real_pred", None)
             fake_pred = loss_kwargs.pop("fake_pred", None)
 
-            if loss_kwargs:
-                unexpected = ", ".join(sorted(loss_kwargs))
+            # Allow common wrapper parameters without crashing
+            allowed_extra_params = {
+                "current_iter",
+                "step",
+                "epoch",
+                "scheduler_state_dict",
+            }
+            unexpected = [
+                k for k in loss_kwargs.keys() if k not in allowed_extra_params
+            ]
+
+            if unexpected:
                 raise TypeError(
-                    f"Unexpected keyword arguments for R3GANLoss.forward: {unexpected}"
+                    f"Unexpected keyword arguments for R3GANLoss.forward: {', '.join(sorted(unexpected))}"
                 )
 
             return self._r3gan_loss(

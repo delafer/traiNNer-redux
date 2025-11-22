@@ -106,7 +106,11 @@ class FeatureMatchingLoss(nn.Module):
             disc_fake_feats = selected_fake_feats
 
         if not disc_real_feats:
-            return torch.tensor(0.0, device="cpu")
+            # Return a zero tensor on the same device as input features to maintain gradients
+            device = (
+                disc_fake_feats[0].device if disc_fake_feats else torch.device("cpu")
+            )
+            return torch.zeros_like(disc_fake_feats[0], device=device).mean()
 
         loss = 0.0
         count = 0
@@ -137,8 +141,10 @@ class FeatureMatchingLoss(nn.Module):
             count += 1
 
         if count == 0:
-            device = disc_real_feats[0].device
-            return torch.tensor(0.0, device=device)
+            # Return zero loss maintaining gradient flow
+            return torch.zeros_like(
+                disc_real_feats[0], dtype=disc_real_feats[0].dtype
+            ).mean()
 
         result = loss / count if self.reduction == "mean" else loss
 
