@@ -17,7 +17,7 @@ datasets:
     use_hflip: true
     use_rot: true
     num_worker_per_gpu: 8
-    batch_size_per_gpu: 4
+    batch_size_per_gpu: 8
     accum_iter: 1
 
   val:
@@ -92,8 +92,8 @@ train:
       gan_type: r3gan
       loss_weight: 0.05
       start_iter: 0       # Start immediately (we are fine-tuning)
-      r1_weight: 1.0      # Reduced slightly for stability
-      r2_weight: 1.0
+      r1_weight: 0.0      # Speed optimization (using pretrain so should be stable enough)
+      r2_weight: 0.0
 
     # Feature Matching (Stabilizes GAN)
     - type: featurematchingloss
@@ -107,6 +107,15 @@ train:
     - type: ldlloss
       loss_weight: 0.5
       start_iter: 0
+
+    #- type: distsloss
+    #  loss_weight: 0.05
+    #  start_iter: 0
+
+    - type: AdaptiveBlockTVLoss
+      loss_weight: 0.05
+      start_iter: 0
+      block_size: 8  # Targets JPEG blocks
 
 val:
   val_enabled: true
