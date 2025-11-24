@@ -51,7 +51,7 @@ train:
 
   optim_d:
     type: AdamW
-    lr: !!float 1e-4
+    lr: !!float 3e-5 # 1e-4, changed to 3e-5 at 7500its, discrim became too strong
     weight_decay: 0
     betas: [0.9, 0.99]
 
@@ -144,9 +144,9 @@ train:
       loss_weight: 0.0001
       start_iter: 10000
       target_iter: 25000
-      target_weight: 0.05        # Conservative (not 0.1)
-      r1_weight: 0.0             # DISABLED for speed
-      r2_weight: 0.0             # DISABLED for speed
+      target_weight: 0.03        # Conservative (not 0.1)
+      r1_weight: 1.0             # Used for stability
+      r2_weight: 0.0             # DISABLED for speed and vram saving
       schedule_type: linear
 
     # HFEN: Edge preservation
@@ -196,9 +196,29 @@ val:
   save_img: true
   metrics_enabled: true
   metrics:
+    # PSNR - Peak Signal-to-Noise Ratio (pixel-wise reconstruction fidelity)
     psnr:
       type: calculate_psnr
-      crop_border: 2
+      crop_border: 2       # Ignore 2-pixel border (avoids boundary artifacts)
+
+    # SSIM - Structural Similarity Index (structural preservation)
+    ssim:
+      type: calculate_ssim
+      crop_border: 2       # Consistent crop for fair comparison
+
+    # LPIPS - Learned Perceptual Image Patch Similarity (perceptual quality)
+    lpips:
+      type: calculate_lpips
+      better: lower        # Lower LPIPS = better perceptual quality
+
+    # DISTS - Deep Image Structure and Texture Similarity (texture quality)
+    dists:
+      type: calculate_dists
+      better: lower        # Lower DISTS = better structure/texture match
+
+    # ToPIQ - Transferable Perceptual Image Quality (comprehensive quality)
+    topiq:
+      type: calculate_topiq
 
 logger:
   print_freq: 50
