@@ -72,54 +72,121 @@ train:
   # Kept: GAN, FeatureMatching, Perceptual, Charbonnier, LDL
   # =========================================================
   losses:
-    # Base Pixel Loss
+    # 1. PIXEL LOSS: Low Weight
+    # Sufficient to keep colors correct, low enough to allow texture.
     - type: charbonnierloss
-      loss_weight: 1.0
+      loss_weight: 0.3
       start_iter: 0
       target_iter: 50000
-      target_weight: 0.5
+      target_weight: 0.3
       schedule_type: linear
 
-    # Perceptual (Keep ConvNeXt, it's better than VGG)
+    # 2. PERCEPTUAL: High Weight
+    # This is the "Micro" model's anchor. It ensures shapes are correct.
     - type: convnextperceptualloss
-      loss_weight: 0.5
+      loss_weight: 0.3
       start_iter: 0
       layers: [1, 2]
       layer_weights: [1.0, 0.7]
 
-    # GAN Loss (Essential for texture)
+    # 3. GAN LOSS: Medium Weight
+    # The engine of texture.
     - type: ganloss
       gan_type: r3gan
-      loss_weight: 0.05
-      start_iter: 0       # Start immediately (we are fine-tuning)
-      r1_weight: 0.0      # Speed optimization (using pretrain so should be stable enough)
+      loss_weight: 0.05       # Standard r3gan weight
+      start_iter: 0
+      r1_weight: 0.0
       r2_weight: 0.0
 
-    # Feature Matching (Stabilizes GAN)
+    # 4. FEATURE MATCHING: High Weight
+    # helps the Micro model learn
+    # from the discriminator without being overwhelmed.
     - type: featurematchingloss
       loss_weight: 0.5
-      start_iter: 0       # Start immediately
-      layers: [ 'down2', 'mid' ]   # Removed 'down1' for VRAM efficiency
+      start_iter: 0
+      layers: [ 'down2', 'mid' ]
       criterion: charbonnier
 
-    # LDL (CRITICAL for DeJPEG)
-    # Prevents the GAN from sharpening JPEG artifacts
+    # 5. LDL: High Weight
+    # The specific anti-artifact loss. We increase it so it actually does something.
     - type: ldlloss
-      loss_weight: 0.5
+      loss_weight: 10.0       # Increased to make it impactful
       start_iter: 0
 
     #- type: distsloss
     #  loss_weight: 0.05
     #  start_iter: 0
 
-    - type: AdaptiveBlockTVLoss
-      loss_weight: 0.05
+    #- type: AdaptiveBlockTVLoss
+    #  loss_weight: 0.005    # Down from 0.05 (Micro-appropriate)
+    #  start_iter: 0
+    #  block_size: 8         # Keep for JPEG targeting
+    #  sharpness: 4.0        # Keep default
+
+    #- type: ContrastiveLoss
+    #  loss_weight: 0.00
+    #  start_iter: 0
+    #  target_iter: 50000
+    #  target_weight: 0.05
+    #  temperature: 0.1
+
+    #- type: GradientVarianceLoss
+    #  loss_weight: 0.05
+    #  start_iter: 0
+    #  target_iter: 500
+    #  target_weight: 0.05
+    #  patch_size: 16
+    #  criterion: charbonnier
+
+    #- type: ffloss
+    #  loss_weight: 0.38
+    #  start_iter: 10000    # PHASE 3: Start after perceptual foundation
+    #  target_iter: 90000
+    #  target_weight: 0.56
+    #  schedule_type: linear
+
+    #- type: hfenloss
+    #  loss_weight: 0.012
+    #  start_iter: 5000     # PHASE 2: Start with perceptual losses
+    #  target_iter: 5000
+    #  target_weight: 0.012
+    #  kernel_size: 7
+    #  sigma: 1.0
+    #  criterion: charbonnier
+    #  reduction: mean
+
+    - type: ConsistencyLoss
+      loss_weight: 0.5
       start_iter: 0
-      block_size: 8  # Targets JPEG blocks
+      criterion: "chc"
+      blur: false           # No blur for detail preservation
+      brightness: 1.0       # ← Restore original brightness exactly
+      saturation: 1.0       # ← Restore original saturation exactly
+      cosim: true
+      cosim_weight: 0.5
+
+    #- type: LaplacianPyramidLoss
+    #  loss_weight: 0.1         # Low weight, multi-scale detail preservation
+    #  levels: 3                # 3 levels is usually sufficient
+    #  criterion: charbonnier
+    #  start_iter: 0
+
+    #- type: CheckerboardLoss
+    #  loss_weight: 0.01        # Very low weight
+    #  scale: 2                 # Match your upscale factor
+    #  criterion: charbonnier
+    #  start_iter: 0
+
+    - type: ffloss
+      loss_weight: 0.05        # Start moderate
+      start_iter: 5000         # Wait 1k more iterations
+      target_iter: 25000
+      target_weight: 0.1       # Ramp up gradually
+      schedule_type: linear
 
 val:
   val_enabled: true
-  val_freq: 5000
+  val_freq: 1000
   save_img: true
   metrics_enabled: true
   metrics:
@@ -131,6 +198,6 @@ val:
 
 logger:
   print_freq: 100
-  save_checkpoint_freq: 5000
+  save_checkpoint_freq: 1000
   save_checkpoint_format: safetensors
   use_tb_logger: true
