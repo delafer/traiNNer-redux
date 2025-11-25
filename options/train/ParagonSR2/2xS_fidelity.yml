@@ -18,7 +18,7 @@ datasets:
     type: pairedimagedataset
     dataroot_gt: /home/phips/Documents/dataset/cc0/hr
     dataroot_lq: /home/phips/Documents/dataset/cc0/lr_x2 # Clean downsampled
-    lq_size: 128
+    lq_size: 256
     use_hflip: true
     use_rot: true
     num_worker_per_gpu: 8

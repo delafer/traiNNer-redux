@@ -19,7 +19,7 @@ datasets:
     type: pairedimagedataset
     dataroot_gt: /home/phips/Documents/dataset/cc0/hr
     dataroot_lq: /home/phips/Documents/dataset/cc0/lr_x2_real # Complex degradations
-    lq_size: 128
+    lq_size: 256 # S model benefits from larger context
     use_hflip: true
     use_rot: true
     num_worker_per_gpu: 8
@@ -45,7 +45,7 @@ path:
   resume_state: ~
 
 train:
-  ema_decay: 0.995 # Lower for diverse degradations
+  ema_decay: 0.999 # Standard for S model
   ema_power: 0.75
   grad_clip: true
 
@@ -66,21 +66,22 @@ train:
     milestones: [30000, 45000]
     gamma: 0.5
 
-  total_iter: 60000
+  total_iter: 100000 # Longer for GAN stability
+  gan_start_iter: 15000 # Start GAN after solid baseline
   warmup_iter: 200
 
-  # Comprehensive loss stack for real-world degradations
+  # Optimized loss stack for real-world degradations + GAN
   losses:
-    # 1. Pixel accuracy - ramp down aggressively
+    # 1. Pixel accuracy - ramp down aggressively for photorealism
     - type: charbonnierloss
-      loss_weight: 0.8
-      target_iter: 25000
-      target_weight: 0.08 # Very low for photorealism
+      loss_weight: 1.0
+      target_iter: 40000
+      target_weight: 0.1 # Low but not too low (stability)
       schedule_type: linear
 
     # 2. Perceptual - core structure preservation
     - type: convnextperceptualloss
-      loss_weight: 0.5
+      loss_weight: 0.2 # Lower with GAN (GAN handles detail)
       layers: [1, 2]
       layer_weights: [1.0, 0.7]
 
@@ -88,58 +89,49 @@ train:
     - type: distsloss
       loss_weight: 0.1
 
-    # 4. Feature matching - align with discriminator
-    - type: featurematchingloss
-      loss_weight: 0.5
-      layers: ["down2", "mid"]
-      criterion: charbonnier
-
-    # 5. LDL - local artifact removal (critical for real degradations)
-    - type: ldlloss
-      loss_weight: 10.0
-
-    # 6. Color stability
+    # 4. Color stability - critical for GAN training
     - type: ConsistencyLoss
-      loss_weight: 0.25
+      loss_weight: 0.1 # Standard for S with GAN
       criterion: "chc"
       blur: false
-      brightness: 1.0
-      saturation: 1.0
       cosim: true
       cosim_weight: 0.5
 
-    # 7. Frequency domain - handles compression artifacts
+    # 5. Frequency domain - handles compression artifacts
     - type: ffloss
       loss_weight: 0.1
       start_iter: 5000
-      target_iter: 25000
-      target_weight: 0.25 # Higher for compression
+      target_iter: 30000
+      target_weight: 0.2 # Moderate for compression
       schedule_type: linear
 
-    # 8. Block artifact removal (JPG/WebP/AVIF)
+    # 6. Block artifact removal (JPG/WebP/AVIF)
     - type: AdaptiveBlockTVLoss
-      loss_weight: 0.005
+      loss_weight: 0.01 # Moderate for S (preserves texture)
       block_size: 8
       sharpness: 4.0
 
-    # 9. Edge preservation - critical for blur handling
+    # 7. High-frequency detail (lower with GAN)
     - type: hfenloss
-      loss_weight: 0.015
+      loss_weight: 0.08 # Moderate (GAN helps with detail)
       start_iter: 2000
       kernel_size: 7
       sigma: 1.0
       criterion: charbonnier
 
-    # 10. GAN - photorealistic texture synthesis
-    - type: ganloss
+    # 8. Feature matching - GAN stabilizer (CRITICAL!)
+    - type: featurematchingloss
+      loss_weight: 0.1 # Standard stabilizer weight
+      start_iter: 15000 # Start with GAN
+
+    # 9. GAN - photorealistic texture synthesis
+    - type: ganloss # Standard GANLoss with r3gan type
       gan_type: r3gan
-      loss_weight: 0.0001
-      start_iter: 10000
-      target_iter: 25000
-      target_weight: 0.03 # Conservative
-      r1_weight: 1.0
-      r2_weight: 0.0 # Disabled for speed
-      schedule_type: linear
+      loss_weight: 0.03 # Conservative weight
+      start_iter: 15000 # Start after solid baseline
+
+  # R1 gradient penalty (applied to discriminator during training)
+  r1_reg_weight: 10.0 # Stabilizes GAN training
 
 val:
   val_enabled: true

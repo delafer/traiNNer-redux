@@ -18,7 +18,7 @@ datasets:
     type: pairedimagedataset
     dataroot_gt: /home/phips/Documents/dataset/cc0/hr
     dataroot_lq: /home/phips/Documents/dataset/cc0/lr_x2 # Clean downsampled
-    lq_size: 128
+    lq_size: 256 # S model benefits from larger patches
     use_hflip: true
     use_rot: true
     num_worker_per_gpu: 8
@@ -64,12 +64,12 @@ train:
     - type: charbonnierloss
       loss_weight: 1.0
       target_iter: 30000
-      target_weight: 0.15 # Lower than before
+      target_weight: 0.12 # Slightly lower for S (more capacity than Nano)
       schedule_type: linear
 
     # Perceptual - main driver for natural textures
     - type: convnextperceptualloss
-      loss_weight: 0.5
+      loss_weight: 0.25 # Lower for S (stronger model, doesn't need as much push)
       layers: [1, 2]
       layer_weights: [1.0, 0.7]
 
@@ -79,29 +79,19 @@ train:
 
     # Color stability - prevents color shifts
     - type: ConsistencyLoss
-      loss_weight: 0.15
+      loss_weight: 0.08 # Lower for S (more stable than Nano)
       criterion: "chc"
       blur: false
-      brightness: 1.0
-      saturation: 1.0
       cosim: true
       cosim_weight: 0.5
 
     # Edge crispness - critical for sharp outputs
     - type: hfenloss
-      loss_weight: 0.01
+      loss_weight: 0.12 # Higher for S (can handle sharper detail)
       start_iter: 2000
       kernel_size: 7
       sigma: 1.0
       criterion: charbonnier
-
-    # Frequency domain detail
-    - type: ffloss
-      loss_weight: 0.05
-      start_iter: 5000
-      target_iter: 25000
-      target_weight: 0.1
-      schedule_type: linear
 
 val:
   val_enabled: true

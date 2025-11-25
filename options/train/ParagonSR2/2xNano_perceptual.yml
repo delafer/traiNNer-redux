@@ -104,6 +104,9 @@ val:
     dists:
       type: calculate_dists
       better: lower
+    topiq:
+      type: calculate_topiq
+      better: higher
 
 logger:
   print_freq: 50
