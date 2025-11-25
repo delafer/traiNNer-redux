@@ -146,6 +146,9 @@ def main() -> None:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
+  # Process a SUBSET (recommended for large datasets!)
+  python %(prog)s --input lr_x2 --output lr_x2_video --max_images 5000 --preset medium
+
   # Medium quality (YouTube-like)
   python %(prog)s --input lr_x2 --output lr_x2_video --preset medium
 
@@ -165,6 +168,10 @@ Presets (speed/quality tradeoff):
   ultrafast/fast: Faster encoding, lower quality
   medium: Balanced (default)
   slow/veryslow: Better quality, slower encoding
+
+IMPORTANT for large datasets (100k+ images):
+  Use --max_images to limit processing (5k-10k is usually enough for training!)
+  Full dataset processing can take DAYS. A subset is faster and often sufficient.
         """,
     )
 
@@ -204,6 +211,19 @@ Presets (speed/quality tradeoff):
         "--workers", type=int, default=4, help="Number of worker threads (default: 4)"
     )
 
+    # NEW: Subset processing
+    parser.add_argument(
+        "--max_images",
+        type=int,
+        default=None,
+        help="Maximum number of images to process (default: all). RECOMMENDED for large datasets!",
+    )
+    parser.add_argument(
+        "--shuffle",
+        action="store_true",
+        help="Shuffle images before processing (useful with --max_images)",
+    )
+
     args = parser.parse_args()
 
     # Check ffmpeg
@@ -232,20 +252,53 @@ Presets (speed/quality tradeoff):
         print(f"No images found in '{input_dir}'")
         return
 
+    # Shuffle if requested
+    if args.shuffle:
+        import random
+
+        random.shuffle(files)
+
+    # Limit to max_images
+    total_files = len(files)
+    if args.max_images and args.max_images < total_files:
+        files = files[: args.max_images]
+        print(
+            f"⚠️  Processing only {args.max_images} of {total_files} images (subset mode)"
+        )
+
     # Display settings
     print("=" * 60)
     print("Video Compression Degradation")
     print("=" * 60)
     print(f"Input folder:  {input_dir}")
     print(f"Output folder: {output_dir}")
-    print(f"Images found:  {len(files)}")
+    print(f"Total images:  {total_files}")
+    print(f"Processing:    {len(files)}")
+    if args.max_images and args.max_images < total_files:
+        print(f"⚠️  SUBSET MODE: Processing {len(files)}/{total_files} images")
+        print("   This is RECOMMENDED for large datasets!")
     print(f"Codec:         {args.codec}")
     print(f"CRF range:     {args.crf_min}-{args.crf_max}")
     print(f"Preset:        {args.preset}")
     print(f"Workers:       {args.workers}")
     print("=" * 60)
-    print("\nNote: This will be slow due to FFmpeg encoding per image.")
-    print("Consider using a subset of images for testing first.\n")
+
+    # Estimate time
+    time_per_image = 0.5  # Rough estimate (seconds)
+    estimated_time = (len(files) * time_per_image) / 60  # minutes
+    print(f"\n⏱️  Estimated time: ~{estimated_time:.0f} minutes")
+    if estimated_time > 120:
+        print(f"   ({estimated_time / 60:.1f} hours)")
+    print()
+
+    if len(files) > 10000:
+        print("⚠️  WARNING: Large dataset detected!")
+        print("   Consider using --max_images 5000 for faster processing.")
+        print("   5k-10k images is usually sufficient for training.\n")
+        response = input("Continue with full processing? (y/n): ")
+        if response.lower() != "y":
+            print("Aborted.")
+            return
 
     # Prepare work items
     tasks = []
@@ -261,6 +314,7 @@ Presets (speed/quality tradeoff):
     print("\n" + "=" * 60)
     print("✓ Dataset creation complete!")
     print(f"✓ Video-compressed images saved to: {output_dir}")
+    print(f"✓ Processed: {len(files)} images")
     print("=" * 60)
 
 

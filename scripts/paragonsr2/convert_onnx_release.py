@@ -13,6 +13,24 @@ Usage:
         --arch paragonsr2_static_s \
         --scale 2 \
         --output release_output
+
+And then
+
+trtexec \
+  --onnx=release_models/2xParagonSR2_Nano_fidelity/paragonsr2_nano_fp32.onnx \
+  --saveEngine=release_models/2xParagonSR2_Nano_fidelity/paragonsr2_nano_2x_fp16.trt \
+  --fp16 \
+  --minShapes=input:1x3x64x64 \
+  --optShapes=input:1x3x540x960 \
+  --maxShapes=input:1x3x1080x1920
+
+And then
+
+python scripts/paragonsr2/inference_trt.py \
+  --engine release_models/2xParagonSR2_Nano_fidelity/paragonsr2_nano_2x_fp16.trt \
+  --input /home/phips/Documents/dataset/cc0/val_lr_x2 \
+  --output /home/phips/Documents/dataset/cc0/val_lr__x2_trt \
+  --scale 2
 """
 
 import argparse
@@ -33,12 +51,16 @@ from torch import nn
 
 # Import architectures
 try:
-    sys.path.append(str(Path(__file__).parents[2]))
-    import traiNNer.archs.paragonsr2_hybrid  # Add hybrid support
-    import traiNNer.archs.paragonsr2_static_arch
+    # Add repo root to path
+    repo_root = Path(__file__).parents[2]
+    sys.path.insert(0, str(repo_root))
+
+    import traiNNer.archs.paragonsr2_arch  # Main ParagonSR2 architecture
     from traiNNer.utils.registry import ARCH_REGISTRY
-except ImportError:
-    print("Error: Could not import traiNNer modules.")
+except ImportError as e:
+    print(f"Error: Could not import traiNNer modules: {e}")
+    print(f"Repo root: {Path(__file__).parents[2]}")
+    print(f"sys.path: {sys.path[:3]}")
     sys.exit(1)
 
 warnings.filterwarnings("ignore")

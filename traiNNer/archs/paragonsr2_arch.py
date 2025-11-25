@@ -619,9 +619,10 @@ class ParagonSR2(nn.Module):
                             memory_format=torch.channels_last
                         )
 
-    def fuse_for_release(self):
-        """Fuse ReparamConv blocks for inference (currently no ReparamConv in hybrid)."""
-        for module in self.modules():
+    def fuse_for_release(self) -> None:
+        """Fuse ReparamConvV2 blocks for inference (if present)."""
+        # Recursively fuse all child modules (NOT self.modules() which includes self!)
+        for module in self.children():
             if hasattr(module, "fuse_for_release"):
                 module.fuse_for_release()
         return self
