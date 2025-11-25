@@ -5,7 +5,100 @@ from torch.nn.utils.parametrizations import spectral_norm
 
 from traiNNer.utils.registry import ARCH_REGISTRY
 
-from .resampler import MagicKernelSharp2021Upsample
+# -------------------------
+# MagicKernel Implementation (ONNX-compatible)
+# -------------------------
+
+
+def get_magic_kernel_weights() -> torch.Tensor:
+    """B-spline kernel for smooth upsampling (Magic Kernel)."""
+    return torch.tensor([1 / 16, 4 / 16, 6 / 16, 4 / 16, 1 / 16])
+
+
+def get_magic_sharp_2021_kernel_weights() -> torch.Tensor:
+    """Sharpening kernel for detail enhancement (MagicKernelSharp2021)."""
+    return torch.tensor([-1 / 32, 0, 9 / 32, 16 / 32, 9 / 32, 0, -1 / 32])
+
+
+class SeparableConv(nn.Module):
+    """
+    Separable 1D convolution (horizontal then vertical).
+    More efficient than 2D: O(N*K) vs O(N*K^2).
+    Fixed weights (no gradients) - used for MagicKernel.
+    """
+
+    def __init__(self, in_channels: int, kernel: torch.Tensor) -> None:
+        super().__init__()
+        kernel_size = len(kernel)
+        # Horizontal convolution (1 x K)
+        self.conv_h = nn.Conv2d(
+            in_channels,
+            in_channels,
+            kernel_size=(1, kernel_size),
+            padding=(0, kernel_size // 2),
+            groups=in_channels,  # Depthwise
+            bias=False,
+        )
+        # Vertical convolution (K x 1)
+        self.conv_v = nn.Conv2d(
+            in_channels,
+            in_channels,
+            kernel_size=(kernel_size, 1),
+            padding=(kernel_size // 2, 0),
+            groups=in_channels,  # Depthwise
+            bias=False,
+        )
+        # Initialize weights from 1D kernel (no training)
+        with torch.no_grad():
+            reshaped = kernel.view(1, 1, 1, -1).repeat(in_channels, 1, 1, 1)
+            self.conv_h.weight.copy_(reshaped)
+            reshaped = kernel.view(1, 1, -1, 1).repeat(in_channels, 1, 1, 1)
+            self.conv_v.weight.copy_(reshaped)
+        # Freeze weights (classical upsampling, no learning)
+        for param in self.parameters():
+            param.requires_grad = False
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.conv_v(self.conv_h(x))  # Apply horizontal then vertical
+
+
+class MagicKernelSharp2021Upsample(nn.Module):
+    """
+    MagicKernelSharp2021 upsampler (classical method, no learning).
+    For discriminator use - accepts RUNTIME scale_factor (no ONNX export needed).
+
+    Process: Sharpen (optional) → Nearest upsampling → B-spline blur
+    Fixed weights provide stable upsampling for discriminator.
+
+    Args:
+        in_channels: Number of input channels
+        alpha: Sharpening strength (0=none, 1=maximum)
+    """
+
+    def __init__(self, in_channels: int, alpha: float = 1.0) -> None:
+        super().__init__()
+        self.alpha = float(max(0.0, min(alpha, 1.0)))  # Clamp to [0, 1]
+        sharp_kernel = get_magic_sharp_2021_kernel_weights()
+        self.sharpen = SeparableConv(in_channels, sharp_kernel)
+        resample_kernel = get_magic_kernel_weights()
+        self.resample_conv = SeparableConv(in_channels, resample_kernel)
+
+    def forward(
+        self, x: torch.Tensor, scale_factor: int | float | tuple[float, float]
+    ) -> torch.Tensor:
+        """
+        Args:
+            x: Input tensor (B, C, H, W)
+            scale_factor: Upsampling scale (can be dynamic, discriminator doesn't need ONNX)
+        """
+        # Optional sharpening (if alpha > 0)
+        if self.alpha > 0.0:
+            x_sharp = self.sharpen(x)
+            x = x + self.alpha * (x_sharp - x)  # Blend original with sharpened
+        # Nearest-neighbor upsampling (fast, preserves edges)
+        x_upsampled = F.interpolate(x, scale_factor=scale_factor, mode="nearest")
+        # B-spline blur to smooth blocky nearest-neighbor artifacts
+        return self.resample_conv(x_upsampled)
 
 
 # -------------------------
@@ -23,8 +116,9 @@ class DownBlock(nn.Sequential):
 
 class UpBlock(nn.Module):
     """
-    Upsampling block for the MUNet discriminator (keeps your Magic upsampler).
-    Produces features aligned to a skip connection and then fuses them.
+    Upsampling block for the MUNet discriminator.
+    Uses MagicKernel for stable upsampling with DYNAMIC scale based on skip connections.
+    Scale is runtime-calculated (fine for discriminator, no ONNX export needed).
     """
 
     def __init__(
@@ -39,6 +133,7 @@ class UpBlock(nn.Module):
         if out_feat is None:
             out_feat = skip_feat
 
+        # No scale parameter - calculated at runtime based on skip connection sizes
         self.magic_upsample = MagicKernelSharp2021Upsample(in_feat)
         self.post_upsample_conv = spectral_norm(
             nn.Conv2d(in_feat, skip_feat, 3, 1, 1, bias=False)
@@ -51,10 +146,11 @@ class UpBlock(nn.Module):
         )
 
     def forward(self, x: Tensor, skip: Tensor) -> Tensor:
-        # scale ratios
+        # Calculate scale dynamically based on encoder/decoder structure
         scale_h = skip.shape[2] / x.shape[2]
         scale_w = skip.shape[3] / x.shape[3]
 
+        # Use dynamic scale (discriminator doesn't need ONNX, this is fine)
         if abs(scale_h - 1.0) < 1e-6 and abs(scale_w - 1.0) < 1e-6:
             x = self.magic_upsample(x, 1.0)
         else:
@@ -62,6 +158,7 @@ class UpBlock(nn.Module):
 
         x = self.post_upsample_conv(x)
 
+        # Ensure spatial match with skip connection
         if x.shape[2:] != skip.shape[2:]:
             x = F.interpolate(x, size=skip.shape[2:], mode="nearest")
 

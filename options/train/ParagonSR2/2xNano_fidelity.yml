@@ -64,7 +64,7 @@ train:
 
 val:
   val_enabled: true
-  val_freq: 5000
+  val_freq: 10000
   save_img: true
 
   metrics_enabled: true
