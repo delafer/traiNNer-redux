@@ -60,7 +60,7 @@ train:
   total_iter: 50000
   warmup_iter: 200
 
-  # Simplified loss stack for Nano - focus on blocking artifacts
+  # Loss stack optimized for video compression artifacts
   losses:
     # Pixel accuracy
     - type: charbonnierloss
@@ -79,18 +79,27 @@ train:
     - type: distsloss
       loss_weight: 0.1
 
-    # Block artifact removal (8x8 DCT blocks in H.264/H.265)
+    # Color stability - prevents video encoder color shifts
+    - type: ConsistencyLoss
+      loss_weight: 0.2
+      criterion: "chc"
+      blur: false
+      cosim: true
+      cosim_weight: 0.5
+
+    # Block artifact removal (8x8 DCT blocks)
     - type: AdaptiveBlockTVLoss
-      loss_weight: 0.01 # Higher for nano's limited capacity
+      loss_weight: 0.015 # Higher for nano
       block_size: 8
       sharpness: 4.0
 
-    # Frequency domain - helps with compression artifacts
+    # Frequency domain - critical for compression artifacts
     - type: ffloss
       loss_weight: 0.1
       start_iter: 2500
       target_iter: 20000
-      target_weight: 0.2
+      target_weight: 0.25 # Higher for video artifacts
+      schedule_type: linear
 
 val:
   val_enabled: true

@@ -1,9 +1,10 @@
 # yaml-language-server: $schema=https://raw.githubusercontent.com/the-database/traiNNer-redux/refs/heads/master/schemas/redux-config.schema.json
 #########################################################################################
-# ParagonSR2 S - Perceptual Quality (Crisp, Good-Looking Outputs)
-# Uses fidelity pretrain, optimized for visual appeal
+# ParagonSR2 S - Real-World Degradations (Complex, Multiple Artifacts)
+# Handles blur, noise, JPG/AVIF/WebP compression, downsampling artifacts
+# Requires discriminator for photorealistic output quality
 #########################################################################################
-name: 2xParagonSR2_S_Perceptual
+name: 2xParagonSR2_S_Real
 scale: 2
 
 use_amp: true
@@ -17,7 +18,7 @@ datasets:
     name: Train
     type: pairedimagedataset
     dataroot_gt: /home/phips/Documents/dataset/cc0/hr
-    dataroot_lq: /home/phips/Documents/dataset/cc0/lr_x2 # Clean downsampled
+    dataroot_lq: /home/phips/Documents/dataset/cc0/lr_x2_real # Complex degradations
     lq_size: 128
     use_hflip: true
     use_rot: true
@@ -29,20 +30,23 @@ datasets:
     name: Val
     type: pairedimagedataset
     dataroot_gt: /home/phips/Documents/dataset/cc0/val_hr
-    dataroot_lq: /home/phips/Documents/dataset/cc0/val_lr_x2
+    dataroot_lq: /home/phips/Documents/dataset/cc0/val_lr_x2_real
 
 network_g:
   type: paragonsr2_s
   scale: 2
 
+network_d:
+  type: munet # Multi-branch discriminator for artifact detection
+
 path:
-  # Load fidelity pretrain
-  pretrain_network_g: experiments/2xParagonSR2_S_Fidelity/models/net_g_ema_400000.safetensors
+  # Start from fidelity or perceptual pretrain
+  pretrain_network_g: experiments/2xParagonSR2_S_Perceptual/models/net_g_ema_60000.safetensors
   strict_load_g: true
   resume_state: ~
 
 train:
-  ema_decay: 0.999
+  ema_decay: 0.995 # Lower for diverse degradations
   ema_power: 0.75
   grad_clip: true
 
@@ -50,6 +54,12 @@ train:
     type: AdamW
     lr: !!float 1e-4
     weight_decay: !!float 1e-4
+    betas: [0.9, 0.99]
+
+  optim_d:
+    type: AdamW
+    lr: !!float 3e-5 # Conservative discriminator LR
+    weight_decay: 0
     betas: [0.9, 0.99]
 
   scheduler:
@@ -60,27 +70,38 @@ train:
   total_iter: 60000
   warmup_iter: 200
 
+  # Comprehensive loss stack for real-world degradations
   losses:
-    # Pixel accuracy - ramp down to let perceptual dominate
+    # 1. Pixel accuracy - ramp down aggressively
     - type: charbonnierloss
-      loss_weight: 1.0
-      target_iter: 30000
-      target_weight: 0.15 # Lower than before
+      loss_weight: 0.8
+      target_iter: 25000
+      target_weight: 0.08 # Very low for photorealism
       schedule_type: linear
 
-    # Perceptual - main driver for natural textures
+    # 2. Perceptual - core structure preservation
     - type: convnextperceptualloss
       loss_weight: 0.5
       layers: [1, 2]
       layer_weights: [1.0, 0.7]
 
-    # Texture quality
+    # 3. Texture quality
     - type: distsloss
       loss_weight: 0.1
 
-    # Color stability - prevents color shifts
+    # 4. Feature matching - align with discriminator
+    - type: featurematchingloss
+      loss_weight: 0.5
+      layers: ["down2", "mid"]
+      criterion: charbonnier
+
+    # 5. LDL - local artifact removal (critical for real degradations)
+    - type: ldlloss
+      loss_weight: 10.0
+
+    # 6. Color stability
     - type: ConsistencyLoss
-      loss_weight: 0.15
+      loss_weight: 0.25
       criterion: "chc"
       blur: false
       brightness: 1.0
@@ -88,20 +109,37 @@ train:
       cosim: true
       cosim_weight: 0.5
 
-    # Edge crispness - critical for sharp outputs
+    # 7. Frequency domain - handles compression artifacts
+    - type: ffloss
+      loss_weight: 0.1
+      start_iter: 5000
+      target_iter: 25000
+      target_weight: 0.25 # Higher for compression
+      schedule_type: linear
+
+    # 8. Block artifact removal (JPG/WebP/AVIF)
+    - type: AdaptiveBlockTVLoss
+      loss_weight: 0.005
+      block_size: 8
+      sharpness: 4.0
+
+    # 9. Edge preservation - critical for blur handling
     - type: hfenloss
-      loss_weight: 0.01
+      loss_weight: 0.015
       start_iter: 2000
       kernel_size: 7
       sigma: 1.0
       criterion: charbonnier
 
-    # Frequency domain detail
-    - type: ffloss
-      loss_weight: 0.05
-      start_iter: 5000
+    # 10. GAN - photorealistic texture synthesis
+    - type: ganloss
+      gan_type: r3gan
+      loss_weight: 0.0001
+      start_iter: 10000
       target_iter: 25000
-      target_weight: 0.1
+      target_weight: 0.03 # Conservative
+      r1_weight: 1.0
+      r2_weight: 0.0 # Disabled for speed
       schedule_type: linear
 
 val:

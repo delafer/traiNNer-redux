@@ -61,14 +61,14 @@ train:
   warmup_iter: 200
 
   losses:
-    # Pixel loss - ramp down to let perceptual dominate
+    # Pixel accuracy - ramp down
     - type: charbonnierloss
       loss_weight: 1.0
       target_iter: 25000
-      target_weight: 0.2
+      target_weight: 0.2 # Keep higher for nano (less capacity)
       schedule_type: linear
 
-    # Perceptual - modern ConvNeXt features for natural textures
+    # Perceptual - main driver
     - type: convnextperceptualloss
       loss_weight: 0.5
       layers: [1, 2]
@@ -77,6 +77,14 @@ train:
     # Texture quality
     - type: distsloss
       loss_weight: 0.1
+
+    # Color stability - important for nano
+    - type: ConsistencyLoss
+      loss_weight: 0.2 # Slightly higher for nano
+      criterion: "chc"
+      blur: false
+      cosim: true
+      cosim_weight: 0.5
 
 val:
   val_enabled: true
