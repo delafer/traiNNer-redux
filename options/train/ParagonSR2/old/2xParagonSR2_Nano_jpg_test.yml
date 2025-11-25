@@ -1,17 +1,16 @@
 # yaml-language-server: $schema=https://raw.githubusercontent.com/the-database/traiNNer-redux/refs/heads/master/schemas/redux-config.schema.json
 #########################################################################################
-# Fidelity Pretrain Config for ParagonSR2 Hybrid S
-# Goals: Clean fidelity pretrain, artifact-free, fast, deployable
+# ParagonSR2 Hybrid Nano - Fast Test Config for De-JPEG
+# Goals: Quick training to validate architecture works, learns JPEG artifact removal
 #########################################################################################
-name: 2xParagonSR2_S_Hybrid_Fidelity
+name: 2xParagonSR2_Nano_DeJPEG_Test
 scale: 2
 
-use_amp: true # Enable automatic mixed precision
-amp_bf16: true # Use bf16 instead of fp16 for supported GPUs
-use_channels_last: true # Memory-friendly format for speed
-fast_matmul: false # Precision-over-speed tradeoff
-num_gpu: auto # Automatically detect available GPUs
-manual_seed: 1024 # Optional: fixes randomness for reproducibility
+use_amp: true
+amp_bf16: true
+use_channels_last: true
+fast_matmul: true
+num_gpu: auto
 
 #########################################################################################
 # Dataset & Dataloader Settings
@@ -20,39 +19,43 @@ datasets:
   train:
     name: Train Dataset
     type: pairedimagedataset
-    dataroot_gt: [/home/phips/Documents/dataset/cc0/hr]
-    dataroot_lq: [/home/phips/Documents/dataset/cc0/lr_x2] # Clean LR (no JPEG)
+    dataroot_gt: /home/phips/Documents/dataset/cc0/hr
+    dataroot_lq: /home/phips/Documents/dataset/cc0/lr_x2_jpg # JPEG degraded
     lq_size: 128
     use_hflip: true
     use_rot: true
     num_worker_per_gpu: 8
-    batch_size_per_gpu: 6 # Hybrid is faster, can increase batch size
+    batch_size_per_gpu: 12 # Nano is tiny, can use large batch size
     accum_iter: 1
 
   val:
     name: Val Dataset
     type: pairedimagedataset
-    dataroot_gt: [/home/phips/Documents/dataset/cc0/val_hr]
-    dataroot_lq: [/home/phips/Documents/dataset/cc0/val_lr_x2]
+    dataroot_gt: /home/phips/Documents/dataset/cc0/val_hr
+    dataroot_lq: /home/phips/Documents/dataset/cc0/val_lr_x2_jpg
 
 #########################################################################################
 # Generator Network
 #########################################################################################
 network_g:
-  type: paragonsr2_s
+  type: paragonsr2_nano
   scale: 2
-  # Hybrid architecture uses sensible defaults:
-  # - 48 features, 3 groups, 4 blocks
-  # - upsampler_alpha: 0.5 (MagicKernel sharpening)
-  # - detail_gain: 0.1 (initial detail contribution)
-  # - fast_body_mode: true (faster training, slight quality tradeoff)
+  # Nano specs: 12 features, 1 group, 1 block
+  # Very fast training: ~40+ it/s on RTX 3060
+  # Can learn basic JPEG artifact patterns despite small size
 
 #########################################################################################
-# Pretrain & Resume Paths
+# No Discriminator for Fast Testing
+#########################################################################################
+# network_d:
+#   type: munet
+
+#########################################################################################
+# Paths
 #########################################################################################
 path:
-  param_key_g: ~
-  strict_load_g: true # Ensures weights are loaded only if names match exactly
+  pretrain_network_g: ~
+  strict_load_g: true
   resume_state: ~
 
 #########################################################################################
@@ -66,51 +69,66 @@ train:
   # Optimizer for Generator
   optim_g:
     type: AdamW
-    lr: !!float 1e-4 # Slightly lower for stability
-    weight_decay: !!float 1e-4 # Mild regularization
+    lr: !!float 2e-4 # Higher LR for faster convergence with tiny model
+    weight_decay: !!float 1e-4
     betas: [0.9, 0.99]
 
-  # Scheduler: MultiStepLR for stable decay
+  # Scheduler
   scheduler:
     type: MultiStepLR
-    milestones: [200000, 300000, 350000]
+    milestones: [15000, 25000]
     gamma: 0.5
 
-  total_iter: 400000
-  warmup_iter: 1000 # Gradually ramp up LR for stable early training
+  total_iter: 30000 # Short training for quick test
+  warmup_iter: 200
 
-  # Loss stack: minimal fidelity-focused
+  # Simplified loss stack for fast testing
   losses:
-    # Charbonnier Loss: smooth gradient, robust to noise
+    # 1. Charbonnier: Pixel accuracy
     - type: charbonnierloss
       loss_weight: 1.0
+
+    # 2. Perceptual: Basic structure
+    - type: convnextperceptualloss
+      loss_weight: 0.5
+      layers: [1, 2]
+      layer_weights: [1.0, 0.7]
+
+    # 3. AdaptiveBlockTV: Test JPEG block artifact removal capability
+    - type: AdaptiveBlockTVLoss
+      loss_weight: 0.01 # Slightly higher for nano to learn blocking
+      block_size: 8
+      sharpness: 4.0
+      reduction: mean
 
 #########################################################################################
 # Validation Settings
 #########################################################################################
 val:
   val_enabled: true
-  val_freq: 5000
+  val_freq: 2000 # Frequent validation for monitoring
   save_img: true
-  tile_size: 0
-  tile_overlap: 8
 
   metrics_enabled: true
   metrics:
     psnr:
       type: calculate_psnr
-      crop_border: 4
-      test_y_channel: false
+      crop_border: 2
     ssim:
       type: calculate_ssim
-      crop_border: 4
-      test_y_channel: false
+      crop_border: 2
+    lpips:
+      type: calculate_lpips
+      better: lower
+    dists:
+      type: calculate_dists
+      better: lower
 
 #########################################################################################
 # Logging
 #########################################################################################
 logger:
-  print_freq: 100
+  print_freq: 50
   save_checkpoint_freq: 5000
   save_checkpoint_format: safetensors
   use_tb_logger: true

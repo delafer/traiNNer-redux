@@ -31,9 +31,10 @@ from onnx import shape_inference
 from PIL import Image
 from torch import nn
 
-# Import architecture
+# Import architectures
 try:
     sys.path.append(str(Path(__file__).parents[2]))
+    import traiNNer.archs.paragonsr2_hybrid  # Add hybrid support
     import traiNNer.archs.paragonsr2_static_arch
     from traiNNer.utils.registry import ARCH_REGISTRY
 except ImportError:
