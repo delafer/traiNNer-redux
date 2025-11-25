@@ -33,7 +33,6 @@ datasets:
 
 network_g:
   type: paragonsr2_nano
-  scale: 2
 
 path:
   pretrain_network_g: ~

@@ -34,7 +34,6 @@ datasets:
 
 network_g:
   type: paragonsr2_s
-  scale: 2
 
 network_d:
   type: munet # Multi-branch discriminator for artifact detection

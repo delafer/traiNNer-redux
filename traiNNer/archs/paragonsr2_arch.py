@@ -219,25 +219,29 @@ class MagicKernelSharp2021Upsample(nn.Module):
 
     Args:
         in_channels: Number of input channels
+        scale: Upsampling scale factor (2, 3, 4, or 8)
         alpha: Sharpening strength (0=none, 1=maximum)
                Recommended: 0.4 (nano), 0.5 (s/m), 0.6 (xl)
     """
 
-    def __init__(self, in_channels: int, alpha: float = 1.0) -> None:
+    def __init__(self, in_channels: int, scale: int, alpha: float = 1.0) -> None:
         super().__init__()
+        self.scale = scale  # ✅ Store scale at init for ONNX compatibility
         self.alpha = float(max(0.0, min(alpha, 1.0)))  # Clamp to [0, 1]
         sharp_kernel = get_magic_sharp_2021_kernel_weights()
         self.sharpen = SeparableConv(in_channels, sharp_kernel)
         resample_kernel = get_magic_kernel_weights()
         self.resample_conv = SeparableConv(in_channels, resample_kernel)
 
-    def forward(self, x: torch.Tensor, scale_factor: float) -> torch.Tensor:
+    def forward(
+        self, x: torch.Tensor
+    ) -> torch.Tensor:  # ✅ No scale_factor arg for ONNX
         # Optional sharpening (if alpha > 0)
         if self.alpha > 0.0:
             x_sharp = self.sharpen(x)
             x = x + self.alpha * (x_sharp - x)  # Blend original with sharpened
         # Nearest-neighbor upsampling (fast, preserves edges)
-        x_upsampled = F.interpolate(x, scale_factor=scale_factor, mode="nearest")
+        x_upsampled = F.interpolate(x, scale_factor=self.scale, mode="nearest")
         # B-spline blur to smooth blocky nearest-neighbor artifacts
         return self.resample_conv(x_upsampled)
 
@@ -253,6 +257,11 @@ def icnr_init(conv_weight, scale=4, init=nn.init.kaiming_normal_) -> None:
     convolution" (arXiv:1707.02937)
     """
     ni, nf, h, w = conv_weight.shape
+    # ✅ Validate input channels
+    if ni < scale**2:
+        raise ValueError(
+            f"Input channels ({ni}) must be >= scale^2 ({scale**2}) for ICNR init"
+        )
     output_shape = ni // (scale**2)
     kernel = torch.zeros([output_shape, nf, h, w]).transpose(0, 1)
     init(kernel)  # Initialize base kernel
@@ -289,7 +298,7 @@ class PixelShufflePack(nn.Module):
         if self.up_conv.bias is not None:
             self.up_conv.bias.data.zero_()
 
-    def forward(self, x):
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
         # Conv in LR space, then shuffle to HR
         return self.pixel_shuffle(self.up_conv(x))
 
@@ -380,7 +389,7 @@ class LayerScale(nn.Module):
         super().__init__()
         self.gamma = nn.Parameter(torch.full((1, dim, 1, 1), float(init_values)))
 
-    def forward(self, x):
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
         return x * self.gamma
 
 
@@ -396,7 +405,7 @@ class CheapChannelModulation(nn.Module):
             nn.Sigmoid(),
         )
 
-    def forward(self, x):
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
         return x * self.net(x)
 
 
@@ -417,7 +426,7 @@ class StaticDepthwiseTransformer(nn.Module):
         )
         self.project_out = nn.Conv2d(hidden_dim, dim, 1)
 
-    def forward(self, x):
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = self.project_in(x)
         x = self.dw_mixer(x)
         return self.project_out(self.channel_mod(x))
@@ -465,7 +474,7 @@ class ResidualGroupStatic(nn.Module):
             ]
         )
 
-    def forward(self, x):
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.blocks(x) + x
 
 
@@ -516,6 +525,35 @@ class ParagonSR2(nn.Module):
         **kwargs,
     ) -> None:
         super().__init__()
+
+        # ✅ Input validation
+        if scale not in [2, 3, 4, 8]:
+            raise ValueError(f"scale must be 2, 3, 4, or 8, got {scale}")
+        if num_feat < 1:
+            raise ValueError(f"num_feat must be >= 1, got {num_feat}")
+        if num_groups < 1 or num_blocks < 1:
+            raise ValueError(
+                f"num_groups and num_blocks must be >= 1, got {num_groups}, {num_blocks}"
+            )
+        if not 0.0 <= upsampler_alpha <= 1.0:
+            raise ValueError(
+                f"upsampler_alpha must be in [0, 1], got {upsampler_alpha}"
+            )
+        if detail_gain < 0.01:
+            import warnings
+
+            warnings.warn(
+                f"detail_gain={detail_gain} is very small, may cause training issues. "
+                f"Recommended range: [0.05, 0.2]",
+                stacklevel=2,
+            )
+        if kwargs:
+            import warnings
+
+            warnings.warn(
+                f"Unused kwargs in ParagonSR2: {list(kwargs.keys())}", stacklevel=2
+            )
+
         if block_kwargs is None:
             block_kwargs = {}
 
@@ -535,11 +573,11 @@ class ParagonSR2(nn.Module):
         self.body = nn.Sequential(
             *[
                 ResidualGroupStatic(
-                    num_feat,
-                    num_blocks,
-                    ffn_expansion,
-                    use_norm,
-                    use_channel_mod,
+                    dim=num_feat,
+                    num_blocks=num_blocks,
+                    ffn_expansion=ffn_expansion,
+                    use_norm=use_norm,
+                    use_channel_mod=use_channel_mod,
                     **block_kwargs,
                 )
                 for _ in range(num_groups)
@@ -562,7 +600,9 @@ class ParagonSR2(nn.Module):
 
         # -- PATH B: STRUCTURAL BASE (MagicKernel) --
         self.magic_upsampler = MagicKernelSharp2021Upsample(
-            in_channels=in_chans, alpha=upsampler_alpha
+            in_channels=in_chans,
+            scale=scale,
+            alpha=upsampler_alpha,  # ✅ Pass scale at init
         )
 
         if self.use_channels_last:
@@ -571,11 +611,13 @@ class ParagonSR2(nn.Module):
     def _to_channels_last(self) -> None:
         """Convert learnable weights to channels_last for AMP efficiency."""
         for module in self.modules():
-            if hasattr(module, "weight") and module.weight is not None:
-                if module.weight.dtype in (torch.float32, torch.float16):
-                    module.weight.data = module.weight.contiguous(
-                        memory_format=torch.channels_last
-                    )
+            # ✅ Only convert learnable layers (skip frozen MagicKernel)
+            if isinstance(module, (nn.Conv2d, nn.Linear)):
+                if hasattr(module, "weight") and module.weight is not None:
+                    if module.weight.requires_grad:  # ✅ Skip frozen weights
+                        module.weight.data = module.weight.contiguous(
+                            memory_format=torch.channels_last
+                        )
 
     def fuse_for_release(self):
         """Fuse ReparamConv blocks for inference (currently no ReparamConv in hybrid)."""
@@ -585,11 +627,13 @@ class ParagonSR2(nn.Module):
         return self
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        if self.use_channels_last and x.dtype == torch.float16:
-            x = x.contiguous(memory_format=torch.channels_last)
+        # ✅ Robust channels_last conversion (any dtype on CUDA)
+        if self.use_channels_last and x.is_cuda:
+            if not x.is_contiguous(memory_format=torch.channels_last):
+                x = x.contiguous(memory_format=torch.channels_last)
 
         # Path B: MagicKernel Base (stable classical upsampling)
-        x_base = self.magic_upsampler(x, scale_factor=self.scale)
+        x_base = self.magic_upsampler(x)  # ✅ No scale_factor arg for ONNX
 
         # Path A: Learned Detail (high-frequency texture)
         out = self.conv_in(x)
