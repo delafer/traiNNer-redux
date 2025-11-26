@@ -26,15 +26,23 @@ num_gpu: auto
 datasets:
   train:
     name: Train
-    type: realesrgandataset  # OTF degradation pipeline
+    type: realesrgandataset # OTF degradation pipeline
     dataroot_gt: /home/phips/Documents/dataset/cc0/hr
-    gt_size: 256  # S model handles 256 patches
+    gt_size: 256 # S model handles 256 patches
     use_hflip: true
     use_rot: true
 
     # Blur kernel generation (for OTF)
     blur_kernel_size: 21
-    kernel_list: ['iso', 'aniso', 'generalized_iso', 'generalized_aniso', 'plateau_iso', 'plateau_aniso']
+    kernel_list:
+      [
+        "iso",
+        "aniso",
+        "generalized_iso",
+        "generalized_aniso",
+        "plateau_iso",
+        "plateau_aniso",
+      ]
     kernel_prob: [0.45, 0.25, 0.12, 0.03, 0.12, 0.03]
     sinc_prob: 0.1
     blur_sigma: [0.2, 3]
@@ -43,12 +51,12 @@ datasets:
 
     # First degradation
     blur_prob: 0.5
-    resize_prob: [0.2, 0.7, 0.1]  # up, down, keep
+    resize_prob: [0.2, 0.7, 0.1] # up, down, keep
     resize_range: [0.15, 1.5]
 
     # Diverse resize modes for robust training
     resize_mode_list: [area, bicubic, bilinear, nearest]
-    resize_mode_prob: [0.3, 0.4, 0.25, 0.05]  # area=blocky, bicubic=balanced, bilinear=smooth, nearest=aliased
+    resize_mode_prob: [0.3, 0.4, 0.25, 0.05] # area=blocky, bicubic=balanced, bilinear=smooth, nearest=aliased
 
     gaussian_noise_prob: 0.5
     noise_range: [1, 30]
@@ -75,79 +83,108 @@ datasets:
 
     # Final resize mode (quality-focused)
     resize_mode_list3: [area, bicubic]
-    resize_mode_prob3: [0.3, 0.7]  # Prefer bicubic for final downscale
+    resize_mode_prob3: [0.3, 0.7] # Prefer bicubic for final downscale
 
     # ========= PARAGON OTF PHOTOGRAPHY ENHANCEMENTS =========
     # This showcases YOUR ParagonOTF innovations for real-world photography!
-    # Focus: Modern compression + camera artifacts + processing degradations
-    # Video is optional/minimal (just one of 14+ degradation types)
+    # Focus: Realistic internet photo workflows (download/upload/edit/re-upload)
+    # Goal: Great quality upscale for photos downloaded from the internet
 
-    # Enable advanced sequence control
-    enable_sequences: true  # Uses create_all_sequences()
+    # === Sequence Controller (OPTIONAL - Not Currently Used) ===
+    # The sequence controller orchestrates degradations into realistic workflows
+    # like "professional camera → editing → upload → download → re-edit"
+    # Currently DISABLED - we use individual degradation probabilities instead
+    #
+    # To enable orchestrated workflows (requires code integration):
+    # enable_sequences: true
+    #
+    # Available sequences when enabled:
+    # - professional_to_internet: DSLR → post-processing → web upload
+    # - phone_to_social: Phone camera → filters → social media
+    # - social_processing: Multi-platform upload cycles (Instagram → screenshot → Twitter)
+    # - legacy_internet: Old photo editors → multiple JPEG saves
+    # - youtube_video: H.264 encoding → platform processing (if video enabled)
+    # - tiktok_shortform: Aggressive compression → beauty filters
+    #
+    # Note: Currently sequences are created but NOT applied in training pipeline
+    # Individual degradation probabilities below are what actually runs
 
-    # === YOUR INNOVATIONS: Modern Image Compression ===
-    webp_prob: 0.4  # Higher - common in web
+    # === ACTIVE DEGRADATIONS: Modern Image Compression ===
+    webp_prob: 0.4 # Common in web (blogs, social media)
     webp_range: [60, 85]
-    avif_prob: 0.3  # Higher - modern format
+    avif_prob: 0.3 # Modern format (Chrome, Firefox)
     avif_range: [65, 90]
-    heif_prob: 0.2  # iPhone photos
+    heif_prob: 0.2 # iPhone photos (iCloud, messaging)
     heif_range: [70, 90]
 
-    # === OPTIONAL: Video Compression (Low Priority) ===
-    # Video is just ONE aspect of ParagonOTF, not the focus!
-    video_compress_prob: 0.05  # Very low - optional showcase
-    video_codecs: ['h264']
-    video_crf_range: [25, 32]
-    video_presets: ['medium']
-
-    # Video artifacts (also low)
-    block_artifact_prob: 0.15
-    block_strength_range: [8, 16]
-    banding_prob: 0.15
-    banding_bit_range: [6, 8]
-    ringing_prob: 0.2
-    ringing_strength_range: [0.02, 0.08]
-
-    # === YOUR INNOVATIONS: Camera Artifacts ===
-    sensor_noise_prob: 0.5  # Higher - realistic camera noise
+    # === ACTIVE DEGRADATIONS: Camera Artifacts ===
+    sensor_noise_prob: 0.5 # Realistic camera sensor noise
     sensor_noise_std_range: [0.01, 0.06]
-    motion_blur_prob: 0.3  # Camera shake
+    motion_blur_prob: 0.3 # Camera shake / hand movement
     motion_blur_kernel_size: [3, 9]
     motion_blur_angle_range: [0, 360]
-    lens_distort_prob: 0.35  # Lens imperfections
+    lens_distort_prob: 0.35 # Lens optical imperfections
     lens_distort_strength_range: [-0.1, 0.2]
-    rolling_shutter_prob: 0.25  # CMOS artifacts
+    rolling_shutter_prob: 0.25 # CMOS rolling shutter artifacts
     rolling_shutter_strength_range: [0.01, 0.06]
-    chromatic_aberration_prob: 0.4  # Color fringing
+    chromatic_aberration_prob: 0.4 # Color fringing from lens
 
-    # === YOUR INNOVATIONS: Processing Artifacts ===
-    oversharpen_prob: 0.6  # Very common in photo editing
+    # === ACTIVE DEGRADATIONS: Photo Processing & Editing ===
+    oversharpen_prob: 0.6 # Very common in photo editing software
     oversharpen_strength: [1.1, 1.8]
-    exposure_prob: 0.4  # Brightness adjustments
+    exposure_prob: 0.4 # Brightness/contrast adjustments
     exposure_factor_range: [0.85, 1.25]
-    color_temp_prob: 0.5  # White balance errors
+    color_temp_prob: 0.5 # White balance errors/corrections
     color_temp_shift_range: [-0.15, 0.15]
-    aliasing_prob: 0.3  # Downsampling artifacts
+    aliasing_prob: 0.3 # Downsampling/resizing artifacts
     aliasing_scale_range: [0.6, 0.9]
-    demosaic_prob: 0.1  # RAW conversion artifacts (CPU-intensive, keep low)
+    demosaic_prob: 0.1 # RAW → JPEG conversion (CPU-intensive, keep low)
+
+    # === COMMENTED DEGRADATIONS (For Community Documentation) ===
+    # These showcase additional ParagonOTF capabilities but are NOT used for
+    # this photography-focused model. Enable them for video/streaming models.
+
+    # Video Compression (H.264/H.265/VP9/AV1 via FFmpeg)
+    # - type: video_compression
+    #   video_compress_prob: 0  # DISABLED: Not relevant for internet photography
+    #   video_codecs: ['h264', 'h265', 'vp9', 'av1']
+    #   video_crf_range: [18, 35]
+    #   video_presets: ['ultrafast', 'fast', 'medium', 'slow']
+    #   # Use case: YouTube, TikTok, streaming platforms
+
+    # Video-Specific Artifacts
+    # Block artifacts (8x8 DCT quantization from video codecs)
+    # - type: block_artifacts
+    #   block_artifact_prob: 0  # DISABLED: Video-specific
+    #   block_strength_range: [6, 24]
+
+    # Color banding (bit-depth reduction common in videos)
+    # - type: color_banding
+    #   banding_prob: 0  # DISABLED: Video-specific
+    #   banding_bit_range: [5, 8]
+
+    # Ringing artifacts (lossy codec edge overshoot)
+    # - type: ringing
+    #   ringing_prob: 0  # DISABLED: Video-specific
+    #   ringing_strength_range: [0.02, 0.15]
     # ========= END PARAGON OTF =========
 
-    queue_size: 120  # Training pair pool
+    queue_size: 120 # Training pair pool
     num_worker_per_gpu: 6
-    batch_size_per_gpu: 6  # RTX 3060 12GB sweet spot
+    batch_size_per_gpu: 6 # RTX 3060 12GB sweet spot
     accum_iter: 1
 
   val:
     name: Val
     type: pairedimagedataset
     dataroot_gt: /home/phips/Documents/dataset/cc0/val_hr
-    dataroot_lq: /home/phips/Documents/dataset/cc0/val_lr_x2_otf  # Pre-degraded with OTF
+    dataroot_lq: /home/phips/Documents/dataset/cc0/val_lr_x2_otf # Pre-degraded with OTF
 
 network_g:
   type: paragonsr2_s
 
 network_d:
-  type: munet  # Custom MuNet discriminator
+  type: munet # Custom MuNet discriminator
 
 path:
   # Load perceptual pretrain for strong initialization
@@ -163,7 +200,7 @@ train:
   # Generator optimizer
   optim_g:
     type: AdamW
-    lr: !!float 5e-5  # Lower LR for GAN stability
+    lr: !!float 5e-5 # Lower LR for GAN stability
     weight_decay: !!float 1e-4
     betas: [0.9, 0.99]
 
@@ -194,12 +231,12 @@ train:
     - type: charbonnierloss
       loss_weight: 1.0
       target_iter: 30000
-      target_weight: 0.08  # Low for photorealism
+      target_weight: 0.08 # Low for photorealism
       schedule_type: linear
 
     # ConvNeXt perceptual (CUSTOM IMPLEMENTATION - better than VGG)
     - type: convnextperceptualloss
-      loss_weight: 0.2  # Main perceptual driver
+      loss_weight: 0.2 # Main perceptual driver
       layers: [1, 2]
       layer_weights: [1.0, 0.7]
 
@@ -244,19 +281,17 @@ train:
     # Feature Matching (CUSTOM - leverages MuNet discriminator features)
     - type: FeatureMatchingLoss
       loss_weight: 0.15
-      start_iter: 10000  # Start with GAN
+      start_iter: 10000 # Start with GAN
       criterion: charbonnier
       # Uses all MuNet discriminator features automatically
 
     # GAN loss (R3GAN integrated)
     - type: ganloss
-      gan_type: r3gan  # R3 regulation integrated
+      gan_type: r3gan # R3 regularization integrated
       loss_weight: 0.08
-      start_iter: 10000  # Start GAN after perceptual stabilizes
-
-    # R1 penalty for discriminator regularization
-    net_d_reg_every: 16
-    r1_reg_weight: 10.0
+      start_iter: 10000 # Start GAN after perceptual stabilizes
+      r1_weight: 10.0 # R1 gradient penalty weight
+      r2_weight: 10.0 # R2 gradient penalty weight
 
     # === COMMENTED LOSSES (For Community Documentation) ===
     # These are NOT active but included to showcase the full toolkit
@@ -277,7 +312,7 @@ train:
     #   loss_decay: 0.5
 
   # Mix of Augmentations (advanced data augmentation)
-  use_moa: false  # OTF degradations provide sufficient diversity
+  use_moa: false # OTF degradations provide sufficient diversity
 
 val:
   val_enabled: true
@@ -308,5 +343,5 @@ logger:
   use_tb_logger: true
 
   # OTF degradation debugging (optional)
-  high_order_degradations_debug: false  # Set true to save degraded samples
+  high_order_degradations_debug: false # Set true to save degraded samples
   high_order_degradations_debug_limit: 100
