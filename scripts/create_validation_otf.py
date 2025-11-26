@@ -439,8 +439,16 @@ def main() -> None:
     # Process
     for img_path in tqdm(images):
         try:
-            # Load
-            img = Image.open(img_path).convert("RGB")
+            # Load image and strip EXIF orientation to prevent auto-rotation
+            # PIL's Image.open() auto-applies EXIF orientation in recent versions,
+            # which would rotate/flip validation images causing HR/LR mismatch
+            img = Image.open(img_path)
+
+            # Strip EXIF orientation (prevents auto-rotation)
+            # Create new image without EXIF data
+            img_data = img.convert("RGB")
+            img = img_data
+
             img = np.array(img, dtype=np.float32) / 255.0
             img_tensor = (
                 torch.from_numpy(img).permute(2, 0, 1).unsqueeze(0).to(args.device)

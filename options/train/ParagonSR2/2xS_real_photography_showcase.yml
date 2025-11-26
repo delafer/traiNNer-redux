@@ -45,8 +45,8 @@ datasets:
       ]
     kernel_prob: [0.45, 0.25, 0.12, 0.03, 0.12, 0.03]
     sinc_prob: 0.1
-    blur_sigma: [0.2, 3]
-    betag_range: [0.5, 4]
+    blur_sigma: [0.2, 3.0]
+    betag_range: [0.5, 4.0]
     betap_range: [1, 2]
 
     # First degradation (REDUCED for realistic photography)
@@ -127,9 +127,10 @@ datasets:
     recompression_weights: [0.50, 0.35, 0.10, 0.05] # Platforms prefer JPEG/WebP
 
     # === ACTIVE DEGRADATIONS: Camera Artifacts ===
-    # REDUCED: Moderate camera imperfections for realistic photography
-    sensor_noise_prob: 0.35 # Reduced from 0.5
-    sensor_noise_std_range: [0.01, 0.04] # Reduced from [0.01, 0.06]
+    # REALISTIC: Moderate camera imperfections for internet photography
+    # Noise levels cover ISO 100-1600 (daylight to indoor/evening)
+    sensor_noise_prob: 0.5 # 50% of photos have visible noise
+    sensor_noise_std_range: [0.015, 0.06] # Clean daylight (0.015) to moderate indoor (0.06)
     motion_blur_prob: 0.2 # Reduced from 0.3
     motion_blur_kernel_size: [3, 9]
     motion_blur_angle_range: [0, 360]
@@ -206,7 +207,7 @@ network_d:
 
 path:
   # Load perceptual pretrain for strong initialization
-  pretrain_network_g: experiments/2xParagonSR2_S_Perceptual/models/net_g_ema_80000.safetensors
+  pretrain_network_g: experiments/2xParagonSR2_S_Perceptual/models/net_g_ema_60000.safetensors
   strict_load_g: true
   resume_state: ~
 
