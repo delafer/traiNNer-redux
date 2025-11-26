@@ -439,15 +439,15 @@ def main() -> None:
     # Process
     for img_path in tqdm(images):
         try:
-            # Load image and strip EXIF orientation to prevent auto-rotation
-            # PIL's Image.open() auto-applies EXIF orientation in recent versions,
+            # Load image WITHOUT EXIF auto-rotation
+            # PIL's Image.open() auto-applies EXIF orientation in recent versions
             # which would rotate/flip validation images causing HR/LR mismatch
-            img = Image.open(img_path)
-
-            # Strip EXIF orientation (prevents auto-rotation)
-            # Create new image without EXIF data
-            img_data = img.convert("RGB")
-            img = img_data
+            # We need to load the raw pixel data without EXIF transformations
+            with Image.open(img_path) as img:
+                #  Convert to RGB immediately, dropping all EXIF data
+                img = img.convert("RGB")
+                # Copy pixel data to new image (breaks EXIF association)
+                img = Image.fromarray(np.array(img))
 
             img = np.array(img, dtype=np.float32) / 255.0
             img_tensor = (

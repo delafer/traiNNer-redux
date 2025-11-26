@@ -415,9 +415,9 @@ class RealESRGANModel(SRModel):
         # initialize
         b, c, h, w = self.lq.size()
         if self.queue_lr is None:
-            assert (
-                self.queue_size % b == 0
-            ), f"queue size {self.queue_size} should be divisible by batch size {b}"
+            assert self.queue_size % b == 0, (
+                f"queue size {self.queue_size} should be divisible by batch size {b}"
+            )
             self.queue_lr = torch.zeros(self.queue_size, c, h, w).cuda()
             _, c, h, w = self.gt.size()
             self.queue_gt = torch.zeros(self.queue_size, c, h, w).cuda()
@@ -502,196 +502,105 @@ class RealESRGANModel(SRModel):
                 self.lq = self.lq.contiguous()
                 return
 
-            # ----------------------- The first degradation process ----------------------- #
-            if self.opt.lq_usm:
-                usm_sharpener = USMSharp(
-                    RNG.get_rng().integers(
-                        *self.opt.lq_usm_radius_range, dtype=int, endpoint=True
-                    )
-                ).to(
-                    self.device,
-                    memory_format=self.memory_format,
-                    non_blocking=True,
-                )  # pyright: ignore[reportCallIssue] # https://github.com/pytorch/pytorch/issues/131765
-                out = usm_sharpener(self.gt)
-            else:
-                out = self.gt
-            # blur
-            if RNG.get_rng().uniform() < self.opt.blur_prob:
-                out = filter2d(out, self.kernel1)
-            # random resize
-            updown_type = random.choices(["up", "down", "keep"], self.opt.resize_prob)[
-                0
-            ]
-            if updown_type == "up":
-                scale = RNG.get_rng().uniform(1, self.opt.resize_range[1])
-            elif updown_type == "down":
-                scale = RNG.get_rng().uniform(self.opt.resize_range[0], 1)
-            else:
-                scale = 1
+            # ========================================================================
+            # PHYSICALLY ACCURATE DEGRADATION ORDER
+            # Matches validation script: Optics → Sensor → ISP → Compression
+            # ========================================================================
 
-            if scale != 1:
-                assert len(self.opt.resize_mode_list) == len(
-                    self.opt.resize_mode_prob
-                ), "resize_mode_list and resize_mode_prob must be the same length"
-                mode = random.choices(
-                    self.opt.resize_mode_list, weights=self.opt.resize_mode_prob
-                )[0]
+            # ========================================================================
+            # STAGE 1: CAMERA OPTICS (light entering camera)
+            # Applied before sensor capture
+            # ========================================================================
 
-                out = resize_pt(
-                    out,
-                    scale_factor=scale,
-                    mode=mode,
-                )
+            # Lens distortion (barrel/pincushion from lens geometry)
+            out = ParagonOTF.apply_lens_distortion(self.gt, self.opt)
 
-            # add noise
-            gray_noise_prob = self.opt.gray_noise_prob
-            if RNG.get_rng().uniform() < self.opt.gaussian_noise_prob:
-                out = random_add_gaussian_noise_pt(
-                    out,
-                    sigma_range=self.opt.noise_range,
-                    clip=True,
-                    rounds=False,
-                    gray_prob=gray_noise_prob,
-                )
-            else:
-                out = random_add_poisson_noise_pt(
-                    out,
-                    scale_range=self.opt.poisson_scale_range,
-                    gray_prob=gray_noise_prob,
-                    clip=True,
-                    rounds=False,
-                )
-            # JPEG compression
-            if RNG.get_rng().uniform() < self.opt.jpeg_prob:
-                jpeg_p = out.new_zeros(out.size(0)).uniform_(*self.opt.jpeg_range)
-                out = torch.clamp(
-                    out, 0, 1
-                )  # clamp to [0, 1], otherwise JPEGer will result in unpleasant artifacts
-                out = self.jpeger(out, quality=jpeg_p)
-
-            # Apply chromatic aberration
+            # Chromatic aberration (color fringing from lens dispersion)
             out = self._apply_chromatic_aberration(out)
 
-            # Apply demosaicing artifacts
+            # Motion blur (camera shake or subject movement)
+            out = ParagonOTF.apply_motion_blur(out, self.opt)
+
+            # Defocus blur (depth of field, lens blur)
+            if RNG.get_rng().uniform() < self.opt.blur_prob:
+                out = filter2d(out, self.kernel1)
+
+            # ========================================================================
+            # STAGE 2: SENSOR CAPTURE (light → digital signal)
+            # Physical processes as photons are converted to electrons
+            # ========================================================================
+
+            # Demosaicing (Bayer pattern → RGB conversion)
             out = self._apply_demosaicing_artifacts(out)
 
-            # Apply aliasing artifacts
-            out = self._apply_aliasing_artifacts(out)
+            # Sensor noise (captured AFTER optics, so noise is never blurred)
+            out = ParagonOTF.apply_sensor_noise(out, self.opt)
 
-            # ----------------------- The second degradation process ----------------------- #
-            # blur
-            if RNG.get_rng().uniform() < self.opt.blur_prob2:
-                out = filter2d(out, self.kernel2)
-            # random resize
-            updown_type = random.choices(["up", "down", "keep"], self.opt.resize_prob2)[
-                0
-            ]
-            if updown_type == "up":
-                scale = RNG.get_rng().uniform(1, self.opt.resize_range2[1])
-            elif updown_type == "down":
-                scale = RNG.get_rng().uniform(self.opt.resize_range2[0], 1)
-            else:
-                scale = 1
+            # Rolling shutter (CMOS sensor artifacts)
+            out = ParagonOTF.apply_rolling_shutter(out, self.opt)
 
-            if scale != 1:
-                assert len(self.opt.resize_mode_list2) == len(
-                    self.opt.resize_mode_prob2
-                ), "resize_mode_list2 and resize_mode_prob2 must be the same length"
-                mode = random.choices(
-                    self.opt.resize_mode_list2, weights=self.opt.resize_mode_prob2
-                )[0]
-                out = resize_pt(
-                    out,
-                    size=(
-                        int(ori_h / self.opt.scale * scale),
-                        int(ori_w / self.opt.scale * scale),
-                    ),
-                    mode=mode,
-                )
-            # add noise
-            gray_noise_prob = self.opt.gray_noise_prob2
-            if RNG.get_rng().uniform() < self.opt.gaussian_noise_prob2:
-                out = random_add_gaussian_noise_pt(
-                    out,
-                    sigma_range=self.opt.noise_range2,
-                    clip=True,
-                    rounds=False,
-                    gray_prob=gray_noise_prob,
-                )
-            else:
-                out = random_add_poisson_noise_pt(
-                    out,
-                    scale_range=self.opt.poisson_scale_range2,
-                    gray_prob=gray_noise_prob,
-                    clip=True,
-                    rounds=False,
-                )
+            # ========================================================================
+            # STAGE 3: CAMERA ISP PROCESSING (in-camera processing)
+            # Digital processing pipeline before saving
+            # ========================================================================
 
-            # Apply oversharpening
+            # Exposure adjustment
+            out = ParagonOTF.apply_exposure_errors(out, self.opt)
+
+            # White balance / color temperature correction
+            out = ParagonOTF.apply_color_temperature_shift(out, self.opt)
+
+            # Camera sharpening (often oversharpening)
             out = self._apply_oversharpening(out)
 
-            # JPEG compression + the final sinc filter
-            # We also need to resize images to desired sizes. We group [resize back + sinc filter] together
-            # as one operation.
-            # We consider two orders:
-            #   1. [resize back + sinc filter] + JPEG compression
-            #   2. JPEG compression + [resize back + sinc filter]
-            # Empirically, we find other combinations (sinc + JPEG + Resize) will introduce twisted lines.
+            # In-camera downsampling (creates aliasing artifacts)
+            out = self._apply_aliasing_artifacts(out)
 
-            assert len(self.opt.resize_mode_list3) == len(
-                self.opt.resize_mode_prob3
-            ), "resize_mode_list3 and resize_mode_prob3 must be the same length"
+            # Final resize to output resolution
+            assert len(self.opt.resize_mode_list3) == len(self.opt.resize_mode_prob3), (
+                "resize_mode_list3 and resize_mode_prob3 must be the same length"
+            )
 
             mode = random.choices(
                 self.opt.resize_mode_list3, weights=self.opt.resize_mode_prob3
             )[0]
-            if RNG.get_rng().uniform() < 0.5:
-                # resize back + the final sinc filter
-                out = resize_pt(
-                    out,
-                    size=(ori_h // self.opt.scale, ori_w // self.opt.scale),
-                    mode=mode,
-                )
-                out = filter2d(out, self.sinc_kernel)
-                # JPEG compression
-                if RNG.get_rng().uniform() < self.opt.jpeg_prob2:
-                    jpeg_p = out.new_zeros(out.size(0)).uniform_(*self.opt.jpeg_range2)
-                    out = torch.clamp(out, 0, 1)
-                    out = self.jpeger(out, quality=jpeg_p)
-            else:
-                # JPEG compression
-                if RNG.get_rng().uniform() < self.opt.jpeg_prob2:
-                    jpeg_p = out.new_zeros(out.size(0)).uniform_(*self.opt.jpeg_range2)
-                    out = torch.clamp(out, 0, 1)
-                    out = self.jpeger(out, quality=jpeg_p)
-                # resize back + the final sinc filter
-                out = resize_pt(
-                    out,
-                    size=(ori_h // self.opt.scale, ori_w // self.opt.scale),
-                    mode=mode,
-                )
-                out = filter2d(out, self.sinc_kernel)
+            out = resize_pt(
+                out,
+                size=(ori_h // self.opt.scale, ori_w // self.opt.scale),
+                mode=mode,
+            )
 
-            # Apply extended degradations (Added by Philip Hofmann for ParagonSR)
-            # Modern compression formats
-            out = ParagonOTF.apply_webp_compression(out, self.opt)
-            out = ParagonOTF.apply_avif_compression(out, self.opt)
-            out = ParagonOTF.apply_heif_compression(out, self.opt)
+            # Apply sinc filter for anti-aliasing
+            out = filter2d(out, self.sinc_kernel)
 
-            # Camera artifacts and effects
-            out = ParagonOTF.apply_motion_blur(out, self.opt)
-            out = ParagonOTF.apply_lens_distortion(out, self.opt)
-            out = ParagonOTF.apply_exposure_errors(out, self.opt)
-            out = ParagonOTF.apply_color_temperature_shift(out, self.opt)
-            out = ParagonOTF.apply_sensor_noise(out, self.opt)
-            out = ParagonOTF.apply_rolling_shutter(out, self.opt)
+            # ========================================================================
+            # STAGE 4: INITIAL COMPRESSION (camera saves file)
+            # Use unified compression pipeline for realistic format selection
+            # ========================================================================
 
-            # Additional realistic degradations
-            out = ParagonOTF.apply_oversharpening(out, self.opt)
-            out = ParagonOTF.apply_chromatic_aberration(out, self.opt)
-            out = ParagonOTF.apply_demosaicing_artifacts(out, self.opt)
-            out = ParagonOTF.apply_aliasing_artifacts(out, self.opt)
+            out = ParagonOTF.apply_realistic_compression_pipeline(out, self.opt)
+
+            # ========================================================================
+            # STAGE 5: OPTIONAL EDITING (post-processing before upload)
+            # Social media filters and editing apps
+            # ========================================================================
+
+            editing_prob = self.opt.get("editing_prob", 0.0)
+            if RNG.get_rng().uniform() < editing_prob:
+                # Additional exposure tweaks
+                if hasattr(self.opt, "editing_exposure_prob"):
+                    if RNG.get_rng().uniform() < self.opt.editing_exposure_prob:
+                        out = ParagonOTF.apply_exposure_errors(out, self.opt)
+
+                # Additional sharpening
+                if hasattr(self.opt, "editing_oversharpen_prob"):
+                    if RNG.get_rng().uniform() < self.opt.editing_oversharpen_prob:
+                        out = ParagonOTF.apply_oversharpening(out, self.opt)
+
+            # ========================================================================
+            # NOTE: STAGE 6 (platform recompression) is handled inside
+            # apply_realistic_compression_pipeline() via recompression_prob
+            # ========================================================================
 
             # clamp and round
             self.lq = torch.clamp((out * 255.0).round(), 0, 255) / 255.0

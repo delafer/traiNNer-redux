@@ -197,7 +197,7 @@ datasets:
     name: Val
     type: pairedimagedataset
     dataroot_gt: /home/phips/Documents/dataset/cc0/val_hr
-    dataroot_lq: /home/phips/Documents/dataset/cc0/val_lr_x2_otf # Pre-degraded with OTF
+    dataroot_lq: /home/phips/Documents/dataset/cc0/val_lr_realistic # Pre-degraded with OTF
 
 network_g:
   type: paragonsr2_s
