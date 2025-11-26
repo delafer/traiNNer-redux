@@ -86,11 +86,12 @@ class DegradationPipeline:
             if not hasattr(self.opt, k):
                 setattr(self.opt, k, v)
 
-        # Compatibility mappings
-        if not hasattr(self.opt, "blur_prob2") and hasattr(
-            self.opt, "second_blur_prob"
-        ):
-            self.opt.blur_prob2 = self.opt.second_blur_prob
+        # Explicitly disable augmentations for validation
+        # These are for training only and would cause HR/LR mismatch in validation
+        if hasattr(self.opt, "use_hflip"):
+            self.opt.use_hflip = False
+        if hasattr(self.opt, "use_rot"):
+            self.opt.use_rot = False
 
         # Pre-calculate kernels if needed, or generate on the fly
         # RealESRGAN generates kernels per sample in the dataset __getitem__
