@@ -36,6 +36,128 @@ class ParagonOTF:
     """Container for static OTF degradation methods."""
 
     @staticmethod
+    def apply_realistic_compression_pipeline(
+        img_tensor: torch.Tensor, opt
+    ) -> torch.Tensor:
+        """Apply realistic compression with mutually exclusive format selection.
+
+        Simulates real-world internet photography workflows:
+        1. Initial compression (camera/editor) - always applied
+        2. Platform recompression (optional) - ~50% of images
+
+        Each compression round chooses ONE format from: JPEG, WebP, AVIF, HEIF.
+
+        Args:
+            img_tensor: Input tensor (B, C, H, W) in range [0, 1]
+            opt: Configuration with:
+                - compression_formats: List of format names ['jpeg', 'webp', 'avif', 'heif']
+                - compression_weights: Probability weights for first compression
+                - compression_jpeg_range, compression_webp_range, etc.
+                - recompression_prob: Probability of second compression
+                - recompression_formats: Formats for second compression
+                - recompression_weights: Weights for second compression
+
+        Returns:
+            Compressed tensor
+        """
+        # Check if realistic compression is enabled
+        if not hasattr(opt, "compression_formats"):
+            # Fall back to legacy individual compression methods
+            img_tensor = ParagonOTF.apply_webp_compression(img_tensor, opt)
+            img_tensor = ParagonOTF.apply_avif_compression(img_tensor, opt)
+            img_tensor = ParagonOTF.apply_heif_compression(img_tensor, opt)
+            return img_tensor
+
+        # Round 1: Initial compression (always applied)
+        format1 = ParagonOTF._choose_compression_format(
+            opt.compression_formats, opt.compression_weights
+        )
+        img_tensor = ParagonOTF._compress_with_format(img_tensor, format1, opt, round=1)
+
+        # Round 2: Platform recompression (optional)
+        recompression_prob = opt.get("recompression_prob", 0.0)
+        if RNG.get_rng().uniform() < recompression_prob:
+            format2 = ParagonOTF._choose_compression_format(
+                opt.recompression_formats, opt.recompression_weights
+            )
+            img_tensor = ParagonOTF._compress_with_format(
+                img_tensor, format2, opt, round=2
+            )
+
+        return img_tensor
+
+    @staticmethod
+    def _choose_compression_format(formats: list[str], weights: list[float]) -> str:
+        """Choose one compression format based on weights."""
+        return RNG.get_rng().choice(formats, p=weights)
+
+    @staticmethod
+    def _compress_with_format(
+        img_tensor: torch.Tensor, format_name: str, opt, round: int = 1
+    ) -> torch.Tensor:
+        """Apply compression with specified format.
+
+        Args:
+            img_tensor: Input tensor
+            format_name: One of 'jpeg', 'webp', 'avif', 'heif'
+            opt: Configuration object
+            round: Compression round (1 or 2)
+
+        Returns:
+            Compressed tensor
+        """
+        # Get quality range for this format
+        quality_attr = f"compression_{format_name}_range"
+        if not hasattr(opt, quality_attr):
+            return img_tensor
+
+        quality_range = getattr(opt, quality_attr)
+        quality = RNG.get_rng().uniform(quality_range[0], quality_range[1])
+
+        batch_size = img_tensor.size(0)
+        compressed = []
+
+        for i in range(batch_size):
+            img = img_tensor[i].cpu().clamp(0, 1).numpy()
+            img = (img * 255).astype("uint8").transpose(1, 2, 0)
+            if img.shape[2] == 1:
+                img = img[:, :, 0]
+
+            pil_img = Image.fromarray(img)
+            buffer = io.BytesIO()
+
+            try:
+                if format_name == "jpeg":
+                    pil_img.save(buffer, format="JPEG", quality=int(quality))
+                elif format_name == "webp":
+                    pil_img.save(buffer, format="WEBP", quality=int(quality))
+                elif format_name == "avif":
+                    if AvifImagePlugin is None:
+                        compressed.append(img_tensor[i].cpu())
+                        continue
+                    pil_img.save(buffer, format="AVIF", quality=int(quality))
+                elif format_name == "heif":
+                    if HeifImagePlugin is None:
+                        compressed.append(img_tensor[i].cpu())
+                        continue
+                    pil_img.save(buffer, format="HEIF", quality=int(quality))
+                else:
+                    compressed.append(img_tensor[i].cpu())
+                    continue
+
+                buffer.seek(0)
+                comp = Image.open(buffer).convert("RGB")
+                comp_tensor = torch.from_numpy(np.array(comp)).float() / 255.0
+                comp_tensor = comp_tensor.permute(2, 0, 1)
+                compressed.append(comp_tensor)
+
+            except Exception:
+                # On error, use original
+                compressed.append(img_tensor[i].cpu())
+
+        return torch.stack(compressed, dim=0).to(img_tensor.device)
+
+    @staticmethod
     def apply_webp_compression(img_tensor: torch.Tensor, opt) -> torch.Tensor:
         """Apply WebP compression with probability and quality range from ``opt``."""
         if not hasattr(opt, "webp_prob") or not hasattr(opt, "webp_range"):

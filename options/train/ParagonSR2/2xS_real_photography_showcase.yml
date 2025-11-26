@@ -109,14 +109,22 @@ datasets:
     # Note: Currently sequences are created but NOT applied in training pipeline
     # Individual degradation probabilities below are what actually runs
 
-    # === ACTIVE DEGRADATIONS: Modern Image Compression ===
-    # REDUCED: Avoid triple-compression (RealESRGAN already does 2x JPEG)
-    webp_prob: 0.3 # Reduced from 0.4
-    webp_range: [60, 85]
-    avif_prob: 0.15 # Reduced from 0.3
-    avif_range: [65, 90]
-    heif_prob: 0.1 # Reduced from 0.2
-    heif_range: [70, 90]
+    # === REALISTIC COMPRESSION PIPELINE ===
+    # Replaces old sequential WebP/AVIF/HEIF compression with unified approach
+    # Each compression round chooses ONE format (mutually exclusive)
+
+    # Initial compression (camera/editor saves file) - always applied
+    compression_formats: [jpeg, webp, avif, heif]
+    compression_weights: [0.60, 0.25, 0.10, 0.05] # JPEG most common
+    compression_jpeg_range: [45, 95]
+    compression_webp_range: [60, 85]
+    compression_avif_range: [65, 90]
+    compression_heif_range: [70, 90]
+
+    # Platform recompression (upload service processes image) - optional
+    recompression_prob: 0.5 # 50% of images get recompressed
+    recompression_formats: [jpeg, webp, avif, heif]
+    recompression_weights: [0.50, 0.35, 0.10, 0.05] # Platforms prefer JPEG/WebP
 
     # === ACTIVE DEGRADATIONS: Camera Artifacts ===
     # REDUCED: Moderate camera imperfections for realistic photography
@@ -143,9 +151,16 @@ datasets:
     aliasing_scale_range: [0.6, 0.9]
     demosaic_prob: 0.1 # Keep - already low (CPU-intensive)
 
-    # === COMMENTED DEGRADATIONS (For Community Documentation) ===
-    # These showcase additional ParagonOTF capabilities but are NOT used for
-    # this photography-focused model. Enable them for video/streaming models.
+    # === OPTIONAL EDITING STAGE (Post-processing before upload) ===
+    # Simulates social media filters and photo editing apps
+    editing_prob: 0.4 # 40% of photos are edited before upload
+    editing_exposure_prob: 0.6
+    editing_exposure_range: [0.95, 1.10] # Subtle adjustments
+    editing_oversharpen_prob: 0.4
+    editing_oversharpen_strength: [1.05, 1.3] # Light sharpening
+
+    # === COMMENTED LOSSES (For Community Documentation) ===
+    # These are NOT active but included to showcase the full toolkit
 
     # Video Compression (H.264/H.265/VP9/AV1 via FFmpeg)
     # - type: video_compression
