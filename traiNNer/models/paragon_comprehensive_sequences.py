@@ -285,14 +285,60 @@ def create_comprehensive_sequences() -> list[DegradationSequence]:
 
 
 def create_enhanced_predefined_sequences() -> list[DegradationSequence]:
-    """Combine original ParagonSR sequences with comprehensive workflows."""
+    """Combine original ParagonSR sequences with comprehensive workflows.
+
+    FIXED: Normalizes probabilities so total = 1.0 (was 2.0 before!)
+    """
     from traiNNer.models.paragon_sequences import create_predefined_sequences
 
-    # Get original ParagonSR sequences
+    # Get original ParagonSR sequences (total prob = 1.0)
     original_sequences = create_predefined_sequences()
 
-    # Get comprehensive combined sequences
+    # Get comprehensive combined sequences (total prob = 1.0)
     comprehensive_sequences = create_comprehensive_sequences()
 
-    # Return combined list with adjusted probabilities
+    # CRITICAL FIX: Normalize probabilities (each gets 50% weight)
+    for seq in original_sequences:
+        seq.probability *= 0.5
+    for seq in comprehensive_sequences:
+        seq.probability *= 0.5
+
+    # Now total probability = 1.0 ✓
     return original_sequences + comprehensive_sequences
+
+
+def create_all_sequences(include_video: bool = True) -> list[DegradationSequence]:
+    """Create all degradation sequences with normalized probabilities.
+
+    Combines:
+    - Original ParagonSR sequences (25%)
+    - Comprehensive photography sequences (25%)
+    - Video platform sequences (50% if enabled, redistributed otherwise)
+
+    Args:
+        include_video: Whether to include video platform sequences
+
+    Returns:
+        List of sequences with total probability = 1.0
+    """
+    # Base sequences (photography-focused)
+    sequences = create_enhanced_predefined_sequences()  # Total = 1.0
+
+    if include_video:
+        from traiNNer.models.paragon_video_sequences import (
+            create_video_platform_sequences,
+        )
+
+        video_sequences = create_video_platform_sequences()
+
+        # Redistribute: photography gets 50%, video gets 50%
+        for seq in sequences:
+            seq.probability *= 0.5  # Photography: 50% total
+        # Video sequences already total ~0.75, scale to 0.5
+        video_total = sum(seq.probability for seq in video_sequences)
+        for seq in video_sequences:
+            seq.probability = (seq.probability / video_total) * 0.5  # Video: 50% total
+
+        sequences.extend(video_sequences)
+
+    return sequences

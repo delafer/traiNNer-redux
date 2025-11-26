@@ -1,0 +1,290 @@
+# yaml-language-server: $schema=https://raw.githubusercontent.com/the-database/traiNNer-redux/refs/heads/master/schemas/redux-config.schema.json
+#########################################################################################
+# ParagonSR2 S - Real World Photography SHOWCASE MODEL
+#########################################################################################
+# This config demonstrates ALL ParagonSR innovations for the SISR community:
+# - MuNet discriminator (custom implementation) with R3GAN regularization
+# - Advanced loss stack: ConvNeXt, ConsistencyLoss, FeatureMatching, AdaptiveBlockTV
+# - Paragon OTF degradation sequences (modern compression + video artifacts)
+# - Loss scheduling for progressive training
+# - State-of-the-art techniques not standard in SISR yet
+#
+# Training: Load from 2xS_perceptual (perceptual base) → Add GAN + OTF
+# Expected time: ~4 hours on RTX 3060 (12GB VRAM, batch_size 6)
+# Deployment: ~30 FPS @ 1080p with TensorRT FP16
+#########################################################################################
+
+name: 2xParagonSR2_S_RealPhoto_Showcase
+scale: 2
+
+use_amp: true
+amp_bf16: true
+use_channels_last: true
+fast_matmul: false
+num_gpu: auto
+
+datasets:
+  train:
+    name: Train
+    type: realesrgandataset  # OTF degradation pipeline
+    dataroot_gt: /home/phips/Documents/dataset/cc0/hr
+    gt_size: 256  # S model handles 256 patches
+    use_hflip: true
+    use_rot: true
+
+    # Blur kernel generation (for OTF)
+    blur_kernel_size: 21
+    kernel_list: ['iso', 'aniso', 'generalized_iso', 'generalized_aniso', 'plateau_iso', 'plateau_aniso']
+    kernel_prob: [0.45, 0.25, 0.12, 0.03, 0.12, 0.03]
+    sinc_prob: 0.1
+    blur_sigma: [0.2, 3]
+    betag_range: [0.5, 4]
+    betap_range: [1, 2]
+
+    # First degradation
+    blur_prob: 0.5
+    resize_prob: [0.2, 0.7, 0.1]  # up, down, keep
+    resize_range: [0.15, 1.5]
+    gaussian_noise_prob: 0.5
+    noise_range: [1, 30]
+    poisson_scale_range: [0.05, 3]
+    gray_noise_prob: 0.4
+    jpeg_range: [30, 95]
+    jpeg_prob: 0.9
+
+    # Second degradation
+    second_blur_prob: 0.8
+    resize_prob2: [0.3, 0.4, 0.3]
+    resize_range2: [0.3, 1.2]
+    gaussian_noise_prob2: 0.5
+    noise_range2: [1, 25]
+    poisson_scale_range2: [0.05, 2.5]
+    gray_noise_prob2: 0.4
+    jpeg_range2: [30, 95]
+    jpeg_prob2: 0.9
+
+    # ========= PARAGON OTF ENHANCEMENTS =========
+    # Enable advanced sequence control
+    enable_sequences: true  # Uses create_all_sequences()
+
+    # Modern image compression formats
+    webp_prob: 0.3
+    webp_range: [60, 85]
+    avif_prob: 0.2
+    avif_range: [65, 90]
+
+    # Video compression (H.264/H.265/VP9 via FFmpeg)
+    video_compress_prob: 0.15  # Conservative for training speed
+    video_codecs: ['h264', 'h265']
+    video_crf_range: [23, 35]  # YouTube-like quality
+    video_presets: ['medium', 'fast']
+
+    # Video artifacts
+    block_artifact_prob: 0.4
+    block_strength_range: [8, 20]
+    banding_prob: 0.3
+    banding_bit_range: [6, 8]
+    ringing_prob: 0.3
+    ringing_strength_range: [0.02, 0.1]
+
+    # Camera artifacts
+    sensor_noise_prob: 0.3
+    sensor_noise_std_range: [0.01, 0.06]
+    motion_blur_prob: 0.2
+    motion_blur_kernel_size: [3, 9]
+    motion_blur_angle_range: [0, 360]
+    lens_distort_prob: 0.25
+    lens_distort_strength_range: [-0.1, 0.2]
+    rolling_shutter_prob: 0.15
+    rolling_shutter_strength_range: [0.01, 0.06]
+    chromatic_aberration_prob: 0.3
+
+    # Processing artifacts
+    oversharpen_prob: 0.5
+    oversharpen_strength: [1.1, 1.8]
+    exposure_prob: 0.3
+    exposure_factor_range: [0.85, 1.25]
+    color_temp_prob: 0.4
+    color_temp_shift_range: [-0.15, 0.15]
+    aliasing_prob: 0.2
+    aliasing_scale_range: [0.6, 0.9]
+    # ========= END PARAGON OTF =========
+
+    queue_size: 120  # Training pair pool
+    num_worker_per_gpu: 6
+    batch_size_per_gpu: 6  # RTX 3060 12GB sweet spot
+    accum_iter: 1
+
+  val:
+    name: Val
+    type: pairedimagedataset
+    dataroot_gt: /home/phips/Documents/dataset/cc0/val_hr
+    dataroot_lq: /home/phips/Documents/dataset/cc0/val_lr_x2_otf  # Pre-degraded with OTF
+
+network_g:
+  type: paragonsr2_s
+
+network_d:
+  type: munet  # Custom MuNet discriminator
+
+path:
+  # Load perceptual pretrain for strong initialization
+  pretrain_network_g: experiments/2xParagonSR2_S_Perceptual/models/net_g_ema_80000.safetensors
+  strict_load_g: true
+  resume_state: ~
+
+train:
+  ema_decay: 0.999
+  ema_power: 0.75
+  grad_clip: true
+
+  # Generator optimizer
+  optim_g:
+    type: AdamW
+    lr: !!float 5e-5  # Lower LR for GAN stability
+    weight_decay: !!float 1e-4
+    betas: [0.9, 0.99]
+
+  # Discriminator optimizer
+  optim_d:
+    type: AdamW
+    lr: !!float 5e-5
+    weight_decay: 0
+    betas: [0.9, 0.99]
+
+  scheduler:
+    type: MultiStepLR
+    milestones: [20000, 35000, 50000]
+    gamma: 0.5
+
+  total_iter: 60000
+  warmup_iter: 200
+
+  # ========================================================================
+  # ADVANCED LOSS STACK - ParagonSR Showcase
+  # Demonstrates all custom implementations + loss scheduling
+  # ========================================================================
+
+  losses:
+    # === ACTIVE LOSSES (Core Stack) ===
+
+    # Pixel-level fidelity (ramping down for perceptual dominance)
+    - type: charbonnierloss
+      loss_weight: 1.0
+      target_iter: 30000
+      target_weight: 0.08  # Low for photorealism
+      schedule_type: linear
+
+    # ConvNeXt perceptual (CUSTOM IMPLEMENTATION - better than VGG)
+    - type: convnextperceptualloss
+      loss_weight: 0.2  # Main perceptual driver
+      layers: [1, 2]
+      layer_weights: [1.0, 0.7]
+
+    # DISTS texture quality
+    - type: distsloss
+      loss_weight: 0.15
+
+    # ConsistencyLoss (CUSTOM - color stability)
+    - type: ConsistencyLoss
+      loss_weight: 0.12
+      criterion: "chc"
+      blur: false
+      cosim: true
+      cosim_weight: 0.5
+
+    # LDL (local distribution learning)
+    - type: ldlloss
+      loss_weight: 0.8
+      loss_decay: 0.8
+      loss_decay_inflection: 35000
+
+    # High-frequency edge detail
+    - type: hfenloss
+      loss_weight: 0.08
+      start_iter: 2000
+      kernel_size: 7
+      sigma: 1.0
+      criterion: charbonnier
+
+    # Laplacian edge preservation
+    - type: laplacianloss
+      loss_weight: 0.25
+      start_iter: 2500
+      criterion: charbonnier
+
+    # AdaptiveBlockTV (CUSTOM - intelligent structure preservation)
+    - type: AdaptiveBlockTVLoss
+      loss_weight: 0.01
+      block_size: 8
+      sharpness: 4.0
+
+    # Feature Matching (CUSTOM - leverages MuNet discriminator features)
+    - type: FeatureMatchingLoss
+      loss_weight: 0.15
+      start_iter: 10000  # Start with GAN
+      criterion: charbonnier
+      # Uses all MuNet discriminator features automatically
+
+    # GAN loss (R3GAN integrated)
+    - type: ganloss
+      gan_type: r3gan  # R3 regulation integrated
+      loss_weight: 0.08
+      start_iter: 10000  # Start GAN after perceptual stabilizes
+
+    # R1 penalty for discriminator regularization
+    net_d_reg_every: 16
+    r1_reg_weight: 10.0
+
+    # === COMMENTED LOSSES (For Community Documentation) ===
+    # These are NOT active but included to showcase the full toolkit
+
+    # ContrastiveLoss - Not needed (ConvNeXt perceptual already covers)
+    # - type: contrastiveloss
+    #   loss_weight: 0  # DISABLED: Redundant with ConvNeXt
+    #   temperature: 0.07
+
+    # GradientVarianceLoss - Not needed (HFEN covers high-frequency)
+    # - type: gradientvarianceloss
+    #   loss_weight: 0  # DISABLED: Overlaps with HFEN
+    #   criterion: charbonnier
+
+    # FFLoss - Not needed (AdaptiveBlockTV is more intelligent)
+    # - type: ffloss
+    #   loss_weight: 0  # DISABLED: AdaptiveBlockTV is superior
+    #   loss_decay: 0.5
+
+  # Mix of Augmentations (advanced data augmentation)
+  use_moa: false  # OTF degradations provide sufficient diversity
+
+val:
+  val_enabled: true
+  val_freq: 2000
+  save_img: true
+
+  metrics_enabled: true
+  metrics:
+    psnr:
+      type: calculate_psnr
+      crop_border: 2
+    ssim:
+      type: calculate_ssim
+      crop_border: 2
+    lpips:
+      type: calculate_lpips
+      better: lower
+    dists:
+      type: calculate_dists
+      better: lower
+    topiq:
+      type: calculate_topiq
+
+logger:
+  print_freq: 50
+  save_checkpoint_freq: 2000
+  save_checkpoint_format: safetensors
+  use_tb_logger: true
+
+  # OTF degradation debugging (optional)
+  high_order_degradations_debug: false  # Set true to save degraded samples
+  high_order_degradations_debug_limit: 100

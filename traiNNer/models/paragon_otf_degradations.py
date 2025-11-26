@@ -185,7 +185,7 @@ class ParagonOTF:
             opt.lens_distort_strength_range[0], opt.lens_distort_strength_range[1]
         )
 
-        batch_size, channels, height, width = img_tensor.shape
+        batch_size, _channels, height, width = img_tensor.shape
 
         # Create coordinate grid
         grid_x, grid_y = torch.meshgrid(
@@ -305,7 +305,7 @@ class ParagonOTF:
             opt.rolling_shutter_strength_range[0], opt.rolling_shutter_strength_range[1]
         )
 
-        batch_size, channels, height, width = img_tensor.shape
+        batch_size, _channels, height, width = img_tensor.shape
 
         # Create slant based on motion
         slant = strength * height / width
@@ -448,3 +448,265 @@ class ParagonOTF:
         )
         up = torch.nn.functional.interpolate(down, size=(h, w), mode="nearest")
         return up
+
+    # ========================================================================
+    # VIDEO COMPRESSION DEGRADATIONS
+    # Added for comprehensive video artifact simulation
+    # ========================================================================
+
+    @staticmethod
+    def apply_video_compression(img_tensor: torch.Tensor, opt) -> torch.Tensor:
+        """Apply H.264/H.265/VP9/AV1 video compression using FFmpeg.
+
+        Args:
+            img_tensor: Input tensor (B, C, H, W) in range [0, 1]
+            opt: Configuration object with:
+                - video_compress_prob: Probability of applying compression
+                - video_codecs: List of codecs to choose from (e.g., ['h264', 'h265', 'vp9', 'av1'])
+                - video_crf_range: CRF range tuple (e.g., (18, 35)) - lower is higher quality
+                - video_presets: List of FFmpeg presets (e.g., ['ultrafast', 'fast', 'medium', 'slow'])
+
+        Returns:
+            Compressed tensor of same shape
+        """
+        if not hasattr(opt, "video_compress_prob"):
+            return img_tensor
+        if RNG.get_rng().uniform() >= opt.video_compress_prob:
+            return img_tensor
+
+        # Check FFmpeg availability
+        import os
+        import shutil
+        import subprocess
+        import tempfile
+
+        if not shutil.which("ffmpeg"):
+            # FFmpeg not available, return original tensor
+            return img_tensor
+
+        # Select codec, CRF, and preset
+        codec = RNG.get_rng().choice(opt.video_codecs)
+        crf = RNG.get_rng().uniform(opt.video_crf_range[0], opt.video_crf_range[1])
+        preset = RNG.get_rng().choice(opt.video_presets)
+
+        batch_size = img_tensor.size(0)
+        compressed = []
+
+        # Process each image in batch
+        for i in range(batch_size):
+            img = img_tensor[i].cpu().clamp(0, 1).numpy()
+            img = (img * 255).astype("uint8").transpose(1, 2, 0)
+
+            # Create temp files
+            with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as temp_in:
+                temp_in_path = temp_in.name
+            with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as temp_out:
+                temp_out_path = temp_out.name
+
+            try:
+                # Save input frame
+                Image.fromarray(img).save(temp_in_path)
+
+                # FFmpeg command for single-frame compression
+                cmd = [
+                    "ffmpeg",
+                    "-y",
+                    "-loglevel",
+                    "error",
+                    "-i",
+                    temp_in_path,
+                    "-c:v",
+                    codec,
+                    "-crf",
+                    str(int(crf)),
+                    "-preset",
+                    preset,
+                    "-frames:v",
+                    "1",
+                    temp_out_path,
+                ]
+
+                # Run FFmpeg
+                result = subprocess.run(
+                    cmd, check=False, capture_output=True, timeout=5
+                )
+
+                if result.returncode == 0 and os.path.exists(temp_out_path):
+                    # Load compressed frame
+                    comp = Image.open(temp_out_path).convert("RGB")
+                    comp_tensor = torch.from_numpy(np.array(comp)).float() / 255.0
+                    comp_tensor = comp_tensor.permute(2, 0, 1)
+                    compressed.append(comp_tensor)
+                else:
+                    # Compression failed, use original
+                    compressed.append(img_tensor[i].cpu())
+
+            except (subprocess.TimeoutExpired, Exception):
+                # Any error: use original frame
+                compressed.append(img_tensor[i].cpu())
+
+            finally:
+                # Cleanup temp files
+                try:
+                    if os.path.exists(temp_in_path):
+                        os.remove(temp_in_path)
+                    if os.path.exists(temp_out_path):
+                        os.remove(temp_out_path)
+                except:
+                    pass
+
+        return torch.stack(compressed, dim=0).to(img_tensor.device)
+
+    @staticmethod
+    def apply_block_artifacts(img_tensor: torch.Tensor, opt) -> torch.Tensor:
+        """Apply 8x8 DCT block artifacts from video compression.
+
+        Simulates the blocking artifacts common in H.264/H.265 due to
+        8x8 DCT quantization.
+
+        Args:
+            img_tensor: Input tensor (B, C, H, W) in range [0, 1]
+            opt: Configuration object with:
+                - block_artifact_prob: Probability of applying artifacts
+                - block_strength_range: Quantization strength range (e.g., (8, 24))
+                                       Higher values = more visible blocks
+
+        Returns:
+            Tensor with block artifacts applied
+        """
+        if not hasattr(opt, "block_artifact_prob") or not hasattr(
+            opt, "block_strength_range"
+        ):
+            return img_tensor
+        if RNG.get_rng().uniform() >= opt.block_artifact_prob:
+            return img_tensor
+
+        import torch.nn.functional as F
+
+        block_size = 8
+        strength = RNG.get_rng().uniform(
+            opt.block_strength_range[0], opt.block_strength_range[1]
+        )
+
+        _b, _c, h, w = img_tensor.shape
+
+        # Pad to multiple of block_size
+        pad_h = (block_size - h % block_size) % block_size
+        pad_w = (block_size - w % block_size) % block_size
+
+        if pad_h > 0 or pad_w > 0:
+            padded = F.pad(img_tensor, (0, pad_w, 0, pad_h), mode="reflect")
+        else:
+            padded = img_tensor
+
+        _, _, padded_h, padded_w = padded.shape
+
+        # Apply quantization per 8x8 block to create blocking effect
+        quantized = padded.clone()
+        for i in range(0, padded_h, block_size):
+            for j in range(0, padded_w, block_size):
+                block = quantized[:, :, i : i + block_size, j : j + block_size]
+                # Quantize: divide by strength, round, multiply back
+                quantized[:, :, i : i + block_size, j : j + block_size] = (
+                    block * (255.0 / strength)
+                ).round() * (strength / 255.0)
+
+        # Remove padding
+        if pad_h > 0 or pad_w > 0:
+            quantized = quantized[:, :, :h, :w]
+
+        return torch.clamp(quantized, 0, 1)
+
+    @staticmethod
+    def apply_color_banding(img_tensor: torch.Tensor, opt) -> torch.Tensor:
+        """Apply color banding from bit-depth reduction.
+
+        Simulates the banding artifacts that occur when video is quantized
+        to lower bit depths (common in heavily compressed video).
+
+        Args:
+            img_tensor: Input tensor (B, C, H, W) in range [0, 1]
+            opt: Configuration object with:
+                - banding_prob: Probability of applying banding
+                - banding_bit_range: Bit depth range (e.g., (6, 8))
+                                    Lower bits = more visible banding
+
+        Returns:
+            Tensor with color banding applied
+        """
+        if not hasattr(opt, "banding_prob") or not hasattr(opt, "banding_bit_range"):
+            return img_tensor
+        if RNG.get_rng().uniform() >= opt.banding_prob:
+            return img_tensor
+
+        # Simulate bit depth reduction
+        bit_depth = RNG.get_rng().integers(
+            opt.banding_bit_range[0], opt.banding_bit_range[1] + 1
+        )
+        levels = 2**bit_depth
+
+        # Quantize to fewer levels
+        quantized = (img_tensor * (levels - 1)).round() / (levels - 1)
+
+        return torch.clamp(quantized, 0, 1)
+
+    @staticmethod
+    def apply_ringing(img_tensor: torch.Tensor, opt) -> torch.Tensor:
+        """Apply ringing artifacts around edges.
+
+        Simulates the ringing/overshoot artifacts common in lossy video
+        codecs, especially around high-contrast edges.
+
+        Args:
+            img_tensor: Input tensor (B, C, H, W) in range [0, 1]
+            opt: Configuration object with:
+                - ringing_prob: Probability of applying ringing
+                - ringing_strength_range: Strength range (e.g., (0.02, 0.1))
+
+        Returns:
+            Tensor with ringing artifacts applied
+        """
+        if not hasattr(opt, "ringing_prob") or not hasattr(
+            opt, "ringing_strength_range"
+        ):
+            return img_tensor
+        if RNG.get_rng().uniform() >= opt.ringing_prob:
+            return img_tensor
+
+        import torch.nn.functional as F
+
+        strength = RNG.get_rng().uniform(
+            opt.ringing_strength_range[0], opt.ringing_strength_range[1]
+        )
+
+        # Detect edges using Sobel filter
+        sobel_x = (
+            torch.tensor(
+                [[[-1, 0, 1], [-2, 0, 2], [-1, 0, 1]]],
+                dtype=img_tensor.dtype,
+                device=img_tensor.device,
+            ).repeat(img_tensor.size(1), 1, 1, 1)
+            / 8.0
+        )
+
+        edges = F.conv2d(img_tensor, sobel_x, padding=1, groups=img_tensor.size(1))
+
+        # Create ringing pattern (oscillation near edges)
+        ring_kernel = (
+            torch.tensor(
+                [[[0, -1, 0], [-1, 5, -1], [0, -1, 0]]],
+                dtype=img_tensor.dtype,
+                device=img_tensor.device,
+            ).repeat(img_tensor.size(1), 1, 1, 1)
+            / 5.0
+        )
+
+        ringing = (
+            F.conv2d(edges.abs(), ring_kernel, padding=1, groups=img_tensor.size(1))
+            * strength
+        )
+
+        # Add ringing to original with sign from edges
+        result = img_tensor + ringing * edges.sign()
+
+        return torch.clamp(result, 0, 1)
