@@ -36,7 +36,7 @@ network_g:
 
 path:
   # Load fidelity pretrain
-  pretrain_network_g: experiments/2xParagonSR2_S_Fidelity/models/net_g_ema_400000.safetensors
+  pretrain_network_g: experiments/2xParagonSR2_S_Fidelity/models/net_g_ema_310000.safetensors
   strict_load_g: true
   resume_state: ~
 
@@ -92,6 +92,18 @@ train:
       kernel_size: 7
       sigma: 1.0
       criterion: charbonnier
+
+    # Laplacian for edge preservation
+    - type: laplacianloss
+      loss_weight: 0.15
+      start_iter: 2500
+      criterion: charbonnier
+
+    # LDL for local distribution learning
+    - type: ldlloss
+      loss_weight: 0.6
+      loss_decay: 0.8
+      loss_decay_inflection: 40000
 
 val:
   val_enabled: true
