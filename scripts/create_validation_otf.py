@@ -29,7 +29,10 @@ from tqdm import tqdm
 repo_root = Path(__file__).parents[2]
 sys.path.insert(0, str(repo_root))
 
-from traiNNer.models.paragon_comprehensive_sequences import create_all_sequences
+from traiNNer.models.paragon_comprehensive_sequences import (
+    create_all_sequences,
+    create_enhanced_predefined_sequences,
+)
 
 
 def preprocess_image(img_path: Path) -> torch.Tensor:
@@ -55,8 +58,20 @@ def main() -> None:
     parser.add_argument("--output", required=True, help="Output LR directory")
     parser.add_argument(
         "--sequence",
-        default="youtube",
-        choices=["youtube", "tiktok", "streaming", "dvdrip", "social_multi", "all"],
+        default="photo",
+        choices=[
+            "photo",  # All photography workflows
+            "professional",
+            "phone",
+            "social",
+            "legacy",  # Individual photo workflows
+            "youtube",
+            "tiktok",
+            "streaming",
+            "dvdrip",
+            "social_multi",  # Video workflows
+            "all",  # Everything
+        ],
         help="Degradation sequence to apply",
     )
     parser.add_argument(
@@ -90,14 +105,23 @@ def main() -> None:
 
     print(f"Found {len(images)} images, processing {min(len(images), args.count)}...")
 
-    # Get sequences
+    # Get sequences based on user choice
     from traiNNer.models.paragon_sequences import SequenceController
 
-    all_sequences = create_all_sequences(include_video=True)
-
-    # Filter to specific sequence if requested
-    if args.sequence != "all":
+    if args.sequence == "photo":
+        # Use all photography workflows (not video)
+        all_sequences = create_enhanced_predefined_sequences()
+        print("Using ParagonOTF photography workflows (WebP/AVIF/camera/processing)")
+    elif args.sequence == "all":
+        # Use everything (photo + video)
+        all_sequences = create_all_sequences(include_video=True)
+        print("Using all ParagonOTF sequences (photo + video)")
+    else:
+        # Use specific sequence or video platform
+        all_sequences = create_all_sequences(include_video=True)
+        # Filter to specific sequence
         all_sequences = [s for s in all_sequences if args.sequence in s.name.lower()]
+        print(f"Using sequence: {args.sequence}")
 
     if not all_sequences:
         print(f"Error: No sequence found matching '{args.sequence}'")

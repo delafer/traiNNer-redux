@@ -45,6 +45,11 @@ datasets:
     blur_prob: 0.5
     resize_prob: [0.2, 0.7, 0.1]  # up, down, keep
     resize_range: [0.15, 1.5]
+
+    # Diverse resize modes for robust training
+    resize_mode_list: [area, bicubic, bilinear, nearest]
+    resize_mode_prob: [0.3, 0.4, 0.25, 0.05]  # area=blocky, bicubic=balanced, bilinear=smooth, nearest=aliased
+
     gaussian_noise_prob: 0.5
     noise_range: [1, 30]
     poisson_scale_range: [0.05, 3]
@@ -56,6 +61,11 @@ datasets:
     second_blur_prob: 0.8
     resize_prob2: [0.3, 0.4, 0.3]
     resize_range2: [0.3, 1.2]
+
+    # Second stage resize modes (less diversity, more quality)
+    resize_mode_list2: [area, bicubic, bilinear]
+    resize_mode_prob2: [0.3, 0.45, 0.25]
+
     gaussian_noise_prob2: 0.5
     noise_range2: [1, 25]
     poisson_scale_range2: [0.05, 2.5]
@@ -63,51 +73,63 @@ datasets:
     jpeg_range2: [30, 95]
     jpeg_prob2: 0.9
 
-    # ========= PARAGON OTF ENHANCEMENTS =========
+    # Final resize mode (quality-focused)
+    resize_mode_list3: [area, bicubic]
+    resize_mode_prob3: [0.3, 0.7]  # Prefer bicubic for final downscale
+
+    # ========= PARAGON OTF PHOTOGRAPHY ENHANCEMENTS =========
+    # This showcases YOUR ParagonOTF innovations for real-world photography!
+    # Focus: Modern compression + camera artifacts + processing degradations
+    # Video is optional/minimal (just one of 14+ degradation types)
+
     # Enable advanced sequence control
     enable_sequences: true  # Uses create_all_sequences()
 
-    # Modern image compression formats
-    webp_prob: 0.3
+    # === YOUR INNOVATIONS: Modern Image Compression ===
+    webp_prob: 0.4  # Higher - common in web
     webp_range: [60, 85]
-    avif_prob: 0.2
+    avif_prob: 0.3  # Higher - modern format
     avif_range: [65, 90]
+    heif_prob: 0.2  # iPhone photos
+    heif_range: [70, 90]
 
-    # Video compression (H.264/H.265/VP9 via FFmpeg)
-    video_compress_prob: 0.15  # Conservative for training speed
-    video_codecs: ['h264', 'h265']
-    video_crf_range: [23, 35]  # YouTube-like quality
-    video_presets: ['medium', 'fast']
+    # === OPTIONAL: Video Compression (Low Priority) ===
+    # Video is just ONE aspect of ParagonOTF, not the focus!
+    video_compress_prob: 0.05  # Very low - optional showcase
+    video_codecs: ['h264']
+    video_crf_range: [25, 32]
+    video_presets: ['medium']
 
-    # Video artifacts
-    block_artifact_prob: 0.4
-    block_strength_range: [8, 20]
-    banding_prob: 0.3
+    # Video artifacts (also low)
+    block_artifact_prob: 0.15
+    block_strength_range: [8, 16]
+    banding_prob: 0.15
     banding_bit_range: [6, 8]
-    ringing_prob: 0.3
-    ringing_strength_range: [0.02, 0.1]
+    ringing_prob: 0.2
+    ringing_strength_range: [0.02, 0.08]
 
-    # Camera artifacts
-    sensor_noise_prob: 0.3
+    # === YOUR INNOVATIONS: Camera Artifacts ===
+    sensor_noise_prob: 0.5  # Higher - realistic camera noise
     sensor_noise_std_range: [0.01, 0.06]
-    motion_blur_prob: 0.2
+    motion_blur_prob: 0.3  # Camera shake
     motion_blur_kernel_size: [3, 9]
     motion_blur_angle_range: [0, 360]
-    lens_distort_prob: 0.25
+    lens_distort_prob: 0.35  # Lens imperfections
     lens_distort_strength_range: [-0.1, 0.2]
-    rolling_shutter_prob: 0.15
+    rolling_shutter_prob: 0.25  # CMOS artifacts
     rolling_shutter_strength_range: [0.01, 0.06]
-    chromatic_aberration_prob: 0.3
+    chromatic_aberration_prob: 0.4  # Color fringing
 
-    # Processing artifacts
-    oversharpen_prob: 0.5
+    # === YOUR INNOVATIONS: Processing Artifacts ===
+    oversharpen_prob: 0.6  # Very common in photo editing
     oversharpen_strength: [1.1, 1.8]
-    exposure_prob: 0.3
+    exposure_prob: 0.4  # Brightness adjustments
     exposure_factor_range: [0.85, 1.25]
-    color_temp_prob: 0.4
+    color_temp_prob: 0.5  # White balance errors
     color_temp_shift_range: [-0.15, 0.15]
-    aliasing_prob: 0.2
+    aliasing_prob: 0.3  # Downsampling artifacts
     aliasing_scale_range: [0.6, 0.9]
+    demosaic_prob: 0.1  # RAW conversion artifacts (CPU-intensive, keep low)
     # ========= END PARAGON OTF =========
 
     queue_size: 120  # Training pair pool
