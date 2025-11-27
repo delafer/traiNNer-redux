@@ -308,54 +308,6 @@ class PixelShufflePack(nn.Module):
 # --------------------------------------------------------------------
 
 
-class ReparamConvV2(nn.Module):
-    def __init__(
-        self, in_channels: int, out_channels: int, stride: int = 1, groups: int = 1
-    ) -> None:
-        super().__init__()
-        self.in_channels, self.out_channels, self.stride, self.groups = (
-            in_channels,
-            out_channels,
-            stride,
-            groups,
-        )
-        self.conv3x3 = nn.Conv2d(
-            in_channels, out_channels, 3, stride, 1, groups=groups, bias=True
-        )
-        self.conv1x1 = nn.Conv2d(
-            in_channels, out_channels, 1, stride, 0, groups=groups, bias=True
-        )
-        self.dw_conv3x3 = None
-        if in_channels == out_channels and groups == in_channels:
-            self.dw_conv3x3 = nn.Conv2d(
-                in_channels, out_channels, 3, stride, 1, groups=in_channels, bias=True
-            )
-
-    def get_fused_kernels(self) -> tuple[torch.Tensor, torch.Tensor]:
-        fused_kernel = self.conv3x3.weight.detach().clone()
-        fused_bias = self.conv3x3.bias.detach().clone()
-        fused_kernel += F.pad(self.conv1x1.weight, [1, 1, 1, 1])
-        fused_bias += self.conv1x1.bias.detach()
-        if self.dw_conv3x3 is not None:
-            dw_kernel = self.dw_conv3x3.weight
-            standard_dw_kernel = torch.zeros_like(self.conv3x3.weight)
-            for i in range(self.in_channels):
-                standard_dw_kernel[i, 0, :, :] = dw_kernel[i, 0, :, :]
-            fused_kernel += standard_dw_kernel
-            fused_bias += self.dw_conv3x3.bias.detach()
-        return fused_kernel, fused_bias
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        if self.training:
-            out = self.conv3x3(x) + self.conv1x1(x)
-            if self.dw_conv3x3 is not None:
-                out = out + self.dw_conv3x3(x)
-            return out
-        else:
-            w, b = self.get_fused_kernels()
-            return F.conv2d(x, w, b, stride=self.stride, padding=1, groups=self.groups)
-
-
 class InceptionDWConv2d(nn.Module):
     def __init__(
         self,

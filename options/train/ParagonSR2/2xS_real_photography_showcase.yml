@@ -249,8 +249,7 @@ train:
       # Uses all MuNet discriminator features automatically
 
     # GAN loss (R3GAN integrated)
-    - type: ganloss
-      gan_type: r3gan # R3 regularization integrated
+    - type: r3ganloss
       loss_weight: 0.08
       start_iter: 10000 # Start GAN after perceptual stabilizes
       r1_weight: 10.0 # R1 gradient penalty weight
