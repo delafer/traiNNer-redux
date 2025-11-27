@@ -91,7 +91,7 @@ datasets:
     name: Train
     type: realesrgandataset
     dataroot_gt: /home/phips/Documents/dataset/cc0/hr
-    gt_size: 256
+    gt_size: 224 # Reduced from 256 for RTX 3060 VRAM efficiency
     use_hflip: false
     use_rot: false
 
@@ -134,7 +134,7 @@ datasets:
     final_kernel_range: [7, 21]
 
     num_worker_per_gpu: 6
-    batch_size_per_gpu: 6
+    batch_size_per_gpu: 4 # Reduced from 6 for RTX 3060 (12GB) with MuNet + full loss stack
     accum_iter: 1
 
   val:
@@ -303,7 +303,3 @@ logger:
   save_checkpoint_freq: 2000
   save_checkpoint_format: safetensors
   use_tb_logger: true
-
-  # OTF degradation debugging (optional)
-  high_order_degradations_debug: false # Set true to save degraded samples
-  high_order_degradations_debug_limit: 100

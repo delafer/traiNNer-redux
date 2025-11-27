@@ -77,6 +77,8 @@ def build_loss(loss_opt: dict[str, Any]) -> nn.Module:
         "disable_after",
         "schedule_type",
         "warn_on_unused",
+        "loss_decay",  # For exponential decay scheduling
+        "loss_decay_inflection",  # Inflection point for decay
     ]
     has_schedule = any(param in loss_opt for param in schedule_params)
 

@@ -582,21 +582,31 @@ class RealESRGANModel(SRModel):
 
             # ========================================================================
             # STAGE 5: OPTIONAL EDITING (post-processing before upload)
-            # Social media filters and editing apps
+            # Social media filters and photo editing apps
             # ========================================================================
 
-            editing_prob = self.opt.get("editing_prob", 0.0)
+            editing_prob = self.opt.editing_prob
             if RNG.get_rng().uniform() < editing_prob:
-                # Additional exposure tweaks
+                # Additional exposure adjustments
                 if hasattr(self.opt, "editing_exposure_prob"):
-                    if RNG.get_rng().uniform() < self.opt.editing_exposure_prob:
-                        out = ParagonOTF.apply_exposure_errors(out, self.opt)
+                    exposure_prob = self.opt.editing_exposure_prob
+                    if RNG.get_rng().uniform() < exposure_prob:
+                        exposure_range = getattr(
+                            self.opt, "editing_exposure_range", (0.9, 1.1)
+                        )
+                        factor = RNG.get_rng().uniform(
+                            exposure_range[0], exposure_range[1]
+                        )
+                        out = out * factor
+                        out = torch.clamp(out, 0, 1)
 
-                # Additional sharpening
+                # Additional sharpening (social media enhancement)
                 if hasattr(self.opt, "editing_oversharpen_prob"):
-                    if RNG.get_rng().uniform() < self.opt.editing_oversharpen_prob:
-                        out = ParagonOTF.apply_oversharpening(out, self.opt)
-
+                    sharpen_prob = self.opt.editing_oversharpen_prob
+                    if RNG.get_rng().uniform() < sharpen_prob:
+                        sharpen_range = getattr(
+                            self.opt, "editing_oversharpen_strength", (1.0, 1.3)
+                        )
             # ========================================================================
             # NOTE: STAGE 6 (platform recompression) is handled inside
             # apply_realistic_compression_pipeline() via recompression_prob

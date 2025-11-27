@@ -652,6 +652,30 @@ class ReduxOptions(StrictStruct):
         bool,
         Meta(description="Enable degradation sequence control for realistic chains."),
     ] = False
+    editing_prob: Annotated[
+        float,
+        Meta(
+            description="Probability of applying photo editing stage (filters, adjustments)."
+        ),
+    ] = 0
+    editing_exposure_prob: Annotated[
+        float,
+        Meta(
+            description="Probability of applying exposure adjustment in editing stage."
+        ),
+    ] = 0
+    editing_exposure_range: Annotated[
+        tuple[float, float],
+        Meta(description="Exposure factor range for editing stage."),
+    ] = (0.9, 1.1)
+    editing_oversharpen_prob: Annotated[
+        float,
+        Meta(description="Probability of applying oversharpening in editing stage."),
+    ] = 0
+    editing_oversharpen_strength: Annotated[
+        tuple[float, float],
+        Meta(description="Strength range for oversharpening in editing stage."),
+    ] = (1.0, 1.3)
     sequence_probability: Annotated[
         float,
         Meta(
@@ -796,6 +820,49 @@ class ReduxOptions(StrictStruct):
             description="List of probabilities for the final resize of selecting the corresponding resize mode in `resize_mode_list3`."
         ),
     ] = field(default_factory=lambda: [0.25, 0.25, 0.25, 0.25])
+
+    # Unified Compression Pipeline (Added by Philip Hofmann for ParagonSR)
+    compression_formats: Annotated[
+        list[Literal["jpeg", "webp", "avif", "heif"]],
+        Meta(description="List of compression formats for initial compression stage."),
+    ] = field(default_factory=lambda: ["jpeg", "webp", "avif", "heif"])
+    compression_weights: Annotated[
+        list[float],
+        Meta(description="Probability weights for each format in compression_formats."),
+    ] = field(default_factory=lambda: [0.60, 0.25, 0.10, 0.05])
+    compression_jpeg_range: Annotated[
+        tuple[float, float],
+        Meta(description="Quality range for JPEG compression in initial stage."),
+    ] = (45, 95)
+    compression_webp_range: Annotated[
+        tuple[float, float],
+        Meta(description="Quality range for WebP compression in initial stage."),
+    ] = (60, 85)
+    compression_avif_range: Annotated[
+        tuple[float, float],
+        Meta(description="Quality range for AVIF compression in initial stage."),
+    ] = (65, 90)
+    compression_heif_range: Annotated[
+        tuple[float, float],
+        Meta(description="Quality range for HEIF compression in initial stage."),
+    ] = (70, 90)
+
+    recompression_prob: Annotated[
+        float,
+        Meta(
+            description="Probability of applying a second compression stage (platform recompression)."
+        ),
+    ] = 0
+    recompression_formats: Annotated[
+        list[Literal["jpeg", "webp", "avif", "heif"]],
+        Meta(description="List of compression formats for recompression stage."),
+    ] = field(default_factory=lambda: ["jpeg", "webp", "avif", "heif"])
+    recompression_weights: Annotated[
+        list[float],
+        Meta(
+            description="Probability weights for each format in recompression_formats."
+        ),
+    ] = field(default_factory=lambda: [0.50, 0.35, 0.10, 0.05])
 
     queue_size: Annotated[
         int,

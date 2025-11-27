@@ -190,7 +190,17 @@ class IterativeLossWrapper(nn.Module):
             if isinstance(base_loss, dict):
                 return {k: v * 0.0 for k, v in base_loss.items()}
             else:
-                device = args[0].device if args else torch.device("cpu")
+                # Determine device from first argument
+                device = torch.device("cpu")
+                if args:
+                    first_arg = args[0]
+                    if isinstance(first_arg, torch.Tensor):
+                        device = first_arg.device
+                    elif isinstance(first_arg, (list, tuple)) and first_arg:
+                        # Handle lists of tensors (e.g., discriminator features)
+                        if isinstance(first_arg[0], torch.Tensor):
+                            device = first_arg[0].device
+
                 return torch.tensor(
                     0.0,
                     device=device,

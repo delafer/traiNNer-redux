@@ -751,18 +751,7 @@ class MUNet(nn.Module):
         # Add fused feature
         feats.append(fused)
 
+        # Final output layer
+        out = self.out_conv(fused)
 
-def forward_with_features(self, x):
-    """
-    Returns:
-        pred: final discriminator output
-        feats: list of multi-scale, multi-branch intermediate activations
-    """
-    feats = []
-    out, branch_feats = self.forward_return_features(x)
-
-    # Merge multi-branch features
-    for bf in branch_feats:
-        feats.extend(bf)
-
-    return out, feats
+        return out, feats

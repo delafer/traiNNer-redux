@@ -126,14 +126,16 @@ class SRModel(BaseModel):
 
             if not gan_opt:
                 if self.opt.train.losses:
-                    gan_opts = list(
-                        filter(
-                            lambda x: x["type"].lower() == "ganloss",
-                            self.opt.train.losses,
-                        )
-                    )
-                    if gan_opts:
-                        gan_opt = gan_opts[0]
+                    for loss in self.opt.train.losses:
+                        loss_type = loss["type"].lower()
+                        if loss_type in [
+                            "ganloss",
+                            "r3ganloss",
+                            "multiscaleganloss",
+                            "featurematchingloss",
+                        ]:
+                            self.has_gan = True
+                            break
 
             if gan_opt:
                 if gan_opt.get("loss_weight", 0) != 0:
@@ -272,7 +274,7 @@ class SRModel(BaseModel):
             assert "loss_weight" in loss, f"{loss['type']} must define loss_weight"
             if float(loss["loss_weight"]) != 0:
                 label = loss_type_to_label(loss["type"])
-                if label == "l_g_gan":
+                if label in {"l_g_gan", "l_g_featurematching"}:
                     self.has_gan = True
                 self.losses[label] = build_loss(loss).to(
                     self.device,

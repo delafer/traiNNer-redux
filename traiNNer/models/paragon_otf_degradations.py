@@ -75,7 +75,7 @@ class ParagonOTF:
         img_tensor = ParagonOTF._compress_with_format(img_tensor, format1, opt, round=1)
 
         # Round 2: Platform recompression (optional)
-        recompression_prob = opt.get("recompression_prob", 0.0)
+        recompression_prob = opt.recompression_prob
         if RNG.get_rng().uniform() < recompression_prob:
             format2 = ParagonOTF._choose_compression_format(
                 opt.recompression_formats, opt.recompression_weights
