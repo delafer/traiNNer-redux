@@ -23,16 +23,79 @@ use_channels_last: true
 fast_matmul: false
 num_gpu: auto
 
+# ========================================================================
+# OTF DEGRADATION SETTINGS
+# Enable on-the-fly degradation with physically accurate ordering
+# ========================================================================
+high_order_degradation: true
+
+# Blur kernel probabilities (for defocus blur stage)
+blur_prob: 0.3
+
+# Final resize mode (quality-focused for ISP stage)
+resize_mode_list3: [bicubic, bilinear]
+resize_mode_prob3: [0.7, 0.3]
+
+# === REALISTIC COMPRESSION PIPELINE ===
+# Replaces old sequential WebP/AVIF/HEIF compression with unified approach
+# Each compression round chooses ONE format (mutually exclusive)
+
+# Initial compression (camera/editor saves file) - always applied
+compression_formats: [jpeg, webp, avif, heif]
+compression_weights: [0.60, 0.25, 0.10, 0.05] # JPEG most common
+compression_jpeg_range: [45, 95]
+compression_webp_range: [60, 85]
+compression_avif_range: [65, 90]
+compression_heif_range: [70, 90]
+
+# Platform recompression (upload service processes image) - optional
+recompression_prob: 0.5
+recompression_formats: [jpeg, webp, avif, heif]
+recompression_weights: [0.50, 0.35, 0.10, 0.05]
+
+# === CAMERA ARTIFACTS (Realistic for Internet Photography) ===
+sensor_noise_prob: 0.5
+sensor_noise_std_range: [0.015, 0.06] # ISO 100-1600 range
+motion_blur_prob: 0.2
+motion_blur_kernel_size: [3, 9]
+motion_blur_angle_range: [0, 360]
+lens_distort_prob: 0.25
+lens_distort_strength_range: [-0.1, 0.2]
+rolling_shutter_prob: 0.15
+rolling_shutter_strength_range: [0.01, 0.06]
+chromatic_aberration_prob: 0.4
+
+# === PHOTO PROCESSING & EDITING ===
+oversharpen_prob: 0.4
+oversharpen_strength: [1.1, 1.5]
+exposure_prob: 0.3
+exposure_factor_range: [0.90, 1.15]
+color_temp_prob: 0.35
+color_temp_shift_range: [-0.15, 0.15]
+aliasing_prob: 0.2
+aliasing_scale_range: [0.6, 0.9]
+demosaic_prob: 0.1
+
+# === OPTIONAL EDITING STAGE ===
+# Simulates social media filters and photo editing apps
+editing_prob: 0.4
+editing_exposure_prob: 0.6
+editing_exposure_range: [0.95, 1.10]
+editing_oversharpen_prob: 0.4
+editing_oversharpen_strength: [1.05, 1.3]
+
+queue_size: 120
+
 datasets:
   train:
     name: Train
-    type: realesrgandataset # OTF degradation pipeline
+    type: realesrgandataset
     dataroot_gt: /home/phips/Documents/dataset/cc0/hr
-    gt_size: 256 # S model handles 256 patches
-    use_hflip: true
-    use_rot: true
+    gt_size: 256
+    use_hflip: false
+    use_rot: false
 
-    # Blur kernel generation (for OTF)
+    # Blur kernel generation (stays in dataset section)
     blur_kernel_size: 21
     kernel_list:
       [
@@ -49,148 +112,29 @@ datasets:
     betag_range: [0.5, 4.0]
     betap_range: [1, 2]
 
-    # First degradation (REDUCED for realistic photography)
-    blur_prob: 0.3 # Reduced from 0.5
-    resize_prob: [0.2, 0.7, 0.1] # up, down, keep
-    resize_range: [0.15, 1.5]
+    # Second kernel for variety (stays in dataset section)
+    blur_kernel_size2: 21
+    kernel_list2:
+      [
+        "iso",
+        "aniso",
+        "generalized_iso",
+        "generalized_aniso",
+        "plateau_iso",
+        "plateau_aniso",
+      ]
+    kernel_prob2: [0.45, 0.25, 0.12, 0.03, 0.12, 0.03]
+    sinc_prob2: 0.1
+    blur_sigma2: [0.2, 1.5]
+    betag_range2: [0.5, 4.0]
+    betap_range2: [1, 2]
 
-    # Diverse resize modes for robust training
-    resize_mode_list: [area, bicubic, bilinear, nearest]
-    resize_mode_prob: [0.3, 0.4, 0.25, 0.05] # area=blocky, bicubic=balanced, bilinear=smooth, nearest=aliased
+    # Final sinc kernel
+    final_sinc_prob: 0.1
+    final_kernel_range: [7, 21]
 
-    gaussian_noise_prob: 0.5
-    noise_range: [1, 20] # Reduced from [1, 30]
-    poisson_scale_range: [0.05, 3]
-    gray_noise_prob: 0.4
-    jpeg_range: [40, 95] # Improved quality from [30, 95]
-    jpeg_prob: 0.65 # Reduced from 0.9
-
-    # Second degradation (REDUCED for realistic photography)
-    blur_prob2: 0.5 # Reduced from 0.8
-    resize_prob2: [0.3, 0.4, 0.3]
-    resize_range2: [0.3, 1.2]
-
-    # Second stage resize modes (less diversity, more quality)
-    resize_mode_list2: [area, bicubic, bilinear]
-    resize_mode_prob2: [0.3, 0.45, 0.25]
-
-    gaussian_noise_prob2: 0.5
-    noise_range2: [1, 18] # Reduced from [1, 25]
-    poisson_scale_range2: [0.05, 2.5]
-    gray_noise_prob2: 0.4
-    jpeg_range2: [45, 95] # Improved quality from [30, 95]
-    jpeg_prob2: 0.7 # Reduced from 0.9
-
-    # Final resize mode (quality-focused)
-    resize_mode_list3: [area, bicubic]
-    resize_mode_prob3: [0.3, 0.7] # Prefer bicubic for final downscale
-
-    # ========= PARAGON OTF PHOTOGRAPHY ENHANCEMENTS =========
-    # This showcases YOUR ParagonOTF innovations for real-world photography!
-    # Focus: Realistic internet photo workflows (download/upload/edit/re-upload)
-    # Goal: Great quality upscale for photos downloaded from the internet
-
-    # === Sequence Controller (OPTIONAL - Not Currently Used) ===
-    # The sequence controller orchestrates degradations into realistic workflows
-    # like "professional camera → editing → upload → download → re-edit"
-    # Currently DISABLED - we use individual degradation probabilities instead
-    #
-    # To enable orchestrated workflows (requires code integration):
-    # enable_sequences: true
-    #
-    # Available sequences when enabled:
-    # - professional_to_internet: DSLR → post-processing → web upload
-    # - phone_to_social: Phone camera → filters → social media
-    # - social_processing: Multi-platform upload cycles (Instagram → screenshot → Twitter)
-    # - legacy_internet: Old photo editors → multiple JPEG saves
-    # - youtube_video: H.264 encoding → platform processing (if video enabled)
-    # - tiktok_shortform: Aggressive compression → beauty filters
-    #
-    # Note: Currently sequences are created but NOT applied in training pipeline
-    # Individual degradation probabilities below are what actually runs
-
-    # === REALISTIC COMPRESSION PIPELINE ===
-    # Replaces old sequential WebP/AVIF/HEIF compression with unified approach
-    # Each compression round chooses ONE format (mutually exclusive)
-
-    # Initial compression (camera/editor saves file) - always applied
-    compression_formats: [jpeg, webp, avif, heif]
-    compression_weights: [0.60, 0.25, 0.10, 0.05] # JPEG most common
-    compression_jpeg_range: [45, 95]
-    compression_webp_range: [60, 85]
-    compression_avif_range: [65, 90]
-    compression_heif_range: [70, 90]
-
-    # Platform recompression (upload service processes image) - optional
-    recompression_prob: 0.5 # 50% of images get recompressed
-    recompression_formats: [jpeg, webp, avif, heif]
-    recompression_weights: [0.50, 0.35, 0.10, 0.05] # Platforms prefer JPEG/WebP
-
-    # === ACTIVE DEGRADATIONS: Camera Artifacts ===
-    # REALISTIC: Moderate camera imperfections for internet photography
-    # Noise levels cover ISO 100-1600 (daylight to indoor/evening)
-    sensor_noise_prob: 0.5 # 50% of photos have visible noise
-    sensor_noise_std_range: [0.015, 0.06] # Clean daylight (0.015) to moderate indoor (0.06)
-    motion_blur_prob: 0.2 # Reduced from 0.3
-    motion_blur_kernel_size: [3, 9]
-    motion_blur_angle_range: [0, 360]
-    lens_distort_prob: 0.25 # Reduced from 0.35
-    lens_distort_strength_range: [-0.1, 0.2]
-    rolling_shutter_prob: 0.15 # Reduced from 0.25
-    rolling_shutter_strength_range: [0.01, 0.06]
-    chromatic_aberration_prob: 0.4 # Keep - subtle artifact
-
-    # === ACTIVE DEGRADATIONS: Photo Processing & Editing ===
-    # REDUCED: Moderate editing artifacts for realistic photography
-    oversharpen_prob: 0.4 # Reduced from 0.6
-    oversharpen_strength: [1.1, 1.5] # Reduced from [1.1, 1.8]
-    exposure_prob: 0.3 # Reduced from 0.4
-    exposure_factor_range: [0.90, 1.15] # Reduced from [0.85, 1.25]
-    color_temp_prob: 0.35 # Reduced from 0.5
-    color_temp_shift_range: [-0.15, 0.15]
-    aliasing_prob: 0.2 # Reduced from 0.3
-    aliasing_scale_range: [0.6, 0.9]
-    demosaic_prob: 0.1 # Keep - already low (CPU-intensive)
-
-    # === OPTIONAL EDITING STAGE (Post-processing before upload) ===
-    # Simulates social media filters and photo editing apps
-    editing_prob: 0.4 # 40% of photos are edited before upload
-    editing_exposure_prob: 0.6
-    editing_exposure_range: [0.95, 1.10] # Subtle adjustments
-    editing_oversharpen_prob: 0.4
-    editing_oversharpen_strength: [1.05, 1.3] # Light sharpening
-
-    # === COMMENTED LOSSES (For Community Documentation) ===
-    # These are NOT active but included to showcase the full toolkit
-
-    # Video Compression (H.264/H.265/VP9/AV1 via FFmpeg)
-    # - type: video_compression
-    #   video_compress_prob: 0  # DISABLED: Not relevant for internet photography
-    #   video_codecs: ['h264', 'h265', 'vp9', 'av1']
-    #   video_crf_range: [18, 35]
-    #   video_presets: ['ultrafast', 'fast', 'medium', 'slow']
-    #   # Use case: YouTube, TikTok, streaming platforms
-
-    # Video-Specific Artifacts
-    # Block artifacts (8x8 DCT quantization from video codecs)
-    # - type: block_artifacts
-    #   block_artifact_prob: 0  # DISABLED: Video-specific
-    #   block_strength_range: [6, 24]
-
-    # Color banding (bit-depth reduction common in videos)
-    # - type: color_banding
-    #   banding_prob: 0  # DISABLED: Video-specific
-    #   banding_bit_range: [5, 8]
-
-    # Ringing artifacts (lossy codec edge overshoot)
-    # - type: ringing
-    #   ringing_prob: 0  # DISABLED: Video-specific
-    #   ringing_strength_range: [0.02, 0.15]
-    # ========= END PARAGON OTF =========
-
-    queue_size: 120 # Training pair pool
     num_worker_per_gpu: 6
-    batch_size_per_gpu: 6 # RTX 3060 12GB sweet spot
+    batch_size_per_gpu: 6
     accum_iter: 1
 
   val:
