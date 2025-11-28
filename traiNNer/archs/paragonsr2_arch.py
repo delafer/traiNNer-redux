@@ -71,7 +71,7 @@ USAGE EXAMPLES
 Training Config:
 ---------------
 network_g:
-  type: paragonsr2_s          # Or nano, tiny, xs, s, m, l, xl
+  type: paragonsr2_s          # Or nano, micro, tiny, xs, s, m, l, xl
   scale: 2                    # 2x, 3x, or 4x super-resolution
   upsampler_alpha: 0.5        # MagicKernel sharpening (0-1)
   detail_gain: 0.1            # Initial detail contribution
@@ -304,7 +304,7 @@ class PixelShufflePack(nn.Module):
 
 
 # --------------------------------------------------------------------
-# 2. CORE BLOCKS (Reparam, Inception, Transformer) - Kept from your code
+# 2. CORE BLOCKS (RMSNorm, Inception, Transformer) - Optimized for inference
 # --------------------------------------------------------------------
 
 
@@ -612,8 +612,10 @@ class ParagonSR2(nn.Module):
                         )
 
     def fuse_for_release(self) -> "ParagonSR2":
-        """Fuse ReparamConvV2 blocks for inference (if present)."""
-        # Recursively fuse all child modules (NOT self.modules() which includes self!)
+        """Placeholder for model optimization before deployment (if needed)."""
+        # This architecture is already optimized for inference
+        # No reparameterization needed due to RMSNorm + static design
+        # Recursively check child modules for any optimization opportunities
         for module in self.children():
             if hasattr(module, "fuse_for_release"):
                 module.fuse_for_release()
