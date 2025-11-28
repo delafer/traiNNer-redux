@@ -107,20 +107,19 @@ PERFORMANCE CHARACTERISTICS
 
 Variant Specs (2x SR):
 ---------------------
-Nano:  12 feat, 1x1 blocks, ~0.02M params, ~0.5 GFLOPs  → 60+ FPS (RTX 3060)
-Tiny:  24 feat, 2x2 blocks, ~0.08M params, ~2.0 GFLOPs  → 30 FPS
-S:     48 feat, 3x4 blocks, ~0.28M params, ~8 GFLOPs    → 15 FPS
-M:     64 feat, 4x6 blocks, ~0.65M params, ~18 GFLOPs   → 8 FPS
-L:     96 feat, 6x8 blocks, ~1.8M params, ~45 GFLOPs    → 4 FPS
-XL:    128 feat, 8x10 blocks, ~3.8M params, ~95 GFLOPs  → 2 FPS
+Nano:  12 feat, 1x1 blocks, ~0.02M params, ~0.5 GFLOPs
+Tiny:  24 feat, 2x2 blocks, ~0.08M params, ~2.0 GFLOPs
+S:     48 feat, 3x4 blocks, ~0.28M params, ~8 GFLOPs
+M:     64 feat, 4x6 blocks, ~0.65M params, ~18 GFLOPs
+L:     96 feat, 6x8 blocks, ~1.8M params, ~45 GFLOPs
+XL:    128 feat, 8x10 blocks, ~3.8M params, ~95 GFLOPs
 
-TensorRT FP16 Speed-up: ~1.7-2x over PyTorch FP32
-
-Training Speed Comparison:
--------------------------
-ParagonSR2 Hybrid: ~6 it/s (S variant, batch=4, RTX 3060)
-HR-processing nets: ~1.5 it/s (same config)
-Speed-up: ~4x faster training
+Performance Characteristics:
+---------------------------
+- All heavy processing occurs in LR space (4x fewer pixels for 2x SR)
+- TensorRT FP16 provides significant speed-up over PyTorch FP32
+- Training significantly faster than HR-processing approaches
+- Real-world performance varies by hardware and implementation details
 
 Deployment Targets:
 ------------------

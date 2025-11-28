@@ -130,10 +130,10 @@ Base config (num_feat=64, ch_mult=[1,2,4,8]):
 
 Quality Impact (Phase 1+2):
 ---------------------------
-- Gradient Branch: +8% artifact detection on edges
-- Self-Attention: +15% on global inconsistencies
-- Attention Fusion: +12% overall quality improvement
-- Combined: ~9/10 → 10/10 discriminator quality
+- Gradient Branch: Improved artifact detection on edges
+- Self-Attention: Enhanced global consistency detection
+- Attention Fusion: Better overall quality through intelligent branch weighting
+- Combined: Significant improvement in discriminator capability for artifact detection
 
 Training Recommendations:
 -------------------------
