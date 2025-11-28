@@ -91,9 +91,9 @@ datasets:
     name: Train
     type: realesrgandataset
     dataroot_gt: /home/phips/Documents/dataset/cc0/hr
-    gt_size: 224 # Reduced from 256 for RTX 3060 VRAM efficiency
-    use_hflip: false
-    use_rot: false
+    gt_size: 128
+    use_hflip: true
+    use_rot: true
 
     # Blur kernel generation (stays in dataset section)
     blur_kernel_size: 21
@@ -253,7 +253,7 @@ train:
       loss_weight: 0.08
       start_iter: 10000 # Start GAN after perceptual stabilizes
       r1_weight: 10.0 # R1 gradient penalty weight
-      r2_weight: 10.0 # R2 gradient penalty weight
+      r2_weight: 0.0 # R2 disabled to save VRAM (~1.5GB savings, R1 alone is sufficient)
 
     # === COMMENTED LOSSES (For Community Documentation) ===
     # These are NOT active but included to showcase the full toolkit
