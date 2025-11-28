@@ -3,11 +3,11 @@
 # ParagonSR2 Nano - Clean Fidelity Baseline (From Scratch)
 # Fast training, high PSNR/SS IM, sharp outputs
 #########################################################################################
-name: 2xParagonSR2_Nano_Fidelity
+name: 2xParagonSR2_Nano_Fidelity_BHI
 scale: 2
 
 use_amp: true
-amp_bf16: true
+amp_bf16: false
 use_channels_last: true
 fast_matmul: false
 num_gpu: auto
@@ -17,20 +17,20 @@ datasets:
   train:
     name: Train
     type: pairedimagedataset
-    dataroot_gt: /home/phips/Documents/dataset/cc0/hr
-    dataroot_lq: /home/phips/Documents/dataset/cc0/lr_x2 # Clean downsampled
+    dataroot_gt: /home/phips/Documents/dataset/BHI/BHI_small/BHI_small
+    dataroot_lq: /home/phips/Documents/dataset/BHI/BHI_small/x2
     lq_size: 128
     use_hflip: true
     use_rot: true
     num_worker_per_gpu: 8
-    batch_size_per_gpu: 12 # Nano is tiny, can use large batch
+    batch_size_per_gpu: 32
     accum_iter: 1
 
   val:
     name: Val
     type: pairedimagedataset
     dataroot_gt: /home/phips/Documents/dataset/cc0/val_hr
-    dataroot_lq: /home/phips/Documents/dataset/cc0/val_lr_x2
+    dataroot_lq: /home/phips/Documents/dataset/cc0/val_lr_x2_bicubic_aa
 
 network_g:
   type: paragonsr2_nano
@@ -53,10 +53,10 @@ train:
 
   scheduler:
     type: MultiStepLR
-    milestones: [80000, 120000, 150000]
+    milestones: [20000, 30000]
     gamma: 0.5
 
-  total_iter: 80000
+  total_iter: 40000
   warmup_iter: 500
 
   losses:
@@ -65,7 +65,7 @@ train:
 
 val:
   val_enabled: true
-  val_freq: 2000
+  val_freq: 5000
   save_img: true
 
   metrics_enabled: true

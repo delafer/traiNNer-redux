@@ -119,6 +119,7 @@ def create_train_val_dataloader(
                 dist=opt.dist,
                 sampler=train_sampler,
                 seed=opt.manual_seed,
+                opt=opt,
             )
 
             iter_per_epoch = (
@@ -184,6 +185,7 @@ def create_train_val_dataloader(
                     dist=opt.dist,
                     sampler=None,
                     seed=opt.manual_seed,
+                    opt=opt,
                 )
                 logger.info(
                     "Number of val images/folders in %s: %d",

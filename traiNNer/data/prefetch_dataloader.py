@@ -6,6 +6,7 @@ from typing import Any
 import torch
 from torch.utils.data import DataLoader
 
+from traiNNer.utils import get_root_logger
 from traiNNer.utils.redux_options import ReduxOptions
 
 
@@ -103,10 +104,22 @@ class CUDAPrefetcher:
         self.stream = torch.cuda.Stream()
         self.device = torch.device("cuda" if opt.num_gpu != 0 else "cpu")
         self.batch = None
+
+        # Check if pin_memory is enabled to avoid compatibility issues with bf16 + channels_last
+        pin_memory_enabled = getattr(loader, "pin_memory", False)
+        use_channels_last = (
+            opt.use_amp and opt.use_channels_last and not pin_memory_enabled
+        )
+
+        if opt.use_amp and opt.use_channels_last and pin_memory_enabled:
+            logger = get_root_logger()
+            logger.warning(
+                "Auto-disable channels_last memory format due to pin_memory incompatibility with bf16. "
+                "For better performance, consider setting 'pin_memory: false' in your dataset configuration."
+            )
+
         self.memory_format = (
-            torch.channels_last
-            if opt.use_amp and opt.use_channels_last
-            else torch.preserve_format
+            torch.channels_last if use_channels_last else torch.preserve_format
         )
         self.preload()
 
