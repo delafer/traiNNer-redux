@@ -549,6 +549,9 @@ class ParagonSR2(nn.Module):
             block_kwargs = {}
 
         self.scale = scale
+        self.num_feat = num_feat
+        self.num_groups = num_groups
+        self.num_blocks = num_blocks
         self.use_channels_last = use_channels_last and torch.cuda.is_available()
 
         if fast_body_mode:
@@ -604,8 +607,9 @@ class ParagonSR2(nn.Module):
         for module in self.modules():
             # ✅ Only convert learnable layers (skip frozen MagicKernel)
             if isinstance(module, (nn.Conv2d, nn.Linear)):
-                if hasattr(module, "weight") and module.weight is not None:
-                    if module.weight.requires_grad:  # ✅ Skip frozen weights
+                if hasattr(module, "weight") and module.weight.requires_grad:
+                    # ✅ PyTorch guarantees weight is not None if hasattr returns True
+                    with torch.no_grad():
                         module.weight.data = module.weight.contiguous(
                             memory_format=torch.channels_last
                         )
@@ -617,7 +621,9 @@ class ParagonSR2(nn.Module):
         # Recursively check child modules for any optimization opportunities
         for module in self.children():
             if hasattr(module, "fuse_for_release"):
-                module.fuse_for_release()
+                fuse_method = module.fuse_for_release
+                if callable(fuse_method):
+                    fuse_method()
         return self
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -638,6 +644,23 @@ class ParagonSR2(nn.Module):
 
         # Combine: Base provides structure, Detail adds texture
         return x_base + x_detail
+
+    def __repr__(self) -> str:
+        """String representation for debugging and logging."""
+        return (
+            f"ParagonSR2(scale={self.scale}, num_feat={self.num_feat}, "
+            f"num_groups={self.num_groups}, num_blocks={self.num_blocks})"
+        )
+
+    def count_parameters(self) -> int:
+        """Count total trainable parameters."""
+        return sum(p.numel() for p in self.parameters() if p.requires_grad)
+
+    def get_model_size_mb(self) -> float:
+        """Get model size in MB for deployment planning."""
+        return sum(p.numel() * p.element_size() for p in self.parameters()) / (
+            1024 * 1024
+        )
 
 
 # --------------------------------------------------------------------

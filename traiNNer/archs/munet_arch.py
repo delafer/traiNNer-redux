@@ -339,10 +339,23 @@ class UpBlock(nn.Module):
 class SelfAttention(nn.Module):
     """
     Self-Attention for capturing long-range dependencies at bottleneck.
-    Helps detect global inconsistencies in generated images.
 
-    Phase 2 improvement: +15% quality on complex patterns
-    Cost: -10% training speed
+    This module computes attention across spatial dimensions to capture global
+    dependencies that single convolutions cannot detect. It helps the discriminator
+    identify global inconsistencies in generated images that span large spatial areas.
+
+    Architecture:
+    - Query, Key, Value projections (with spectral norm)
+    - Scaled dot-product attention
+    - Residual connection with learnable weight
+
+    Benefits:
+    - Captures long-range spatial dependencies
+    - Helps detect global artifacts (lighting, color inconsistencies)
+    - Spectral normalization ensures training stability
+
+    Phase 2 improvement: Enhanced quality on complex patterns
+    Computational cost: Moderate increase in training time
     """
 
     def __init__(self, channels: int, reduction: int = 8) -> None:
@@ -375,10 +388,31 @@ class SelfAttention(nn.Module):
 class AttentionFusion(nn.Module):
     """
     Attention-based fusion of multiple branches.
-    Learns to weight different branches per spatial location.
 
-    Phase 1 improvement: +12% quality via smarter branch weighting
-    Cost: -5% training speed
+    This module intelligently combines features from different discriminator branches
+    by learning attention weights per spatial location. Instead of simple concatenation
+    or averaging, it learns which branch to trust more for each pixel location.
+
+    How it works:
+    1. Concatenate all branch features
+    2. Compute attention weights (4D tensor: B × num_branches × H × W)
+    3. Apply softmax normalization across branch dimension
+    4. Weighted sum of branches using learned attention
+    5. Final refinement through conv layers
+
+    Benefits:
+    - Spatial adaptivity: Different branches dominate different regions
+    - Learned prioritization: System learns which branch is most reliable
+    - Better gradient flow: Provides diverse training signals
+
+    Branch specialization (learned):
+    - Spatial regions: Spatial branch typically dominates
+    - Edge regions: Gradient branch provides edge-aware features
+    - Texture regions: Patch branch handles local patterns
+    - Frequency anomalies: Frequency branch detects spectral issues
+
+    Phase 1 improvement: Significant quality enhancement through intelligent weighting
+    Computational cost: Minimal overhead with substantial quality gains
     """
 
     def __init__(self, num_branches: int, num_feat: int, slope: float = 0.2) -> None:
@@ -669,6 +703,12 @@ class MUNet(nn.Module):
         Forward with Phase 1+2 improvements.
         Returns prediction map (B,1,H,W).
         """
+        # Input validation
+        if x.dim() != 4:
+            raise ValueError(f"Expected 4D input (B,C,H,W), got {x.dim()}D tensor")
+        if x.size(1) != self.num_in_ch:
+            raise ValueError(f"Expected {self.num_in_ch} channels, got {x.size(1)}")
+
         # Shared encoder
         bottleneck, skips = self._run_shared_encoder(x)
 
@@ -701,6 +741,20 @@ class MUNet(nn.Module):
         out = self.out_conv(fused)
         return out
 
+    def __repr__(self) -> str:
+        """String representation for debugging and logging."""
+        return f"MUNet(num_feat={self.num_feat}, ch_mult={self.ch_mult})"
+
+    def count_parameters(self) -> int:
+        """Count total trainable parameters for optimization."""
+        return sum(p.numel() for p in self.parameters() if p.requires_grad)
+
+    def get_model_size_mb(self) -> float:
+        """Get model size in MB for deployment planning."""
+        return sum(p.numel() * p.element_size() for p in self.parameters()) / (
+            1024 * 1024
+        )
+
     def forward_with_features(self, x: Tensor) -> tuple[Tensor, list[Tensor]]:
         """
         Forward with Phase 1+2 improvements + feature extraction.
@@ -709,6 +763,12 @@ class MUNet(nn.Module):
             pred: final discriminator output (B,1,H,W)
             feats: list of multi-scale, multi-branch intermediate activations
         """
+        # Input validation
+        if x.dim() != 4:
+            raise ValueError(f"Expected 4D input (B,C,H,W), got {x.dim()}D tensor")
+        if x.size(1) != self.num_in_ch:
+            raise ValueError(f"Expected {self.num_in_ch} channels, got {x.size(1)}")
+
         # Shared encoder
         bottleneck, skips = self._run_shared_encoder(x)
 
