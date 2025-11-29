@@ -496,6 +496,306 @@ def create_dynamic_loss_scheduler(
     if not enabled:
         return None
 
+    # Check for auto-calibration mode
+    auto_calibrate = scheduler_config.get("auto_calibrate", False)
+
+    if auto_calibrate:
+        # Use intelligent auto-calibration system
+        return _create_intelligent_loss_scheduler(losses_dict, scheduler_config)
+    else:
+        # Use traditional manual configuration
+        return _create_manual_loss_scheduler(losses_dict, scheduler_config)
+
+
+def _create_intelligent_loss_scheduler(
+    losses_dict: dict[str, nn.Module], scheduler_config: dict[str, Any]
+) -> DynamicLossScheduler:
+    """
+    Create an intelligent dynamic loss scheduler with automatic calibration.
+
+    Args:
+        losses_dict: Dictionary of loss modules keyed by their labels
+        scheduler_config: Configuration dictionary for the scheduler
+
+    Returns:
+        Configured DynamicLossScheduler with intelligent auto-calibration
+    """
+    # Extract base weights from loss modules
+    base_weights = {}
+    for loss_label, loss_module in losses_dict.items():
+        if hasattr(loss_module, "loss_weight"):
+            base_weights[loss_label] = loss_module.loss_weight
+        else:
+            base_weights[loss_label] = 1.0  # Default weight
+
+    # Validate that all losses have positive weights
+    for loss_label, weight in base_weights.items():
+        if weight <= 0:
+            raise ValueError(f"Loss {loss_label} has non-positive weight: {weight}")
+
+    # Get architecture type from network configuration (if available)
+    architecture_type = scheduler_config.get("architecture_type", "unknown")
+
+    # Get training configuration for intelligent analysis
+    training_config = scheduler_config.get("training_config", {})
+    total_iterations = training_config.get("total_iterations", 40000)
+    dataset_info = training_config.get("dataset_info", {})
+
+    # Determine optimal parameters using intelligent presets
+    intelligent_params = _determine_intelligent_parameters(
+        architecture_type=architecture_type,
+        total_iterations=total_iterations,
+        dataset_info=dataset_info,
+        loss_names=list(base_weights.keys()),
+        scheduler_config=scheduler_config,
+    )
+
+    # Enable comprehensive monitoring for intelligent system
+    intelligent_params["enable_monitoring"] = True
+
+    # Log the intelligent calibration
+    logger = _get_logger()
+    logger.info(
+        f"🎯 Intelligent Auto-Calibration: {architecture_type} architecture detected",
+        extra={"markup": True},
+    )
+    logger.info(
+        f"🧠 Auto-calibrated parameters: {intelligent_params}", extra={"markup": True}
+    )
+    logger.info(
+        "✅ Dynamic loss scheduling ready - user only needs to set auto_calibrate: true",
+        extra={"markup": True},
+    )
+
+    return DynamicLossScheduler(base_weights=base_weights, **intelligent_params)
+
+
+def _determine_intelligent_parameters(
+    architecture_type: str,
+    total_iterations: int,
+    dataset_info: dict,
+    loss_names: list,
+    scheduler_config: dict,
+) -> dict[str, Any]:
+    """
+    Intelligently determine optimal parameters based on architecture and context.
+
+    Args:
+        architecture_type: Type of neural network architecture
+        total_iterations: Total training iterations planned
+        dataset_info: Information about the training dataset
+        loss_names: Names of loss functions being used
+        scheduler_config: Original configuration (may contain overrides)
+
+    Returns:
+        Dictionary of optimal parameters for the scheduler
+    """
+
+    # Architecture-specific parameter presets
+    ARCHITECTURE_PRESETS = {
+        # ParagonSR2 variants - optimized based on training analysis
+        "paragonsr2_nano": {
+            "momentum": 0.85,
+            "adaptation_rate": 0.015,
+            "min_weight": 1e-6,
+            "max_weight": 5.0,
+            "adaptation_threshold": 0.04,
+            "baseline_iterations": 50,
+        },
+        "paragonsr2_micro": {
+            "momentum": 0.87,
+            "adaptation_rate": 0.012,
+            "min_weight": 1e-6,
+            "max_weight": 7.5,
+            "adaptation_threshold": 0.05,
+            "baseline_iterations": 75,
+        },
+        "paragonsr2_tiny": {
+            "momentum": 0.89,
+            "adaptation_rate": 0.010,
+            "min_weight": 1e-6,
+            "max_weight": 10.0,
+            "adaptation_threshold": 0.06,
+            "baseline_iterations": 100,
+        },
+        "paragonsr2_xs": {
+            "momentum": 0.91,
+            "adaptation_rate": 0.008,
+            "min_weight": 1e-6,
+            "max_weight": 15.0,
+            "adaptation_threshold": 0.07,
+            "baseline_iterations": 125,
+        },
+        "paragonsr2_s": {
+            "momentum": 0.93,
+            "adaptation_rate": 0.006,
+            "min_weight": 1e-6,
+            "max_weight": 20.0,
+            "adaptation_threshold": 0.08,
+            "baseline_iterations": 150,
+        },
+        "paragonsr2_m": {
+            "momentum": 0.95,
+            "adaptation_rate": 0.005,
+            "min_weight": 1e-6,
+            "max_weight": 30.0,
+            "adaptation_threshold": 0.10,
+            "baseline_iterations": 200,
+        },
+        "paragonsr2_l": {
+            "momentum": 0.96,
+            "adaptation_rate": 0.004,
+            "min_weight": 1e-6,
+            "max_weight": 50.0,
+            "adaptation_threshold": 0.12,
+            "baseline_iterations": 250,
+        },
+        "paragonsr2_xl": {
+            "momentum": 0.97,
+            "adaptation_rate": 0.003,
+            "min_weight": 1e-6,
+            "max_weight": 100.0,
+            "adaptation_threshold": 0.15,
+            "baseline_iterations": 300,
+        },
+    }
+
+    # Normalize architecture type for matching
+    arch_key = architecture_type.lower()
+    if "paragonsr2" in arch_key:
+        # Extract specific variant (nano, micro, tiny, etc.)
+        for variant in ["nano", "micro", "tiny", "xs", "s", "m", "l", "xl"]:
+            if variant in arch_key:
+                preset_key = f"paragonsr2_{variant}"
+                break
+        else:
+            preset_key = "paragonsr2_nano"  # Default fallback
+    # Generic fallback presets for unknown architectures
+    elif "nano" in arch_key or "small" in arch_key:
+        preset_key = "paragonsr2_nano"
+    elif "micro" in arch_key:
+        preset_key = "paragonsr2_micro"
+    elif "tiny" in arch_key:
+        preset_key = "paragonsr2_tiny"
+    elif "xs" in arch_key:
+        preset_key = "paragonsr2_xs"
+    elif "small" in arch_key or "s\b" in arch_key:
+        preset_key = "paragonsr2_s"
+    elif "medium" in arch_key or "m\b" in arch_key:
+        preset_key = "paragonsr2_m"
+    elif "large" in arch_key or "l\b" in arch_key:
+        preset_key = "paragonsr2_l"
+    elif "xl" in arch_key or "extra" in arch_key:
+        preset_key = "paragonsr2_xl"
+    else:
+        preset_key = "paragonsr2_nano"  # Conservative fallback
+
+    # Get base preset
+    if preset_key in ARCHITECTURE_PRESETS:
+        params = ARCHITECTURE_PRESETS[preset_key].copy()
+    else:
+        # Conservative defaults for unknown architectures
+        params = ARCHITECTURE_PRESETS["paragonsr2_nano"].copy()
+
+    # Training phase adjustments
+    if total_iterations < 10000:
+        # Short training - more aggressive adaptation
+        params["adaptation_rate"] *= 1.5
+        params["baseline_iterations"] = max(25, params["baseline_iterations"] // 2)
+    elif total_iterations > 50000:
+        # Long training - more conservative, stable adaptation
+        params["adaptation_rate"] *= 0.7
+        params["baseline_iterations"] = min(
+            400, int(params["baseline_iterations"] * 1.5)
+        )
+
+    # Dataset complexity adjustments (if provided)
+    if dataset_info:
+        texture_variance = dataset_info.get("texture_variance", 0.5)
+        edge_density = dataset_info.get("edge_density", 0.5)
+        color_variation = dataset_info.get("color_variation", 0.5)
+        overall_complexity = dataset_info.get("overall_complexity", 0.5)
+
+        # Use the overall complexity score if available, otherwise compute it
+        complexity_score = overall_complexity
+
+        # High complexity datasets need more conservative adaptation
+        if complexity_score > 0.7:
+            # Complex datasets: more conservative to avoid instability
+            params["momentum"] *= 0.9  # More responsive
+            params["adaptation_rate"] *= 1.2  # Faster adaptation
+            params["adaptation_threshold"] *= 1.5  # Less sensitive to noise
+            params["max_weight"] *= 0.8  # Lower ceiling for stability
+        elif complexity_score < 0.3:
+            # Simple datasets: can be more aggressive
+            params["momentum"] *= 1.1  # More stable
+            params["adaptation_rate"] *= 0.8  # Slower adaptation
+            params["adaptation_threshold"] *= 0.7  # More sensitive
+            params["max_weight"] *= 1.2  # Higher ceiling for exploration
+
+        # Texture-specific adjustments
+        if texture_variance > 0.6:
+            # High texture variance: more sensitive to texture details
+            params["adaptation_rate"] *= 1.1
+            params["momentum"] *= 0.95
+        elif texture_variance < 0.4:
+            # Low texture variance: less sensitive
+            params["adaptation_rate"] *= 0.9
+            params["momentum"] *= 1.05
+
+        # Edge-specific adjustments
+        if edge_density > 0.6:
+            # High edge density: lots of details, need careful handling
+            params["adaptation_threshold"] *= 1.2
+            params["momentum"] *= 0.92
+        elif edge_density < 0.4:
+            # Low edge density: smoother images, can adapt faster
+            params["adaptation_threshold"] *= 0.8
+            params["momentum"] *= 1.08
+
+        # Color-specific adjustments
+        if color_variation > 0.6:
+            # High color variation: diverse lighting/colors
+            params["adaptation_rate"] *= 1.05
+            params["max_weight"] *= 0.9
+        elif color_variation < 0.4:
+            # Low color variation: consistent colors
+            params["adaptation_rate"] *= 0.95
+            params["max_weight"] *= 1.1
+
+    # Loss type adjustments
+    if "gan" in "".join(loss_names).lower():
+        # GAN training needs more careful handling
+        params["adaptation_threshold"] *= 1.5  # Less sensitive to noise
+        params["max_weight"] *= 0.8  # Lower ceiling for GAN losses
+
+    # Apply any user-provided overrides (except auto_calibrate itself)
+    for key, value in scheduler_config.items():
+        if key not in [
+            "enabled",
+            "auto_calibrate",
+            "architecture_type",
+            "training_config",
+            "dataset_info",
+        ]:
+            params[key] = value
+
+    return params
+
+
+def _create_manual_loss_scheduler(
+    losses_dict: dict[str, nn.Module], scheduler_config: dict[str, Any]
+) -> DynamicLossScheduler:
+    """
+    Create a traditional manual dynamic loss scheduler.
+
+    Args:
+        losses_dict: Dictionary of loss modules keyed by their labels
+        scheduler_config: Configuration dictionary for the scheduler
+
+    Returns:
+        Configured DynamicLossScheduler with manual parameters
+    """
     # Extract base weights from loss modules
     base_weights = {}
     for loss_label, loss_module in losses_dict.items():

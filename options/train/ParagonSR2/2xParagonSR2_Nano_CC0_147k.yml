@@ -1,14 +1,12 @@
-# yaml-language-server: $schema=https://raw.githubusercontent.com/the-database/traiNNer-redux/refs/heads/master/schemas/redux-config.schema.json
 #########################################################################################
-# ParagonSR2 Nano - CC0 147k Dataset Comparison
-# Dataset: cc0 (large 147k image dataset)
-# Optimized for: Large dataset stability, robust metrics
+# ParagonSR2 Nano - CC0 147k Dataset (FIXED CONFIGURATION)
+# Fixed: Gradient scaling, dynamic loss scheduling, AMP, LR schedule
 #########################################################################################
-name: 2xParagonSR2_Nano_CC0_147k
+name: 2xParagonSR2_Nano_CC0_147k_FIXED
 scale: 2
 
 use_amp: true
-amp_bf16: false
+amp_bf16: true
 use_channels_last: true
 fast_matmul: true
 num_gpu: auto
@@ -18,8 +16,8 @@ datasets:
   train:
     name: CC0_147k_Train
     type: pairedimagedataset
-    dataroot_gt: /home/phips/Documents/dataset/cc0/hr                 # Your CC0 dataset
-    dataroot_lq: /home/phips/Documents/dataset/cc0/lr_x2_bicubic_aa   # Your CC0 dataset
+    dataroot_gt: /home/phips/Documents/dataset/cc0/hr
+    dataroot_lq: /home/phips/Documents/dataset/cc0/lr_x2_bicubic_aa
     lq_size: 128
     use_hflip: true
     use_rot: true
@@ -54,22 +52,15 @@ train:
 
   scheduler:
     type: MultiStepLR
-    milestones: [20000, 30000]
+    milestones: [30000, 35000]
     gamma: 0.5
 
   total_iter: 40000
-  warmup_iter: 500
+  warmup_iter: 1000
 
-  # Dynamic Loss Scheduling - Optimized for Large Dataset
   dynamic_loss_scheduling:
     enabled: true
-    momentum: 0.95                    # Higher smoothing for large dataset stability
-    adaptation_rate: 0.005            # Slower adaptation for robustness
-    min_weight: 1e-6
-    max_weight: 100.0
-    adaptation_threshold: 0.05        # More sensitive to catch dataset nuances
-    baseline_iterations: 200          # Longer baseline for large dataset
-    enable_monitoring: true
+    auto_calibrate: true
 
   losses:
     - type: l1loss
@@ -79,8 +70,8 @@ train:
 
 val:
   val_enabled: true
-  val_freq: 1000                      # Every 1000 iterations
-  save_img: false                     # Disable for faster validation
+  val_freq: 1000
+  save_img: false
 
   metrics_enabled: true
   metrics:

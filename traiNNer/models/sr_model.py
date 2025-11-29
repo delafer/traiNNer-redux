@@ -298,7 +298,88 @@ class SRModel(BaseModel):
             and train_opt.dynamic_loss_scheduling is not None
             and train_opt.dynamic_loss_scheduling.get("enabled", False)
         ):
-            scheduler_config = train_opt.dynamic_loss_scheduling
+            scheduler_config = (
+                train_opt.dynamic_loss_scheduling.copy()
+            )  # Make a copy to avoid modifying original
+
+            # Add intelligent context for auto-calibration
+            if scheduler_config.get("auto_calibrate", False):
+                # Get architecture type
+                architecture_type = "unknown"
+                if self.opt.network_g and "type" in self.opt.network_g:
+                    architecture_type = self.opt.network_g["type"]
+
+                # Get training configuration context
+                training_config = {
+                    "total_iterations": train_opt.total_iter,
+                    "dataset_info": getattr(
+                        self.opt.datasets.get("train"), "dataset_info", {}
+                    ),
+                }
+
+                # Automatically analyze dataset if not provided
+                if not training_config["dataset_info"]:
+                    try:
+                        from traiNNer.utils.dataset_analyzer import (
+                            analyze_dataset_complexity,
+                        )
+
+                        logger.info(
+                            "🔍 Automatically analyzing dataset complexity for optimal calibration...",
+                            extra={"markup": True},
+                        )
+
+                        # Get training dataloader for analysis
+                        train_dataloader = self.get_train_dataloader()
+                        if train_dataloader is not None:
+                            # Analyze dataset complexity using first 50 samples
+                            dataset_info = analyze_dataset_complexity(
+                                train_dataloader,
+                                num_samples=50,  # Analyze first 50 samples for quick analysis
+                                device=self.device.type,
+                            )
+                            training_config["dataset_info"] = dataset_info
+
+                            logger.info(
+                                "🎯 Dataset analysis complete - automatically optimized for your data",
+                                extra={"markup": True},
+                            )
+                        else:
+                            logger.warning(
+                                "Could not access training dataloader for dataset analysis"
+                            )
+
+                    except Exception as e:
+                        logger.warning(
+                            f"Dataset analysis failed: {e}. Using default values."
+                        )
+                        training_config["dataset_info"] = {
+                            "texture_variance": 0.5,
+                            "edge_density": 0.5,
+                            "color_variation": 0.5,
+                            "overall_complexity": 0.5,
+                        }
+
+                # Add context to scheduler config
+                scheduler_config["architecture_type"] = architecture_type
+                scheduler_config["training_config"] = training_config
+
+                logger.info(
+                    f"🧠 Auto-calibration mode enabled for {architecture_type} architecture",
+                    extra={"markup": True},
+                )
+
+                # Log the detected/used dataset info
+                dataset_info = training_config["dataset_info"]
+                if isinstance(dataset_info, dict):
+                    logger.info(
+                        f"📊 Using detected dataset complexity: "
+                        f"texture={dataset_info.get('texture_variance', 0.5):.2f}, "
+                        f"edges={dataset_info.get('edge_density', 0.5):.2f}, "
+                        f"colors={dataset_info.get('color_variation', 0.5):.2f}",
+                        extra={"markup": True},
+                    )
+
             try:
                 from traiNNer.losses.dynamic_loss_scheduling import (
                     create_dynamic_loss_scheduler,
@@ -307,10 +388,17 @@ class SRModel(BaseModel):
                 self.dynamic_loss_scheduler = create_dynamic_loss_scheduler(
                     self.losses, scheduler_config
                 )
-                logger.info(
-                    f"Dynamic loss scheduling enabled with config: {scheduler_config}",
-                    extra={"markup": True},
-                )
+
+                if scheduler_config.get("auto_calibrate", False):
+                    logger.info(
+                        "✅ Intelligent dynamic loss scheduling ready - optimal parameters auto-configured",
+                        extra={"markup": True},
+                    )
+                else:
+                    logger.info(
+                        f"Dynamic loss scheduling enabled with config: {scheduler_config}",
+                        extra={"markup": True},
+                    )
             except Exception as e:
                 logger.error(f"Failed to initialize dynamic loss scheduler: {e}")
                 logger.warning("Continuing without dynamic loss scheduling")

@@ -59,16 +59,9 @@ train:
   total_iter: 40000
   warmup_iter: 1000                 # ✅ Longer warmup for stability
 
-  # ✅ FIXED: Nano-optimized dynamic loss scheduling parameters
   dynamic_loss_scheduling:
-    enabled: true                    # Keep enabled as requested
-    momentum: 0.9                    # More responsive for Nano
-    adaptation_rate: 0.01            # Standard rate for stability
-    min_weight: 1e-6
-    max_weight: 10.0                 # Lower max weight prevents instability
-    adaptation_threshold: 0.05
-    baseline_iterations: 100         # Shorter baseline for quick adaptation
-    enable_monitoring: true
+    enabled: true
+    auto_calibrate: true
 
   losses:
     - type: l1loss
