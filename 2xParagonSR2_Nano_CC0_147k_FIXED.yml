@@ -1,14 +1,12 @@
-# yaml-language-server: $schema=https://raw.githubusercontent.com/the-database/traiNNer-redux/refs/heads/master/schemas/redux-config.schema.json
 #########################################################################################
-# ParagonSR2 Nano - CC0 147k RTX 3060 Memory-Optimized
-# Optimized for 11.63 GB VRAM RTX 3060
-# Key optimizations: Reduced input size, smaller batch, fewer workers
+# ParagonSR2 Nano - CC0 147k Dataset (FIXED CONFIGURATION)
+# Fixed: Gradient scaling, dynamic loss scheduling, AMP, LR schedule
 #########################################################################################
-name: 2xParagonSR2_Nano_CC0_RTX3060_Optimized
+name: 2xParagonSR2_Nano_CC0_147k_FIXED
 scale: 2
 
 use_amp: true
-amp_bf16: false
+amp_bf16: true              # ✅ FIXED: Enable BF16 for better precision
 use_channels_last: true
 fast_matmul: true
 num_gpu: auto
@@ -16,19 +14,19 @@ manual_seed: 1024
 
 datasets:
   train:
-    name: CC0_147k_Train_MemOpt
+    name: CC0_147k_Train
     type: pairedimagedataset
     dataroot_gt: /home/phips/Documents/dataset/cc0/hr
     dataroot_lq: /home/phips/Documents/dataset/cc0/lr_x2_bicubic_aa
-    lq_size: 64                      # Aggressively reduced from 128 to save memory (HR: 128x128)
+    lq_size: 128
     use_hflip: true
-    use_rot: false                   # Disable rotation to save memory
-    num_worker_per_gpu: 2            # Reduced from 6 to save memory
-    batch_size_per_gpu: 6            # Reduced from 16 to fit VRAM
-    accum_iter: 1                    # Keep at 1 for full training speed
+    use_rot: true
+    num_worker_per_gpu: 8
+    batch_size_per_gpu: 16
+    accum_iter: 1
 
   val:
-    name: CC0_147k_Val_MemOpt
+    name: CC0_147k_Val
     type: pairedimagedataset
     dataroot_gt: /home/phips/Documents/dataset/cc0/val_hr
     dataroot_lq: /home/phips/Documents/dataset/cc0/val_lr_x2_bicubic_aa
@@ -44,7 +42,7 @@ path:
 train:
   ema_decay: 0.999
   ema_power: 0.75
-  grad_clip: true
+  grad_clip: true                   # ✅ CORRECT: Uses clip_grad_norm_(..., 1.0)
 
   optim_g:
     type: AdamW
@@ -52,23 +50,24 @@ train:
     weight_decay: !!float 1e-4
     betas: [0.9, 0.99]
 
+  # ✅ FIXED: MultiStepLR compatible with EMA (not CosineAnnealingLR)
   scheduler:
     type: MultiStepLR
-    milestones: [20000, 30000]
+    milestones: [30000, 35000]      # Later milestones for EMA stability
     gamma: 0.5
 
   total_iter: 40000
-  warmup_iter: 500
+  warmup_iter: 1000                 # ✅ Longer warmup for stability
 
-  # Dynamic Loss Scheduling - Enabled with memory-optimized settings
+  # ✅ FIXED: Nano-optimized dynamic loss scheduling parameters
   dynamic_loss_scheduling:
-    enabled: true
-    momentum: 0.92                    # Lower smoothing to respond faster
-    adaptation_rate: 0.01             # Faster adaptation for stability
+    enabled: true                    # Keep enabled as requested
+    momentum: 0.9                    # More responsive for Nano
+    adaptation_rate: 0.01            # Standard rate for stability
     min_weight: 1e-6
-    max_weight: 50.0                  # Conservative upper bound
-    adaptation_threshold: 0.05        # Sensitivity to changes
-    baseline_iterations: 150          # Shorter baseline
+    max_weight: 10.0                 # Lower max weight prevents instability
+    adaptation_threshold: 0.05
+    baseline_iterations: 100         # Shorter baseline for quick adaptation
     enable_monitoring: true
 
   losses:
@@ -77,12 +76,10 @@ train:
     - type: ssimloss
       loss_weight: 0.05
 
-
-
 val:
   val_enabled: true
-  val_freq: 1000                      # Every 1000 iterations
-  save_img: false                     # Disable for faster validation
+  val_freq: 1000
+  save_img: false
 
   metrics_enabled: true
   metrics:
