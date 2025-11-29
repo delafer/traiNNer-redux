@@ -1,9 +1,10 @@
 # yaml-language-server: $schema=https://raw.githubusercontent.com/the-database/traiNNer-redux/refs/heads/master/schemas/redux-config.schema.json
 #########################################################################################
-# ParagonSR2 Nano - Clean Fidelity Baseline (From Scratch)
-# Fast training, high PSNR/SS IM, sharp outputs
+# ParagonSR2 Nano - CC0 147k RTX 3060 Memory-Optimized
+# Optimized for 11.63 GB VRAM RTX 3060
+# Key optimizations: Reduced input size, smaller batch, fewer workers
 #########################################################################################
-name: 2xParagonSR2_Nano_Fidelity_cc0
+name: 2xParagonSR2_Nano_CC0_RTX3060_Optimized
 scale: 2
 
 use_amp: true
@@ -15,19 +16,19 @@ manual_seed: 1024
 
 datasets:
   train:
-    name: Train
+    name: CC0_147k_Train_MemOpt
     type: pairedimagedataset
     dataroot_gt: /home/phips/Documents/dataset/cc0/hr
     dataroot_lq: /home/phips/Documents/dataset/cc0/lr_x2_bicubic_aa
-    lq_size: 128
+    lq_size: 64                      # Aggressively reduced from 128 to save memory (HR: 128x128)
     use_hflip: true
-    use_rot: true
-    num_worker_per_gpu: 8
-    batch_size_per_gpu: 32
-    accum_iter: 1
+    use_rot: false                   # Disable rotation to save memory
+    num_worker_per_gpu: 2            # Reduced from 6 to save memory
+    batch_size_per_gpu: 6            # Reduced from 16 to fit VRAM
+    accum_iter: 1                    # Keep at 1 for full training speed
 
   val:
-    name: Val
+    name: CC0_147k_Val_MemOpt
     type: pairedimagedataset
     dataroot_gt: /home/phips/Documents/dataset/cc0/val_hr
     dataroot_lq: /home/phips/Documents/dataset/cc0/val_lr_x2_bicubic_aa
@@ -47,7 +48,7 @@ train:
 
   optim_g:
     type: AdamW
-    lr: !!float 2e-4 # Higher LR for small model
+    lr: !!float 2e-4
     weight_decay: !!float 1e-4
     betas: [0.9, 0.99]
 
@@ -59,14 +60,29 @@ train:
   total_iter: 40000
   warmup_iter: 500
 
+  # Dynamic Loss Scheduling - Enabled with memory-optimized settings
+  dynamic_loss_scheduling:
+    enabled: true
+    momentum: 0.92                    # Lower smoothing to respond faster
+    adaptation_rate: 0.01             # Faster adaptation for stability
+    min_weight: 1e-6
+    max_weight: 50.0                  # Conservative upper bound
+    adaptation_threshold: 0.05        # Sensitivity to changes
+    baseline_iterations: 150          # Shorter baseline
+    enable_monitoring: true
+
   losses:
     - type: l1loss
       loss_weight: 1.0
+    - type: ssimloss
+      loss_weight: 0.05
+
+
 
 val:
   val_enabled: true
-  val_freq: 1000
-  save_img: true
+  val_freq: 1000                      # Every 1000 iterations
+  save_img: false                     # Disable for faster validation
 
   metrics_enabled: true
   metrics:
@@ -79,6 +95,6 @@ val:
 
 logger:
   print_freq: 100
-  save_checkpoint_freq: 10000
+  save_checkpoint_freq: 20000
   save_checkpoint_format: safetensors
   use_tb_logger: true

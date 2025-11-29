@@ -206,7 +206,7 @@ class DynamicLossScheduler(nn.Module):
                 )
             elif isinstance(loss_value, torch.Tensor):
                 # For tensor losses, take mean and absolute value
-                scalar_losses[loss_name] = float(loss_value.mean().abs())
+                scalar_losses[loss_name] = float(loss_value.mean().abs().detach())
             else:
                 # For scalar losses, just take absolute value
                 scalar_losses[loss_name] = float(abs(loss_value))
@@ -525,5 +525,35 @@ def create_dynamic_loss_scheduler(
         **default_config,
         **{k: v for k, v in scheduler_config.items() if k != "enabled"},
     }
+
+    # Convert string values to proper types
+    type_conversions = {
+        "momentum": float,
+        "adaptation_rate": float,
+        "min_weight": float,
+        "max_weight": float,
+        "adaptation_threshold": float,
+        "baseline_iterations": int,
+        "enable_monitoring": bool,
+    }
+
+    for key, converter in type_conversions.items():
+        if key in config:
+            try:
+                if key == "enable_monitoring":
+                    # Handle boolean conversion
+                    if isinstance(config[key], str):
+                        config[key] = config[key].lower() in ("true", "1", "yes", "on")
+                    else:
+                        config[key] = bool(config[key])
+                elif key == "baseline_iterations":
+                    # Handle int conversion - first convert to float, then to int
+                    config[key] = int(float(config[key]))
+                else:
+                    config[key] = converter(config[key])
+            except (ValueError, TypeError) as e:
+                raise ValueError(
+                    f"Failed to convert {key}={config[key]} to {converter.__name__}: {e}"
+                )
 
     return DynamicLossScheduler(base_weights=base_weights, **config)

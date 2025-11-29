@@ -1,0 +1,105 @@
+# yaml-language-server: $schema=https://raw.githubusercontent.com/the-database/traiNNer-redux/refs/heads/master/schemas/redux-config.schema.json
+#########################################################################################
+# ParagonSR2 Nano - Dataset Comparison & Benchmarking
+# Optimized for: Fast validation, TensorBoard metrics, dataset comparison
+# Best for: Comparing bhi_small, psisrd, cc0 datasets
+#########################################################################################
+name: 2xParagonSR2_Nano_DatasetBenchmark
+scale: 2
+
+use_amp: true
+amp_bf16: false
+use_channels_last: true
+fast_matmul: true
+num_gpu: auto
+manual_seed: 1024
+
+datasets:
+  train:
+    name: Train
+    type: pairedimagedataset
+    dataroot_gt: /path/to/dataset/hr          # Change this for each dataset
+    dataroot_lq: /path/to/dataset/lr_x2       # Change this for each dataset
+    lq_size: 128
+    use_hflip: true
+    use_rot: true
+    num_worker_per_gpu: 8
+    batch_size_per_gpu: 32
+    accum_iter: 1
+
+  val:
+    name: Val
+    type: pairedimagedataset
+    dataroot_gt: /path/to/dataset/val_hr      # Change this for each dataset
+    dataroot_lq: /path/to/dataset/val_lr_x2   # Change this for each dataset
+
+network_g:
+  type: paragonsr2_nano
+
+path:
+  pretrain_network_g: ~
+  strict_load_g: true
+  resume_state: ~
+
+train:
+  ema_decay: 0.999
+  ema_power: 0.75
+  grad_clip: true
+
+  optim_g:
+    type: AdamW
+    lr: !!float 2e-4
+    weight_decay: !!float 1e-4
+    betas: [0.9, 0.99]
+
+  scheduler:
+    type: MultiStepLR
+    milestones: [20000, 30000]
+    gamma: 0.5
+
+  total_iter: 40000
+  warmup_iter: 500
+
+  # Dynamic Loss Scheduling - Optimized for Benchmarking
+  dynamic_loss_scheduling:
+    enabled: true
+    momentum: 0.95                    # Higher smoothing for stable comparisons
+    adaptation_rate: 0.005            # Slower adaptation for consistent results
+    min_weight: 1e-4                  # Wider bounds for dataset variation
+    max_weight: 50.0
+    adaptation_threshold: 0.05        # More sensitive for dataset differences
+    baseline_iterations: 200          # Longer baseline for consistency
+    enable_monitoring: true
+
+  losses:
+    - type: l1loss
+      loss_weight: 1.0
+    - type: ssimloss
+      loss_weight: 0.05
+
+# VALIDATION - Optimized for Speed & Metrics
+val:
+  val_enabled: true
+  val_freq: 1000                      # Every 1000 iterations (as requested)
+  save_img: false                     # Disable for faster validation
+
+  # Metrics Configuration for Dataset Comparison
+  metrics_enabled: true
+  metrics:
+    psnr:
+      type: calculate_psnr
+      crop_border: 4                  # Standard crop for fair comparison
+    ssim:
+      type: calculate_ssim
+      crop_border: 4
+
+logger:
+  print_freq: 100                     # Frequent progress updates
+  save_checkpoint_freq: 20000         # Less frequent saves (save space)
+  save_checkpoint_format: safetensors
+  use_tb_logger: true
+
+# Additional benchmarking features
+logging:
+  log_level: INFO
+  capture_dynamic_weights: true       # Log dynamic loss weight changes

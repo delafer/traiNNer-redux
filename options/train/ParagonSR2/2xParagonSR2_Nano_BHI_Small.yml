@@ -1,9 +1,10 @@
 # yaml-language-server: $schema=https://raw.githubusercontent.com/the-database/traiNNer-redux/refs/heads/master/schemas/redux-config.schema.json
 #########################################################################################
-# ParagonSR2 Nano - Clean Fidelity Baseline (From Scratch)
-# Fast training, high PSNR/SS IM, sharp outputs
+# ParagonSR2 Nano - BHI Small Dataset Comparison
+# Dataset: bhi_small (smaller, cleaner dataset)
+# Optimized for: Fast comparison, clean metrics
 #########################################################################################
-name: 2xParagonSR2_Nano_Fidelity_BHI
+name: 2xParagonSR2_Nano_BHI_Small
 scale: 2
 
 use_amp: true
@@ -15,10 +16,10 @@ manual_seed: 1024
 
 datasets:
   train:
-    name: Train
+    name: BHI_Small_Train
     type: pairedimagedataset
-    dataroot_gt: /home/phips/Documents/dataset/BHI/BHI_small/BHI_small
-    dataroot_lq: /home/phips/Documents/dataset/BHI/BHI_small/x2
+    dataroot_gt: /home/phips/Documents/dataset/BHI/BHI_small/BHI_small      # Update path for bhi_small
+    dataroot_lq: /home/phips/Documents/dataset/BHI/BHI_small/x2   # Update path for bhi_small
     lq_size: 128
     use_hflip: true
     use_rot: true
@@ -27,7 +28,7 @@ datasets:
     accum_iter: 1
 
   val:
-    name: Val
+    name: CC0_147k_Val
     type: pairedimagedataset
     dataroot_gt: /home/phips/Documents/dataset/cc0/val_hr
     dataroot_lq: /home/phips/Documents/dataset/cc0/val_lr_x2_bicubic_aa
@@ -47,7 +48,7 @@ train:
 
   optim_g:
     type: AdamW
-    lr: !!float 2e-4 # Higher LR for small model
+    lr: !!float 2e-4
     weight_decay: !!float 1e-4
     betas: [0.9, 0.99]
 
@@ -59,14 +60,27 @@ train:
   total_iter: 40000
   warmup_iter: 500
 
+  # Dynamic Loss Scheduling - Optimized for Small Dataset
+  dynamic_loss_scheduling:
+    enabled: true
+    momentum: 0.9                     # Standard smoothing
+    adaptation_rate: 0.01             # Normal adaptation rate
+    min_weight: 1e-6
+    max_weight: 100.0
+    adaptation_threshold: 0.1         # Standard threshold
+    baseline_iterations: 100
+    enable_monitoring: true
+
   losses:
     - type: l1loss
       loss_weight: 1.0
+    - type: ssimloss
+      loss_weight: 0.05
 
 val:
   val_enabled: true
-  val_freq: 1000
-  save_img: true
+  val_freq: 1000                      # Every 1000 iterations
+  save_img: false                     # Disable for faster validation
 
   metrics_enabled: true
   metrics:
@@ -79,6 +93,6 @@ val:
 
 logger:
   print_freq: 100
-  save_checkpoint_freq: 10000
+  save_checkpoint_freq: 20000
   save_checkpoint_format: safetensors
   use_tb_logger: true
