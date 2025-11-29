@@ -23,6 +23,7 @@ from traiNNer.archs.arch_info import ARCHS_WITHOUT_FP16
 from traiNNer.data.base_dataset import BaseDataset
 from traiNNer.losses import build_loss
 from traiNNer.losses.contrastive_loss import ContrastiveLoss
+from traiNNer.losses.dynamic_loss_scheduling import DynamicLossScheduler
 from traiNNer.losses.feature_matching_loss import FeatureMatchingLoss
 from traiNNer.losses.r3gan_loss import R3GANLoss
 from traiNNer.metrics import calculate_metric
@@ -170,6 +171,7 @@ class SRModel(BaseModel):
 
             self.optimizer_g: Optimizer | None = None
             self.optimizer_d: Optimizer | None = None
+            self.dynamic_loss_scheduler: DynamicLossScheduler | None = None
 
             self.init_training_settings()
 
@@ -289,6 +291,27 @@ class SRModel(BaseModel):
                     self.losses[label] = torch.compile(self.losses[label])
 
         assert self.losses, "At least one loss must be defined."
+
+        # Initialize dynamic loss scheduler if configured
+        if hasattr(
+            train_opt, "dynamic_loss_scheduling"
+        ) and train_opt.dynamic_loss_scheduling.get("enabled", False):
+            scheduler_config = train_opt.dynamic_loss_scheduling
+            try:
+                from traiNNer.losses.dynamic_loss_scheduling import (
+                    create_dynamic_loss_scheduler,
+                )
+
+                self.dynamic_loss_scheduler = create_dynamic_loss_scheduler(
+                    self.losses, scheduler_config
+                )
+                logger.info(
+                    f"Dynamic loss scheduling enabled with config: {scheduler_config}",
+                    extra={"markup": True},
+                )
+            except Exception as e:
+                logger.error(f"Failed to initialize dynamic loss scheduler: {e}")
+                logger.warning("Continuing without dynamic loss scheduling")
 
         if not self.has_gan:
             # warn that discriminator network / optimizer won't be used if enabled
@@ -410,6 +433,8 @@ class SRModel(BaseModel):
                         real_images_aug, fake_images_aug
                     )
 
+                # First pass: compute all losses without dynamic weighting
+                raw_losses = {}
                 for label, loss in self.losses.items():
                     target = real_images_aug
 
@@ -538,15 +563,40 @@ class SRModel(BaseModel):
                     else:
                         l_g_loss = loss(self.output, target)
 
-                    # Accumulate Loss
+                    # Store raw loss for dynamic scheduling
+                    raw_losses[label] = l_g_loss
+
+                # Apply dynamic loss scheduling if enabled
+                dynamic_weights = {}
+                if self.dynamic_loss_scheduler is not None:
+                    dynamic_weights = self.dynamic_loss_scheduler(
+                        raw_losses, current_iter
+                    )
+
+                # Second pass: accumulate losses with dynamic weights
+                for label, loss in self.losses.items():
+                    l_g_loss = raw_losses[label]
+                    base_weight = abs(loss.loss_weight)
+
+                    # Apply dynamic adjustment if available
+                    if (
+                        self.dynamic_loss_scheduler is not None
+                        and label in dynamic_weights
+                    ):
+                        dynamic_adjustment = dynamic_weights[label]
+                        adjusted_weight = base_weight * dynamic_adjustment
+                    else:
+                        adjusted_weight = base_weight
+
+                    # Accumulate Loss with adjusted weight
                     if isinstance(l_g_loss, dict):
                         for sublabel, loss_val in l_g_loss.items():
                             if loss_val > 0:
-                                weighted_loss_val = loss_val * abs(loss.loss_weight)
+                                weighted_loss_val = loss_val * adjusted_weight
                                 l_g_total += weighted_loss_val * self.accum_iters
                                 loss_dict[f"{label}_{sublabel}"] = weighted_loss_val
                     else:
-                        weighted_l_g_loss = l_g_loss * abs(loss.loss_weight)
+                        weighted_l_g_loss = l_g_loss * adjusted_weight
                         l_g_total += weighted_l_g_loss / self.accum_iters
                         loss_dict[label] = weighted_l_g_loss
 
@@ -554,6 +604,12 @@ class SRModel(BaseModel):
                     raise RuntimeError("Training failed: NaN/Inf found in loss.")
 
                 loss_dict["l_g_total"] = l_g_total
+
+                # Log dynamic loss weights if monitoring is enabled
+                if self.dynamic_loss_scheduler is not None:
+                    stats = self.dynamic_loss_scheduler.get_monitoring_stats()
+                    for loss_name, weight in stats["current_weights"].items():
+                        loss_dict[f"dynamic_weight_{loss_name}"] = weight
                 self.scaler_g.scale(l_g_total).backward()
 
                 if apply_gradient:

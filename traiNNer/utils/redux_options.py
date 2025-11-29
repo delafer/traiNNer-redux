@@ -323,6 +323,13 @@ class TrainOptions(StrictStruct):
         ),
     ] = 100
 
+    dynamic_loss_scheduling: Annotated[
+        dict[str, Any] | None,
+        Meta(
+            description="Configuration for dynamic loss scheduling that automatically adjusts loss weights based on current loss values during training. Enable with {'enabled': true} and customize parameters as needed."
+        ),
+    ] = None
+
 
 class ValOptions(StrictStruct):
     val_enabled: Annotated[

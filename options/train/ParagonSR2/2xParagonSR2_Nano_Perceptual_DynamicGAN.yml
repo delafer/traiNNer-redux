@@ -1,0 +1,130 @@
+# yaml-language-server: $schema=https://raw.githubusercontent.com/the-database/traiNNer-redux/refs/heads/master/schemas/redux-config.schema.json
+#########################################################################################
+# ParagonSR2 Nano - Perceptual GAN with Dynamic Loss Scheduling
+# Enhanced GAN training with automatic loss weight balancing
+# Best for: Stable GAN training, preventing discriminator overpowering
+#########################################################################################
+name: 2xParagonSR2_Nano_Perceptual_DynamicGAN
+scale: 2
+
+use_amp: true
+amp_bf16: false
+use_channels_last: true
+fast_matmul: true
+num_gpu: auto
+manual_seed: 1024
+
+datasets:
+  train:
+    name: Train
+    type: pairedimagedataset
+    dataroot_gt: /home/phips/Documents/dataset/cc0/hr
+    dataroot_lq: /home/phips/Documents/dataset/cc0/lr_x2_bicubic_aa
+    lq_size: 64
+    use_hflip: true
+    use_rot: true
+    num_worker_per_gpu: 8
+    batch_size_per_gpu: 16
+    accum_iter: 1
+
+  val:
+    name: Val
+    type: pairedimagedataset
+    dataroot_gt: /home/phips/Documents/dataset/cc0/val_hr
+    dataroot_lq: /home/phips/Documents/dataset/cc0/val_lr_x2_bicubic_aa
+
+network_g:
+  type: paragonsr2_nano
+
+network_d:
+  type: munet
+
+path:
+  pretrain_network_g: ~
+  strict_load_g: true
+  resume_state: ~
+
+train:
+  ema_decay: 0.999
+  ema_power: 0.75
+  grad_clip: true
+
+  optim_g:
+    type: AdamW
+    lr: !!float 1e-4
+    weight_decay: !!float 1e-4
+    betas: [0.9, 0.99]
+
+  optim_d:
+    type: AdamW
+    lr: !!float 1e-4
+    weight_decay: !!float 1e-4
+    betas: [0.9, 0.99]
+
+  scheduler:
+    type: MultiStepLR
+    milestones: [20000, 30000]
+    gamma: 0.5
+
+  total_iter: 40000
+  warmup_iter: 500
+
+  # Dynamic Loss Scheduling Configuration
+  # CRITICAL for GAN training to prevent discriminator overpowering
+  dynamic_loss_scheduling:
+    enabled: true                    # Enable dynamic loss scheduling
+    momentum: 0.9                    # Exponential smoothing factor
+    adaptation_rate: 0.01            # Conservative adaptation rate for GAN stability
+    min_weight: 1e-6                 # Minimum possible weight multiplier
+    max_weight: 10.0                 # Conservative maximum for GAN stability
+    adaptation_threshold: 0.15       # Higher threshold for GAN stability
+    baseline_iterations: 200         # Longer baseline for GAN training
+    enable_monitoring: true          # Detailed monitoring for GAN debugging
+
+  losses:
+    # Content preservation losses
+    - type: l1loss
+      loss_weight: 1.0               # Base content loss
+    - type: mssimloss
+      loss_weight: 0.05              # Structural similarity
+
+    # Perceptual quality losses
+    - type: perceptualloss
+      criterion: l1
+      loss_weight: 0.5               # Visual quality
+    - type: hsluvloss
+      criterion: l1
+      loss_weight: 0.3               # Color perception
+
+    # GAN losses (will be dynamically balanced)
+    - type: ganloss
+      gan_type: r3gan
+      loss_weight: 0.05              # Adversarial training (will be auto-balanced)
+      r1_weight: 3.0
+      r2_weight: 3.0
+
+    - type: featurematchingloss
+      loss_weight: 0.1               # Feature matching for stable GAN training
+
+val:
+  val_enabled: true
+  val_freq: 1000
+  save_img: true
+
+  metrics_enabled: true
+  metrics:
+    psnr:
+      type: calculate_psnr
+      crop_border: 4
+    ssim:
+      type: calculate_ssim
+      crop_border: 4
+    lpips:
+      type: calculate_lpips
+      better: lower
+
+logger:
+  print_freq: 100
+  save_checkpoint_freq: 10000
+  save_checkpoint_format: safetensors
+  use_tb_logger: true

@@ -5,6 +5,10 @@ from typing import Any
 
 from torch import nn
 
+from traiNNer.losses.dynamic_loss_scheduling import (
+    DynamicLossScheduler,
+    create_dynamic_loss_scheduler,
+)
 from traiNNer.losses.gan_loss import (
     g_path_regularize,
     gradient_penalty_loss,
@@ -22,10 +26,12 @@ from traiNNer.utils import get_root_logger, scandir
 from traiNNer.utils.registry import LOSS_REGISTRY
 
 __all__ = [
+    "DynamicLossScheduler",
     "ModelAsLoss",
     "MultiScaleR3GANLoss",
     "R3GANLoss",
     "build_loss",
+    "create_dynamic_loss_scheduler",
     "g_path_regularize",
     "gradient_penalty_loss",
     "r1_penalty",
