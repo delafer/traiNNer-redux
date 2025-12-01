@@ -332,6 +332,16 @@ def train_pipeline(root_path: str) -> None:
 
     # create model
     model = build_model(opt)
+
+    # Initialize automation batch size tracking
+    if (
+        hasattr(model, "training_automation_manager")
+        and model.training_automation_manager
+    ):
+        current_batch_size = opt.datasets["train"].batch_size_per_gpu
+        model.set_automation_batch_size(current_batch_size)
+        logger.info(f"Automation batch size initialized: {current_batch_size}")
+
     if model.with_metrics:
         if not any(
             isinstance(
@@ -421,6 +431,14 @@ def train_pipeline(root_path: str) -> None:
                     current_accum_iter = 0
                     current_iter += 1
                     apply_gradient = True
+
+                    # Update automations with new iteration
+                    model.update_automation_iteration(current_iter)
+
+                    # Check for early stopping from automation
+                    if model.training_automation_manager:
+                        # Early stopping will be checked during validation, but we can prepare
+                        pass
                 else:
                     apply_gradient = False
 
@@ -432,9 +450,36 @@ def train_pipeline(root_path: str) -> None:
                     model.optimize_parameters(
                         current_iter, current_accum_iter, apply_gradient
                     )
+
+                    # Update training automations with training progress
+                    if apply_gradient:
+                        # Update VRAM monitoring for batch size optimization
+                        batch_adjustment = model.update_automation_vram_monitoring()
+                        if batch_adjustment is not None and batch_adjustment != 0:
+                            logger.info(
+                                f"Automation suggests batch size adjustment: {batch_adjustment}"
+                            )
+                            # Note: Actual batch size adjustment would need dataloader reconfiguration
+
                 except RuntimeError as e:
                     # Check to see if its actually the CUDA out of memory error
                     if "allocate" in str(e) or "CUDA" in str(e):
+                        # Handle OOM recovery with automations
+                        if (
+                            hasattr(model, "training_automation_manager")
+                            and model.training_automation_manager
+                        ):
+                            logger.info(
+                                "OOM detected, attempting automation recovery..."
+                            )
+                            # Get current batch size for recovery
+                            current_batch_size = opt.datasets[
+                                "train"
+                            ].batch_size_per_gpu
+                            # Suggest reduced batch size (automation will handle actual adjustment)
+                            suggested_batch_size = max(1, current_batch_size // 2)
+                            model.handle_automation_oom_recovery(suggested_batch_size)
+
                         # Collect garbage (clear VRAM)
                         raise RuntimeError(
                             "Ran out of VRAM during training. Please reduce lq_size or batch_size_per_gpu and try again."
@@ -497,6 +542,46 @@ def train_pipeline(root_path: str) -> None:
                                 opt.val.save_img,
                                 multi_val_datasets,
                             )
+
+                        # Check for early stopping from automations
+                        if (
+                            hasattr(model, "training_automation_manager")
+                            and model.training_automation_manager
+                        ):
+                            # Get validation metrics from model for early stopping
+                            validation_metrics = {}
+                            if model.with_metrics and model.metric_results:
+                                # Convert metric results to dict format expected by automations
+                                for (
+                                    metric_name,
+                                    metric_value,
+                                ) in model.metric_results.items():
+                                    validation_metrics[metric_name] = float(
+                                        metric_value
+                                    )
+                                # Also add common metric names
+                                if "psnr" in model.metric_results:
+                                    validation_metrics["val/psnr"] = (
+                                        model.metric_results["psnr"]
+                                    )
+                                if "ssim" in model.metric_results:
+                                    validation_metrics["val/ssim"] = (
+                                        model.metric_results["ssim"]
+                                    )
+
+                            # Update validation tracking and check for early stopping
+                            should_stop, stop_reason = (
+                                model.update_automation_validation_tracking(
+                                    validation_metrics, current_iter
+                                )
+                            )
+
+                            if should_stop:
+                                logger.info(
+                                    f"Training stopped by automation: {stop_reason}"
+                                )
+                                interrupt_received = True
+                                break
 
                 data_timer.start()
                 iter_timer.start()

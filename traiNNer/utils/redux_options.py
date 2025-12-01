@@ -330,6 +330,14 @@ class TrainOptions(StrictStruct):
         ),
     ] = None
 
+    # Training Automations (Phase 1: High-confidence automations)
+    training_automations: Annotated[
+        dict[str, Any] | None,
+        Meta(
+            description="Configuration for intelligent training automations including: IntelligentLearningRateScheduler, DynamicBatchSizeOptimizer, AdaptiveGradientClipping, and IntelligentEarlyStopping. Enable with {'enabled': true} and configure individual automations as needed."
+        ),
+    ] = None
+
 
 class ValOptions(StrictStruct):
     val_enabled: Annotated[

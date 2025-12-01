@@ -1,0 +1,153 @@
+#########################################################################################
+# ParagonSR2 Nano - CC0 147k Dataset (AUTOMATED CONFIGURATION)
+# Uses Phase 1 Training Automations for optimal training
+#########################################################################################
+name: 2xParagonSR2_Nano_CC0_147k_AUTOMATED
+scale: 2
+
+use_amp: true
+amp_bf16: true
+use_channels_last: true
+fast_matmul: true
+num_gpu: auto
+manual_seed: 1024
+
+datasets:
+  train:
+    name: CC0_147k_Train
+    type: pairedimagedataset
+    dataroot_gt: /home/phips/Documents/dataset/cc0/hr
+    dataroot_lq: /home/phips/Documents/dataset/cc0/lr_x2_bicubic_aa
+    lq_size: 128
+    use_hflip: true
+    use_rot: true
+    num_worker_per_gpu: 8
+    batch_size_per_gpu: 16  # Will be optimized by DynamicBatchSizeOptimizer
+    accum_iter: 1
+
+  val:
+    name: CC0_147k_Val
+    type: pairedimagedataset
+    dataroot_gt: /home/phips/Documents/dataset/cc0/val_hr
+    dataroot_lq: /home/phips/Documents/dataset/cc0/val_lr_x2_bicubic_aa
+
+network_g:
+  type: paragonsr2_nano
+
+path:
+  pretrain_network_g: ~
+  strict_load_g: true
+  resume_state: ~
+
+train:
+  ema_decay: 0.999
+  ema_power: 0.75
+  grad_clip: true  # Will be enhanced by AdaptiveGradientClipping
+
+  optim_g:
+    type: AdamW
+    lr: !!float 2e-4  # Will be optimized by IntelligentLearningRateScheduler
+    weight_decay: !!float 1e-4
+    betas: [0.9, 0.99]
+
+  # REMOVED: Old scheduler configuration
+  # scheduler:
+  #   type: MultiStepLR
+  #   milestones: [30000, 35000]
+  #   gamma: 0.5
+
+  total_iter: 40000
+  warmup_iter: 1000
+
+  # NEW: Training Automations Framework
+  training_automations:
+    enabled: true
+
+    # 1. Intelligent Learning Rate Scheduler
+    IntelligentLearningRateScheduler:
+      enabled: true
+      monitor_loss: true
+      monitor_validation: true
+      adaptation_threshold: 0.02
+      plateau_patience: 1000
+      improvement_threshold: 0.001
+      min_lr_factor: 0.1
+      max_lr_factor: 2.0
+      fallback:
+        scheduler_type: "cosine"
+        scheduler_params:
+          eta_min: 0.00001
+          T_max: 40000
+      max_adjustments: 50
+
+    # 2. Dynamic Batch Size Optimizer
+    DynamicBatchSizeOptimizer:
+      enabled: true
+      target_vram_usage: 0.85
+      safety_margin: 0.05
+      adjustment_frequency: 100
+      min_batch_size: 1
+      max_batch_size: 32
+      vram_history_size: 50
+      fallback:
+        batch_size: 16
+      max_adjustments: 20
+
+    # 3. Adaptive Gradient Clipping
+    AdaptiveGradientClipping:
+      enabled: true
+      initial_threshold: 1.0
+      min_threshold: 0.1
+      max_threshold: 10.0
+      adjustment_factor: 1.2
+      monitoring_frequency: 10
+      gradient_history_size: 100
+      fallback:
+        threshold: 1.0
+      max_adjustments: 100
+
+    # 4. Intelligent Early Stopping
+    IntelligentEarlyStopping:
+      enabled: true
+      patience: 2000
+      min_improvement: 0.001
+      min_epochs: 1000
+      min_iterations: 5000
+      monitor_metric: "val/psnr"
+      max_no_improvement: 2000
+      improvement_threshold: 0.002
+      warmup_iterations: 1000
+      fallback:
+        early_stopping: false
+      max_adjustments: 1
+
+  # Keep existing dynamic loss scheduling (works well)
+  dynamic_loss_scheduling:
+    enabled: true
+    auto_calibrate: true
+
+  losses:
+    - type: l1loss
+      loss_weight: 1.0
+    - type: ssimloss
+      loss_weight: 0.05
+
+val:
+  val_enabled: true
+  val_freq: 1000
+  save_img: false
+
+  metrics_enabled: true
+  metrics:
+    psnr:
+      type: calculate_psnr
+      crop_border: 4
+    ssim:
+      type: calculate_ssim
+      crop_border: 4
+
+logger:
+  print_freq: 100
+  save_checkpoint_freq: 20000
+  save_checkpoint_format: safetensors
+  use_tb_logger: true

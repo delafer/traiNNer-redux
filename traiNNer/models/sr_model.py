@@ -700,10 +700,27 @@ class SRModel(BaseModel):
                     stats = self.dynamic_loss_scheduler.get_monitoring_stats()
                     for loss_name, weight in stats["current_weights"].items():
                         loss_dict[f"dynamic_weight_{loss_name}"] = weight
+
+                # Update training automations with loss tracking
+                self.update_automation_loss_tracking(
+                    float(l_g_total.detach().cpu()), current_iter
+                )
+
                 self.scaler_g.scale(l_g_total).backward()
 
                 if apply_gradient:
                     self.scaler_g.unscale_(self.optimizer_g)
+
+                    # Collect gradients for monitoring
+                    gradients = [
+                        p.grad for p in self.net_g.parameters() if p.grad is not None
+                    ]
+
+                    # Update gradient monitoring for automation
+                    suggested_threshold = self.update_automation_gradient_monitoring(
+                        gradients
+                    )
+
                     grad_norm_g = torch.linalg.vector_norm(
                         torch.stack(
                             [
@@ -716,7 +733,10 @@ class SRModel(BaseModel):
                     loss_dict["grad_norm_g"] = grad_norm_g
 
                     if self.grad_clip:
-                        clip_grad_norm_(self.net_g.parameters(), 1.0)
+                        # Use automation-based gradient clipping threshold if available
+                        clip_threshold = self.get_automation_clipping_threshold()
+                        clip_grad_norm_(self.net_g.parameters(), clip_threshold)
+                        loss_dict["grad_clip_threshold"] = clip_threshold
 
                     scale_before = self.scaler_g.get_scale()
                     self.scaler_g.step(self.optimizer_g)
@@ -781,6 +801,17 @@ class SRModel(BaseModel):
 
             if apply_gradient:
                 self.scaler_d.unscale_(self.optimizer_d)
+
+                # Collect discriminator gradients for monitoring
+                gradients_d = [
+                    p.grad for p in self.net_d.parameters() if p.grad is not None
+                ]
+
+                # Update gradient monitoring for automation (includes discriminator)
+                suggested_threshold = self.update_automation_gradient_monitoring(
+                    gradients_d
+                )
+
                 grad_norm_d = torch.linalg.vector_norm(
                     torch.stack(
                         [
@@ -793,7 +824,9 @@ class SRModel(BaseModel):
                 loss_dict["grad_norm_d"] = grad_norm_d
 
                 if self.grad_clip:
-                    clip_grad_norm_(self.net_d.parameters(), 1.0)
+                    # Use automation-based gradient clipping threshold
+                    clip_threshold = self.get_automation_clipping_threshold()
+                    clip_grad_norm_(self.net_d.parameters(), clip_threshold)
                 scale_before = self.scaler_d.get_scale()
                 self.scaler_d.step(self.optimizer_d)
                 self.scaler_d.update()

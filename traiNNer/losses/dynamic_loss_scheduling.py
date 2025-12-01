@@ -663,9 +663,12 @@ def _determine_intelligent_parameters(
     # Normalize architecture type for matching
     arch_key = architecture_type.lower()
     if "paragonsr2" in arch_key:
-        # Extract specific variant (nano, micro, tiny, etc.)
+        # Extract specific variant (nano, micro, tiny, etc.) - must be complete word boundaries
+        import re
+
         for variant in ["nano", "micro", "tiny", "xs", "s", "m", "l", "xl"]:
-            if variant in arch_key:
+            # Use regex to match variant as complete word/separator
+            if re.search(r"\b" + re.escape(variant) + r"\b", arch_key):
                 preset_key = f"paragonsr2_{variant}"
                 break
         else:
@@ -679,11 +682,17 @@ def _determine_intelligent_parameters(
         preset_key = "paragonsr2_tiny"
     elif "xs" in arch_key:
         preset_key = "paragonsr2_xs"
-    elif "small" in arch_key or "s\b" in arch_key:
+    elif "small" in arch_key or (
+        arch_key.endswith("_s") and len(arch_key.split("_")) > 1
+    ):
         preset_key = "paragonsr2_s"
-    elif "medium" in arch_key or "m\b" in arch_key:
+    elif "medium" in arch_key or (
+        arch_key.endswith("_m") and len(arch_key.split("_")) > 1
+    ):
         preset_key = "paragonsr2_m"
-    elif "large" in arch_key or "l\b" in arch_key:
+    elif "large" in arch_key or (
+        arch_key.endswith("_l") and len(arch_key.split("_")) > 1
+    ):
         preset_key = "paragonsr2_l"
     elif "xl" in arch_key or "extra" in arch_key:
         preset_key = "paragonsr2_xl"

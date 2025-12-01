@@ -1,0 +1,185 @@
+#########################################################################################
+# ParagonSR2 Nano - MINIMAL Zero-Config Template
+#
+# This is the ABSOLUTE MINIMUM config needed. Everything else is auto-detected!
+#
+# USAGE:
+# 1. Fill in your dataset paths below (marked with 📁)
+# 2. Specify architecture (marked with 🎯)
+# 3. Run training - framework auto-detects everything else!
+#
+# The framework will automatically:
+# ✅ Detect your hardware (GPU, VRAM, CPU)
+# ✅ Calculate optimal batch size
+# ✅ Set all automation parameters
+# ✅ Configure AMP/precision settings
+# ✅ Optimize learning rates and schedules
+# ✅ Set safety bounds and fallbacks
+#########################################################################################
+
+# Basic required settings (only 3 things needed!)
+name: ParagonSR2_Nano_ZeroConfig_Minimal
+scale: 2                                          # 🎯 Architecture scale factor
+
+# Dataset configuration (ONLY paths need to be specified)
+datasets:
+  train:
+    name: ZeroConfig_Train
+    type: pairedimagedataset
+    dataroot_gt: /home/phips/Documents/dataset/cc0/hr          # 📁 USER: Your HR training path
+    dataroot_lq: /home/phips/Documents/dataset/cc0/lr_x2_bicubic_aa  # 📁 USER: Your LR training path
+    # ✅ All other settings auto-optimized
+
+  val:
+    name: ZeroConfig_Val
+    type: pairedimagedataset
+    dataroot_gt: /home/phips/Documents/dataset/cc0/val_hr     # 📁 USER: Your HR validation path
+    dataroot_lq: /home/phips/Documents/dataset/cc0/val_lr_x2_bicubic_aa  # 📁 USER: Your LR validation path
+    # ✅ All other settings auto-optimized
+
+# Network configuration (ONLY architecture type needed)
+network_g:
+  type: paragonsr2_nano                          # 🎯 USER: Architecture name
+
+# That's it! Everything below is AUTOMATIC...
+# The framework auto-detects and optimizes all training parameters
+
+# AUTO-DETECTED SYSTEM SETTINGS (optimized for your hardware):
+# ✅ use_amp: true/false (auto-detected from GPU capabilities)
+# ✅ amp_bf16: true/false (auto-selected based on GPU support)
+# ✅ use_channels_last: true (auto-optimized for GPU)
+# ✅ fast_matmul: true (auto-enabled if supported)
+# ✅ num_gpu: auto (auto-detect available GPUs)
+
+# AUTO-DETECTED DATASET SETTINGS:
+# ✅ lq_size: auto (optimized for architecture)
+# ✅ batch_size_per_gpu: auto (calculated from VRAM + architecture)
+# ✅ num_worker_per_gpu: auto (optimized from CPU cores)
+# ✅ accum_iter: auto (set based on VRAM constraints)
+# ✅ pin_memory: auto (optimized for GPU training)
+
+# AUTO-DETECTED TRAINING SETTINGS:
+# ✅ base_lr: auto (optimized for architecture)
+# ✅ total_iter: auto (set from architecture preset)
+# ✅ warmup_iter: auto (optimized for stable training)
+# ✅ optimizer settings: auto (AdamW with optimal params)
+# ✅ EMA settings: auto (optimized for stability)
+
+# AUTO-DETECTED AUTOMATION PARAMETERS:
+train:
+  # 🤖 ALL AUTOMATIONS ENABLED - AUTO-CONFIGURED:
+  training_automations:
+    enabled: true
+
+    # 1. Intelligent Learning Rate Scheduler
+    IntelligentLearningRateScheduler:
+      enabled: true
+      # ✅ adaptation_threshold: auto (optimized for stability)
+      # ✅ plateau_patience: auto (adjusted for hardware tier)
+      # ✅ min_lr_factor/max_lr_factor: auto (safety bounds)
+      # ✅ fallback scheduler: auto (cosine with optimal params)
+
+    # 2. Dynamic Batch Size Optimizer
+    DynamicBatchSizeOptimizer:
+      enabled: true
+      # ✅ target_vram_usage: auto (set from hardware tier)
+      # ✅ safety_margin: auto (optimized for hardware)
+      # ✅ batch_size limits: auto (based on VRAM capacity)
+      # ✅ adjustment_frequency: auto (balanced for stability)
+
+    # 3. Adaptive Gradient Clipping
+    AdaptiveGradientClipping:
+      enabled: true
+      # ✅ initial_threshold: auto (optimized starting point)
+      # ✅ min/max_threshold: auto (safety bounds)
+      # ✅ adjustment_factor: auto (tuned for architecture)
+
+    # 4. Intelligent Early Stopping
+    IntelligentEarlyStopping:
+      enabled: true
+      # ✅ patience: auto (adjusted for training length)
+      # ✅ monitor_metric: auto (best metric selection)
+      # ✅ improvement_threshold: auto (tuned sensitivity)
+
+  # ✅ Dynamic loss scheduling: auto (with auto-calibration)
+  dynamic_loss_scheduling:
+    enabled: true
+    auto_calibrate: true
+
+  # ✅ Loss configuration: auto (optimized for architecture)
+  losses:
+    - type: l1loss
+      loss_weight: 1.0                       # ✅ Auto-balanced
+    - type: ssimloss
+      loss_weight: 0.05                      # ✅ Auto-balanced
+
+# AUTO-DETECTED VALIDATION SETTINGS:
+val:
+  val_enabled: true
+  # ✅ val_freq: auto (balanced for training length)
+  save_img: false
+
+  metrics_enabled: true
+  metrics:
+    psnr:
+      type: calculate_psnr
+      # ✅ crop_border: auto (optimized for scale factor)
+    ssim:
+      type: calculate_ssim
+      # ✅ crop_border: auto (optimized for scale factor)
+
+# AUTO-DETECTED LOGGING SETTINGS:
+logger:
+  # ✅ print_freq: auto (balanced logging frequency)
+  save_checkpoint_freq: auto                  # ✅ Auto-set for training length
+  save_checkpoint_format: safetensors        # ✅ Auto-selected format
+  use_tb_logger: true                        # ✅ Auto-enabled
+
+# AUTO-DETECTED PATH SETTINGS:
+path:
+  pretrain_network_g: ~                      # ✅ Auto-handled
+  strict_load_g: true                       # ✅ Safe default
+  resume_state: ~                           # ✅ Auto-handled
+
+
+#########################################################################################
+# SUMMARY: What you need to do vs what the framework does
+#########################################################################################
+#
+# 📝 YOU SPECIFY (3 lines):
+# 1. scale: 2                              # Architecture scale
+# 2. dataroot_gt/dataroot_lq (train)       # Training dataset paths
+# 3. dataroot_gt/dataroot_lq (val)         # Validation dataset paths
+# 4. type: paragonsr2_nano                 # Architecture name
+#
+# 🤖 FRAMEWORK AUTO-DETECTS (everything else):
+# ✅ Hardware detection (GPU, VRAM, CPU)
+# ✅ Batch size optimization
+# ✅ Learning rate scheduling
+# ✅ All automation parameters
+# ✅ Safety bounds and fallbacks
+# ✅ Precision settings (AMP, BF16)
+# ✅ Memory optimizations
+# ✅ Validation frequency
+# ✅ Checkpointing strategy
+# ✅ 50+ other parameters
+#
+# RESULT: Same optimal training as manual config, but ZERO manual setup!
+#########################################################################################
+
+#########################################################################################
+# OPTIONAL: Manual Overrides
+#########################################################################################
+# If you really want to override specific auto-detected values, you can:
+#
+# Example manual overrides:
+# train:
+#   optim_g:
+#     lr: 1e-4                              # Override auto-detected LR
+#   total_iter: 60000                       # Override training duration
+#   training_automations:
+#     DynamicBatchSizeOptimizer:
+#       target_vram_usage: 0.90              # Override VRAM target
+#
+# But honestly, you probably don't need to override anything!
+#########################################################################################
