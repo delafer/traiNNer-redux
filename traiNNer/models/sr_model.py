@@ -935,30 +935,16 @@ class SRModel(BaseModel):
                 self.lq, self.opt.input_pixel_format
             )  # lq: input_pixel_format
 
-            # RTX 3060 VRAM Fix: Downscale images during validation to prevent attention OOM
+            # Validation downscaling disabled for accurate metrics
+            # Original VRAM fix was causing validation on heavily downscaled images (64x64 max)
+            # which led to inaccurate PSNR/SSIM calculations and declining metric curves
             if not self.is_train:  # Only during validation/testing
-                original_size = lq.shape[-2:]
-                # Downscale to maximum 64x64 for validation to prevent attention OOM
-                max_val_size = 64
-                if original_size[-1] > max_val_size or original_size[-2] > max_val_size:
-                    scale_factor = max_val_size / max(
-                        original_size[-2], original_size[-1]
-                    )
-                    new_h = int(original_size[-2] * scale_factor)
-                    new_w = int(original_size[-1] * scale_factor)
-
-                    lq = F.interpolate(
-                        lq, size=(new_h, new_w), mode="bicubic", align_corners=False
-                    )
-                    # Also downscale gt if available for proper comparison
-                    if self.gt is not None:
-                        gt_scale = new_h / original_size[-2]
-                        self.gt = F.interpolate(
-                            self.gt,
-                            size=(new_h * self.opt.scale, new_w * self.opt.scale),
-                            mode="bicubic",
-                            align_corners=False,
-                        )
+                # Validate with full-resolution images for accurate metrics
+                # If you encounter VRAM issues during validation, consider:
+                # 1. Reducing batch size for validation
+                # 2. Using smaller validation tile sizes
+                # 3. Processing validation in smaller chunks
+                pass
 
             net = self.net_g_ema if self.net_g_ema is not None else self.net_g
             net.eval()

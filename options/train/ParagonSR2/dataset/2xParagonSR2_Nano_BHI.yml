@@ -59,8 +59,14 @@ train:
   warmup_iter: 500
 
   dynamic_loss_scheduling:
-    enabled: true
-    auto_calibrate: true
+    enabled: false # Use fixed loss weights for dataset comparison fairness
+    auto_calibrate: false # Detects dataset complexity per dataset, turn off for dataset comparison fairness
+
+  training_automations:
+    intelligent_learning_rate_scheduler:
+      enabled: false  # Adapts LR per dataset, turn off for dataset comparison fairness
+    dynamic_batch_size_optimizer:
+      enabled: false  # Changes batch size per dataset, turn off for dataset comparison fairness
 
   losses:
     - type: l1loss
