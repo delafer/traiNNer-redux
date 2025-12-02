@@ -67,35 +67,51 @@ train:
   # Auto-calibration analyzes dataset complexity to set optimal starting weights
   dynamic_loss_scheduling:
     enabled: true                    # Enable intelligent loss adaptation
-    momentum: 0.9                    # Smooth adaptation (0.0-1.0)
-    adaptation_rate: 0.008           # Slower adaptation for larger model stability
-    min_weight: 1e-6                 # Minimum possible weight
-    max_weight: 100.0                # Maximum possible weight
-    adaptation_threshold: 0.03       # More conservative adaptation for stability
-    baseline_iterations: 300         # Establish baseline before adapting (longer for S)
-    enable_monitoring: true          # Detailed logging
-    auto_calibrate: true             # Auto-detect dataset complexity for optimal starting weights
+    # momentum: 0.9                    # Smooth adaptation (0.0-1.0)
+    # adaptation_rate: 0.008           # Slower adaptation for larger model stability
+    # min_weight: 1e-6                 # Minimum possible weight
+    # max_weight: 100.0                # Maximum possible weight
+    # adaptation_threshold: 0.03       # More conservative adaptation for stability
+    # baseline_iterations: 300         # Establish baseline before adapting (longer for S)
+    # enable_monitoring: true          # Detailed logging
+    # auto_calibrate: true             # Auto-detect dataset complexity for optimal starting weights
 
   # TRAINING AUTOMATIONS - Intelligent hyperparameter optimization
   training_automations:
     intelligent_learning_rate_scheduler:
       enabled: true                   # Auto-adapt LR based on convergence progress
-      strategy: "adaptive"            # adaptive, cosine, exponential, plateau
-      adaptation_frequency: 1500      # Check every 1500 iterations (less frequent for S)
-      improvement_threshold: 0.0008   # Slightly lower threshold for larger model
+      # strategy: "adaptive"            # adaptive, cosine, exponential, plateau
+      # adaptation_frequency: 1500      # Check every 1500 iterations (less frequent for S)
+      # improvement_threshold: 0.0008   # Slightly lower threshold for larger model
+      # patience: 3000                  # LR scheduling patience for S model
+      # max_lr_factor: 2.0              # Maximum LR multiplier
+      # min_lr_factor: 0.1              # Minimum LR multiplier
 
     dynamic_batch_size_optimizer:
       enabled: true                   # Auto-optimize batch size for VRAM efficiency
-      target_vram_usage: 0.80         # Use 80% of available VRAM (more conservative for S)
-      safety_margin: 0.08            # Keep 8% free for stability
-      adjustment_frequency: 1000      # Check every 1000 iterations
+      # target_vram_usage: 0.80         # Use 80% of available VRAM (more conservative for S)
+      # safety_margin: 0.08            # Keep 8% free for stability
+      # adjustment_frequency: 1000      # Check every 1000 iterations
+      # min_batch_size: 1              # Minimum batch size
+      # max_batch_size: 16             # Maximum batch size (smaller for S model)
 
     early_stopping:
       enabled: true                   # Auto-stop when converged
-      patience: 5000                  # Wait 5000 iterations without improvement (longer for S)
-      min_improvement: 0.0003         # Lower improvement threshold for larger model
-      metric: "val/psnr"              # Monitor validation PSNR
-      save_best: true                 # Save best performing model
+      # patience: 5000                  # Wait 5000 iterations without improvement (longer for S)
+      # min_improvement: 0.0003         # Lower improvement threshold for larger model
+      # metric: "val/psnr"              # Monitor validation PSNR
+      # save_best: true                 # Save best performing model
+      # min_iterations: 8000            # Minimum iterations before stopping (longer for S)
+      # warmup_iterations: 1500         # Warmup period for S model
+
+    adaptive_gradient_clipping:
+      enabled: true                   # Fully autonomous - auto-detects architecture and calibrates parameters
+      # initial_threshold: 0.8          # Auto-calibrated based on complex architecture
+      # min_threshold: 0.05             # Auto-calibrated based on complex architecture
+      # max_threshold: 8.0              # Auto-calibrated based on complex architecture
+      # adjustment_factor: 1.1          # Auto-calibrated based on complex architecture
+      # monitoring_frequency: 75        # Auto-calibrated based on complex architecture
+      # gradient_history_size: 120      # Auto-calibrated based on complex architecture
 
   # OPTIMAL FIDELITY LOSS COMBINATION
   # L1 for pixel accuracy + MS-SSIM for structural similarity

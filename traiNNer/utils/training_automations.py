@@ -92,7 +92,7 @@ class TrainingAutomationBase:
         current_value: Any,
         new_value: Any,
         reason: str,
-        validate_func: Union[callable, None] = None,
+        validate_func: callable | None = None,
     ) -> Any:
         """Safely adjust a parameter with validation and fallback."""
         if not self.enabled:
@@ -310,7 +310,7 @@ class DynamicBatchSizeOptimizer(TrainingAutomationBase):
         self.oom_detected = False
         self.oom_recovery_count = 0
 
-    def update_vram_monitoring(self) -> Union[int, None]:
+    def update_vram_monitoring(self) -> int | None:
         """Update VRAM monitoring and return suggested batch size adjustment."""
         if not self.enabled:
             return None
@@ -400,104 +400,222 @@ class DynamicBatchSizeOptimizer(TrainingAutomationBase):
 @AUTOMATION_REGISTRY.register()
 class AdaptiveGradientClipping(TrainingAutomationBase):
     """
-    Adaptive Gradient Clipping
+    Adaptive Gradient Clipping - Autonomous Version
 
     Monitors gradient norms and automatically adjusts clipping thresholds
     to prevent exploding gradients while maintaining learning effectiveness.
+
+    AUTONOMOUS FEATURES:
+    - Auto-detects model architecture (Nano, S, etc.)
+    - Auto-calibrates all parameters based on architecture
+    - Learning-based optimization during training
+    - Minimal user configuration required
     """
 
     def __init__(self, config: dict[str, Any]) -> None:
         super().__init__(config)
 
-        # Configuration
-        self.initial_threshold = config.get("initial_threshold", 1.0)
-        self.min_threshold = config.get("min_threshold", 0.1)
-        self.max_threshold = config.get("max_threshold", 10.0)
-        self.adjustment_factor = config.get("adjustment_factor", 1.2)
-        self.monitoring_frequency = config.get("monitoring_frequency", 10)
-        self.gradient_history_size = config.get("gradient_history_size", 100)
+        # TRULY AUTONOMOUS: Minimal configuration required
+        # User just needs enabled: true, everything else is automatic
 
-        # State tracking
-        self.current_threshold = self.initial_threshold
-        self.gradient_history = deque(maxlen=self.gradient_history_size)
+        # State tracking - all auto-calibrated
+        self.current_threshold = None
+        self.gradient_history = deque(maxlen=100)
         self.adjustment_cooldown = 0
         self.exploding_gradient_count = 0
 
-        # Statistics
+        # Autonomous calibration state
+        self.auto_calibrated = False
+        self.calibration_iterations = 0
+        self.detected_architecture = None
+        self.autonomous_bounds = {"min_threshold": 0.1, "max_threshold": 10.0}
+
+        # Performance tracking
         self.total_gradients = 0
         self.clipped_gradients = 0
+        self.adjustment_events = 0
 
-    def update_gradient_monitoring(self, gradients: list[torch.Tensor]) -> Union[float, None]:
-        """Update gradient monitoring and return suggested threshold."""
+        # Initialize autonomous mode
+        if self.enabled:
+            logger.info(
+                "🤖 AdaptiveGradientClipping: Autonomous mode enabled - "
+                "auto-calibrating parameters based on detected architecture"
+            )
+
+    def update_gradient_monitoring(self, gradients: list[torch.Tensor]) -> float | None:
+        """Autonomous gradient monitoring with auto-calibration."""
         if not self.enabled:
             return None
 
-        # Calculate current gradient norm
         if not gradients:
             return None
 
+        # Autonomous calibration phase
+        if not self.auto_calibrated:
+            self._autonomous_calibration(gradients)
+            return None
+
+        # Calculate gradient statistics
         total_norm = torch.sqrt(
             sum(torch.sum(g**2) for g in gradients if g is not None)
         )
         gradient_norm = float(total_norm.item())
 
+        # Store statistics
+        gradient_stats = {
+            "total_norm": gradient_norm,
+            "num_parameters": len([g for g in gradients if g is not None]),
+        }
+
         self.gradient_history.append(gradient_norm)
+        self.gradient_stats_history.append(gradient_stats)
         self.total_gradients += 1
+
+        # Enhanced logging every 100 iterations
+        if self.total_gradients % 100 == 0:
+            self._log_autonomous_performance()
 
         # Check for exploding gradients
         if gradient_norm > self.current_threshold * 2:
             self.exploding_gradient_count += 1
             logger.warning(
-                f"Automation {self.name}: Exploding gradient detected (norm: {gradient_norm:.4f})"
+                f"🤖 AdaptiveGradientClipping: Exploding gradient detected "
+                f"(norm: {gradient_norm:.4f}, threshold: {self.current_threshold:.4f})"
             )
 
-        # Only adjust every monitoring_frequency iterations
+        # Track clipping
+        if gradient_norm > self.current_threshold:
+            self.clipped_gradients += 1
+
+        # Autonomous adjustment
         if self.adjustment_cooldown > 0:
             self.adjustment_cooldown -= 1
             return None
 
-        # Calculate suggested threshold adjustment
-        suggested_threshold = self._calculate_threshold_adjustment(gradient_norm)
+        # Calculate autonomous threshold adjustment
+        suggested_threshold = self._autonomous_threshold_adjustment(gradient_norm)
 
         if suggested_threshold != self.current_threshold:
             old_threshold = self.current_threshold
             self.current_threshold = suggested_threshold
-            self.adjustment_cooldown = self.monitoring_frequency
+            # Set cooldown based on detected architecture
+            if self.detected_architecture == "simple":
+                self.adjustment_cooldown = 50
+            else:  # complex
+                self.adjustment_cooldown = 75
+            self.adjustment_events += 1
 
-            reason = (
-                "exploding gradients"
-                if gradient_norm > old_threshold * 2
-                else "optimization"
-            )
-            self.record_adjustment(
-                "grad_clip_threshold", old_threshold, suggested_threshold, reason
+            logger.info(
+                f"🤖 AdaptiveGradientClipping: Autonomous adjustment "
+                f"from {old_threshold:.4f} to {suggested_threshold:.4f} "
+                f"(grad norm: {gradient_norm:.4f})"
             )
 
             return suggested_threshold
 
         return None
 
-    def _calculate_threshold_adjustment(self, current_norm: float) -> float:
-        """Calculate suggested gradient clipping threshold."""
+    def _autonomous_calibration(self, gradients: list[torch.Tensor]) -> None:
+        """Auto-detect architecture and calibrate parameters."""
+        self.calibration_iterations += 1
+
+        # Calculate initial gradient statistics for calibration
+        total_norm = torch.sqrt(
+            sum(torch.sum(g**2) for g in gradients if g is not None)
+        )
+        gradient_norm = float(total_norm.item())
+        self.gradient_history.append(gradient_norm)
+
+        # Auto-detect architecture complexity based on gradient behavior
+        if len(self.gradient_history) >= 20:
+            recent_norms = list(self.gradient_history)[-20:]
+            gradient_variance = torch.var(torch.tensor(recent_norms)).item()
+            gradient_mean = sum(recent_norms) / len(recent_norms)
+
+            # Auto-calibrate based on detected complexity
+            if (
+                gradient_variance > 0.001 or gradient_mean > 0.1
+            ):  # High complexity (S model)
+                self._calibrate_for_complex_model()
+            else:  # Low complexity (Nano model)
+                self._calibrate_for_simple_model()
+
+            self.auto_calibrated = True
+            self.architecture_detected = True
+
+            logger.info(
+                f"🤖 AdaptiveGradientClipping: Auto-calibration complete. "
+                f"Detected {'complex' if gradient_variance > 0.001 else 'simple'} architecture. "
+                f"Threshold: {self.current_threshold:.4f}, "
+                f"Monitoring freq: {self.monitoring_frequency}"
+            )
+
+    def _calibrate_for_simple_model(self) -> None:
+        """Auto-calibrate for simple models (Nano)."""
+        self.current_threshold = 1.0
+        self.detected_architecture = "simple"
+        # Store autonomous bounds
+        self.autonomous_bounds = {"min_threshold": 0.1, "max_threshold": 5.0}
+
+    def _calibrate_for_complex_model(self) -> None:
+        """Auto-calibrate for complex models (S)."""
+        self.current_threshold = 0.8  # More conservative for complex models
+        self.detected_architecture = "complex"
+        # Store autonomous bounds
+        self.autonomous_bounds = {"min_threshold": 0.05, "max_threshold": 8.0}
+
+    def _autonomous_threshold_adjustment(self, gradient_norm: float) -> float:
+        """Autonomous threshold adjustment based on learning."""
         if len(self.gradient_history) < 20:
             return self.current_threshold
 
-        # Get recent gradient statistics
+        # Get recent statistics for autonomous decision
         recent_norms = list(self.gradient_history)[-20:]
         avg_norm = sum(recent_norms) / len(recent_norms)
         max_norm = max(recent_norms)
 
-        # Adjust threshold based on gradient statistics
-        if max_norm > self.current_threshold:
-            # Increase threshold to accommodate larger gradients
-            new_threshold = min(self.max_threshold, max_norm * 1.1)
-            return new_threshold
-        elif avg_norm < self.current_threshold * 0.3:
-            # Decrease threshold if gradients are consistently small
-            new_threshold = max(self.min_threshold, self.current_threshold * 0.8)
-            return new_threshold
+        # Get autonomous bounds
+        min_thresh = self.autonomous_bounds["min_threshold"]
+        max_thresh = self.autonomous_bounds["max_threshold"]
+
+        # Autonomous adjustment logic
+        clipping_rate = self._calculate_clipping_rate()
+
+        # If clipping rate is too high, increase threshold
+        if clipping_rate > 0.1:  # More than 10% clipping
+            return min(max_thresh, self.current_threshold * 1.2)
+
+        # If gradients are consistently small, decrease threshold
+        elif avg_norm < self.current_threshold * 0.2:  # Average is 20% of threshold
+            return max(min_thresh, self.current_threshold * 0.8)
+
+        # If max gradient approaches threshold, increase slightly
+        elif max_norm > self.current_threshold * 0.8:
+            return min(max_thresh, max_norm * 1.1)
 
         return self.current_threshold
+
+    def _log_autonomous_performance(self) -> None:
+        """Log autonomous performance metrics."""
+        if len(self.gradient_history) >= 10:
+            recent_norms = list(self.gradient_history)[-10:]
+            avg_norm = sum(recent_norms) / len(recent_norms)
+            clipping_rate = self._calculate_clipping_rate()
+
+            logger.info(
+                f"🤖 AdaptiveGradientClipping: Autonomous performance "
+                f"(iter {self.total_gradients}) - "
+                f"Avg gradient: {avg_norm:.6f}, "
+                f"Threshold: {self.current_threshold:.4f}, "
+                f"Clipping rate: {clipping_rate:.3%}, "
+                f"Auto-adjusted: {self.adjustment_events}x"
+            )
+
+    def _calculate_clipping_rate(self) -> float:
+        """Calculate current clipping rate."""
+        if self.total_gradients == 0:
+            return 0.0
+        return self.clipped_gradients / self.total_gradients
 
     def get_clipping_threshold(self) -> float:
         """Get current gradient clipping threshold."""
@@ -756,7 +874,7 @@ class TrainingAutomationManager:
 
 
 # Convenience function for easy integration
-def setup_training_automations(opt: ReduxOptions) -> Union[TrainingAutomationManager, None]:
+def setup_training_automations(opt: ReduxOptions) -> TrainingAutomationManager | None:
     """
     Set up training automations from ReduxOptions.
 
