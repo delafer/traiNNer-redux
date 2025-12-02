@@ -16,6 +16,7 @@ import logging
 import math
 import warnings
 from collections import deque
+from collections.abc import Callable
 from typing import Any, Dict, List, Optional, Tuple, Union
 
 import torch
@@ -92,7 +93,7 @@ class TrainingAutomationBase:
         current_value: Any,
         new_value: Any,
         reason: str,
-        validate_func: callable | None = None,
+        validate_func: Callable | None = None,
     ) -> Any:
         """Safely adjust a parameter with validation and fallback."""
         if not self.enabled:

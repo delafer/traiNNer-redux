@@ -814,6 +814,12 @@ class SRModel(BaseModel):
             )
             self.log_dict[key] = self.log_dict.get(key, 0) + val * n_samples
 
+        # Add enhanced logging information
+        enhanced_logging_stats = self._collect_enhanced_logging_stats(
+            loss_dict, current_iter, gradients if apply_gradient else []
+        )
+        self.log_dict.update(enhanced_logging_stats)
+
         self.log_dict = self.reduce_loss_dict(self.log_dict)
 
         if self.net_g_ema is not None and apply_gradient:
@@ -1175,3 +1181,75 @@ class SRModel(BaseModel):
             )
 
         self.save_training_state(epoch, current_iter)
+
+    def _collect_enhanced_logging_stats(
+        self,
+        loss_dict: dict[str, Any],
+        current_iter: int,
+        gradients: list[torch.Tensor],
+    ) -> dict[str, Any]:
+        """Collect enhanced logging statistics for comprehensive training monitoring."""
+        enhanced_stats = {}
+
+        # Dynamic loss scheduling statistics
+        if self.dynamic_loss_scheduler is not None:
+            try:
+                stats = self.dynamic_loss_scheduler.get_monitoring_stats()
+                enhanced_stats["training_automation_stats"] = {
+                    "dynamic_loss_scheduling": stats
+                }
+            except Exception:
+                # Fallback if dynamic loss scheduler fails
+                enhanced_stats["training_automation_stats"] = {
+                    "dynamic_loss_scheduling": {"enabled": True, "error": True}
+                }
+
+        # Training automation statistics
+        automation_stats = {}
+        try:
+            # Check for automation manager if available
+            if hasattr(self, "training_automation_manager"):
+                automation_stats = (
+                    self.training_automation_manager.get_automation_stats()
+                )
+        except Exception:
+            pass
+
+        # Add automation stats if available
+        if automation_stats:
+            enhanced_stats["training_automation_stats"] = automation_stats
+
+        # Gradient monitoring statistics
+        gradient_stats = {}
+        if gradients:
+            try:
+                total_norm = torch.sqrt(
+                    sum(torch.sum(g**2) for g in gradients if g is not None)
+                )
+                gradient_stats["grad_norm_g"] = float(total_norm.item())
+                gradient_stats["num_parameters"] = len(
+                    [g for g in gradients if g is not None]
+                )
+
+                # Add gradient clipping threshold if available
+                if hasattr(self, "grad_clip") and self.grad_clip:
+                    clip_threshold = getattr(
+                        self, "get_automation_clipping_threshold", lambda: 1.0
+                    )()
+                    if callable(clip_threshold):
+                        clip_threshold = clip_threshold()
+                    gradient_stats["grad_clip_threshold"] = clip_threshold
+
+            except Exception:
+                gradient_stats["grad_norm_g"] = 0.0
+
+        enhanced_stats["gradient_stats"] = gradient_stats
+
+        # Add current VRAM usage for logging
+        try:
+            current_vram = torch.cuda.memory_allocated() / (1024**3)
+            enhanced_stats["current_vram_gb"] = current_vram
+        except Exception:
+            enhanced_stats["current_vram_gb"] = 0.0
+
+        return enhanced_stats

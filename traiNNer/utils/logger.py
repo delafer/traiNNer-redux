@@ -1,9 +1,11 @@
 import datetime
 import logging
+import os
 import shutil
 import subprocess
 import time
 from logging import Logger
+from os import path as osp
 from pathlib import Path
 from typing import Any
 
@@ -59,7 +61,7 @@ class AvgTimer:
 
 
 class MessageLogger:
-    """Message logger for printing.
+    """Enhanced Message logger for comprehensive training parameter monitoring.
 
     Args:
         opt (dict): Config. It contains the following keys:
@@ -88,15 +90,136 @@ class MessageLogger:
         self.use_tb_logger = opt.logger.use_tb_logger
         self.tb_logger = tb_logger
 
+        # Enhanced training configuration tracking
+        self.network_config = self._extract_network_config(opt)
+        self.training_config = self._extract_training_config(opt)
+        self.automation_config = self._extract_automation_config(opt)
+        self.loss_config = self._extract_loss_config(opt)
+
         self.start_time = time.time()
         self.logger = get_root_logger()
+
+        # Log initial configuration
+        self._log_initial_configuration()
+
+    def _extract_network_config(self, opt: ReduxOptions) -> dict[str, Any]:
+        """Extract network configuration for logging."""
+        config = {}
+        if opt.network_g:
+            config["type"] = opt.network_g.get("type", "unknown")
+            config["scale"] = opt.scale
+        return config
+
+    def _extract_training_config(self, opt: ReduxOptions) -> dict[str, Any]:
+        """Extract training configuration for logging."""
+        config = {}
+        if opt.train:
+            config["total_iter"] = opt.train.total_iter
+            config["ema_decay"] = getattr(opt.train, "ema_decay", 0)
+            config["grad_clip"] = getattr(opt.train, "grad_clip", False)
+        if opt.datasets and "train" in opt.datasets:
+            train_dataset = opt.datasets["train"]
+            config["patch_size"] = getattr(train_dataset, "gt_size", "unknown")
+            config["batch_size"] = getattr(train_dataset, "batch_size", "unknown")
+            config["accum_iter"] = getattr(train_dataset, "accum_iter", 1)
+        return config
+
+    def _extract_automation_config(self, opt: ReduxOptions) -> dict[str, Any]:
+        """Extract automation configuration for logging."""
+        config = {}
+        if opt.train:
+            automations = getattr(opt.train, "training_automations", None)
+            if automations:
+                # Check if any automation is enabled by looking for individual enabled flags
+                enabled_count = 0
+                for automation_type, automation_config in automations.items():
+                    if isinstance(automation_config, dict):
+                        is_enabled = automation_config.get("enabled", False)
+                        config[automation_type] = is_enabled
+                        if is_enabled:
+                            enabled_count += 1
+                        # Store the full config for debugging
+                        config[f"{automation_type}_config"] = automation_config
+
+                config["enabled"] = enabled_count > 0
+                config["enabled_count"] = enabled_count
+        return config
+
+    def _extract_loss_config(self, opt: ReduxOptions) -> dict[str, Any]:
+        """Extract loss configuration for logging."""
+        config = {}
+        if opt.train and opt.train.losses:
+            config["types"] = [loss.get("type", "unknown") for loss in opt.train.losses]
+            config["weights"] = [
+                loss.get("loss_weight", 0) for loss in opt.train.losses
+            ]
+        return config
+
+    def _log_initial_configuration(self) -> None:
+        """Log initial training configuration."""
+        self.logger.info("=" * 80)
+        self.logger.info("🚀 ENHANCED TRAINING LOGGING ENABLED")
+        self.logger.info("=" * 80)
+
+        # Network configuration
+        self.logger.info(
+            f"📊 Network: {self.network_config.get('type', 'unknown')} "
+            f"(scale: {self.network_config.get('scale', 'unknown')}x)"
+        )
+
+        # Training configuration
+        training_info = []
+        if self.training_config.get("patch_size") != "unknown":
+            training_info.append(f"patch: {self.training_config['patch_size']}")
+        if self.training_config.get("batch_size") != "unknown":
+            training_info.append(f"batch: {self.training_config['batch_size']}")
+        if self.training_config.get("accum_iter", 1) > 1:
+            training_info.append(f"accum: {self.training_config['accum_iter']}")
+        training_info.append(f"scale: {self.network_config.get('scale', 'unknown')}x")
+
+        self.logger.info(f"⚙️  Config: {', '.join(training_info)}")
+
+        # Loss configuration
+        if self.loss_config.get("types"):
+            loss_types = [
+                f"{t}({w:.2e})"
+                for t, w in zip(
+                    self.loss_config["types"], self.loss_config["weights"], strict=False
+                )
+            ]
+            self.logger.info(f"🎯 Losses: {', '.join(loss_types)}")
+
+        # Automation configuration
+        if self.automation_config.get("enabled"):
+            enabled_automations = []
+            for automation_name, is_enabled in self.automation_config.items():
+                if (
+                    is_enabled
+                    and not automation_name.endswith("_config")
+                    and automation_name not in ["enabled", "enabled_count"]
+                ):
+                    # Clean up automation names for display
+                    clean_name = automation_name.replace("_", " ").title()
+                    enabled_automations.append(clean_name)
+
+            if enabled_automations:
+                automation_count = self.automation_config.get("enabled_count", 0)
+                self.logger.info(
+                    f"🤖 Automations: {', '.join(enabled_automations)} ({automation_count} enabled)"
+                )
+            else:
+                self.logger.info("🤖 Automations: enabled (no details available)")
+        else:
+            self.logger.info("🤖 Automations: disabled")
+
+        self.logger.info("=" * 80)
 
     def reset_start_time(self) -> None:
         self.start_time = time.time()
 
     @master_only
     def __call__(self, log_vars: dict[str, Any]) -> None:
-        """Format logging message.
+        """Format enhanced logging message with comprehensive training parameters.
 
         Args:
             log_vars (dict): Contains the following keys:
@@ -105,15 +228,37 @@ class MessageLogger:
                 lrs (list): List of learning rates.
                 time (float): Iteration time.
                 data_time (float): Data loading time for each iteration.
+                training_automation_stats (dict): Training automation status and stats.
+                dynamic_loss_stats (dict): Dynamic loss scheduling stats.
+                gradient_stats (dict): Gradient monitoring stats.
         """
-        # epoch, current iteration, and learning rates
+        # Extract basic training information
         epoch = log_vars.pop("epoch")
         current_iter = log_vars.pop("iter")
         lrs = log_vars.pop("lrs")
 
-        # Construct the base message with epoch, iteration, and learning rates
+        # Extract enhanced monitoring data
+        training_automation_stats = log_vars.pop("training_automation_stats", {})
+        dynamic_loss_stats = log_vars.pop("dynamic_loss_stats", {})
+        gradient_stats = log_vars.pop("gradient_stats", {})
+
+        # Construct enhanced training log message
         message = f"[epoch:{epoch:4,d}, iter:{current_iter:8,d}, lr:("
         message += ", ".join([f"{v:.3e}" for v in lrs]) + ")] "
+
+        # Training configuration display
+        config_parts = []
+        if self.network_config.get("type"):
+            config_parts.append(f"net: {self.network_config['type']}")
+        if self.training_config.get("patch_size") != "unknown":
+            config_parts.append(f"patch: {self.training_config['patch_size']}")
+        if self.training_config.get("batch_size") != "unknown":
+            config_parts.append(f"batch: {self.training_config['batch_size']}")
+        if self.network_config.get("scale"):
+            config_parts.append(f"scale: {self.network_config['scale']}x")
+
+        if config_parts:
+            message += f"[{', '.join(config_parts)}] "
 
         # performance, eta
         if "time" in log_vars.keys():
@@ -125,35 +270,218 @@ class MessageLogger:
             eta_sec = time_sec_avg * (self.max_iters - current_iter - 1)
             eta_str = str(datetime.timedelta(seconds=int(eta_sec)))
 
-            message += f"[performance: {iter_time:.3f} it/s] [eta: {eta_str}] "
+            message += f"[perf: {iter_time:.3f} it/s, eta: {eta_str}] "
 
-        # peak VRAM
-        message += (
-            f"[peak VRAM: {torch.cuda.max_memory_allocated() / (1024**3):.2f} GB] "
-        )
+        # Enhanced VRAM monitoring
+        current_vram = torch.cuda.memory_allocated() / (1024**3)
+        peak_vram = torch.cuda.max_memory_allocated() / (1024**3)
+        message += f"[VRAM: {current_vram:.2f} GB, peak: {peak_vram:.2f} GB] "
 
-        # Log any additional variables (typically losses)
+        # Dynamic loss balance monitoring
+        loss_balance_info = self._format_loss_balance_info(log_vars, dynamic_loss_stats)
+        if loss_balance_info:
+            message += f"[{loss_balance_info}] "
+
+        # Gradient monitoring
+        gradient_info = self._format_gradient_info(gradient_stats)
+        if gradient_info:
+            message += f"[{gradient_info}] "
+
+        # Automation status
+        automation_info = self._format_automation_info(training_automation_stats)
+        if automation_info:
+            message += f"[{automation_info}] "
+
+        # Log losses and other training metrics
+        loss_vars = {}
+        other_vars = {}
+
+        # Separate losses from other metrics
         for k, v in log_vars.items():
-            message += f"{k}: {v:.4e} "
-            if self.tb_logger is not None:
-                label = k
-                if label.startswith("l_"):
-                    label = f"losses/{label}"
-                elif label.startswith("grad_norm_"):
-                    label = f"grad_norms/{label}"
-                elif label.startswith("scale_"):
-                    label = f"scales/{label}"
+            if k.startswith("l_") or "loss" in k.lower():
+                loss_vars[k] = v
+            else:
+                other_vars[k] = v
 
+        # Log loss values
+        if loss_vars:
+            loss_message_parts = []
+            for k, v in loss_vars.items():
                 if isinstance(v, float):
-                    value = v
+                    loss_message_parts.append(f"{k}: {v:.3e}")
                 else:
-                    value = (
-                        v.to(dtype=torch.float32) if v.dtype == torch.bfloat16 else v
-                    )
-                self.tb_logger.add_scalar(label, value, current_iter)
+                    loss_message_parts.append(f"{k}: {v:.4e}")
+            message += f"[{', '.join(loss_message_parts)}] "
+
+        # Log other variables
+        for k, v in other_vars.items():
+            message += f"{k}: {v:.4e} "
+
+        # Log to tensorboard with enhanced categorization
+        self._log_to_tensorboard(
+            log_vars,
+            loss_vars,
+            other_vars,
+            dynamic_loss_stats,
+            gradient_stats,
+            training_automation_stats,
+            current_iter,
+        )
 
         # Log the final constructed message
         self.logger.info(message, extra={"markup": False})
+
+    def _format_loss_balance_info(
+        self, log_vars: dict[str, Any], dynamic_loss_stats: dict[str, Any]
+    ) -> str:
+        """Format loss balance information for logging."""
+        parts = []
+
+        # Check for loss balance ratios
+        content_loss = None
+        gan_loss = None
+        perceptual_loss = None
+
+        for k, v in log_vars.items():
+            if "content" in k.lower() or "l1" in k.lower() or "l2" in k.lower():
+                content_loss = abs(float(v))
+            elif "gan" in k.lower():
+                gan_loss = abs(float(v))
+            elif "perceptual" in k.lower() or "lpips" in k.lower():
+                perceptual_loss = abs(float(v))
+
+        if content_loss and gan_loss:
+            balance_ratio = gan_loss / (content_loss + 1e-8)
+            parts.append(f"loss_ratio: {balance_ratio:.2f}")
+
+        # Add dynamic loss scheduler information
+        if dynamic_loss_stats.get("current_weights"):
+            weight_parts = []
+            for loss_name, weight in dynamic_loss_stats["current_weights"].items():
+                if isinstance(weight, (int, float)):
+                    weight_parts.append(f"{loss_name.split('_')[-1]}: {weight:.2f}")
+            if weight_parts:
+                parts.append(
+                    f"dyn_weights: {', '.join(weight_parts[:2])}"
+                )  # Show max 2
+
+        return ", ".join(parts) if parts else ""
+
+    def _format_gradient_info(self, gradient_stats: dict[str, Any]) -> str:
+        """Format gradient monitoring information."""
+        parts = []
+
+        if gradient_stats.get("grad_norm_g"):
+            parts.append(f"grad_norm: {gradient_stats['grad_norm_g']:.2f}")
+
+        if gradient_stats.get("grad_clip_threshold"):
+            parts.append(f"clip_thresh: {gradient_stats['grad_clip_threshold']:.2f}")
+
+        return ", ".join(parts) if parts else ""
+
+    def _format_automation_info(self, training_automation_stats: dict[str, Any]) -> str:
+        """Format training automation status information."""
+        parts = []
+
+        # Check for automation system status
+        if training_automation_stats:
+            for automation_name, stats in training_automation_stats.items():
+                if isinstance(stats, dict) and stats.get("enabled"):
+                    # Show key automation metrics
+                    if automation_name == "adaptive_gradient_clipping":
+                        if "current_threshold" in stats:
+                            parts.append(f"grad_clip: {stats['current_threshold']:.2f}")
+                    elif automation_name == "intelligent_learning_rate_scheduler":
+                        if "lr_multipliers" in stats:
+                            avg_multiplier = sum(
+                                stats["lr_multipliers"].values()
+                            ) / max(len(stats["lr_multipliers"]), 1)
+                            parts.append(f"lr_mult: {avg_multiplier:.2f}")
+                    elif automation_name == "dynamic_batch_size_optimizer":
+                        if "suggested_batch_size" in stats:
+                            parts.append(f"batch_opt: {stats['suggested_batch_size']}")
+
+        # Show automation status with icons
+        automation_status = []
+        if self.automation_config.get("enabled"):
+            automation_status.append("ON")
+        else:
+            automation_status.append("OFF")
+
+        if parts:
+            automation_status.extend(parts)
+
+        return f"auto: {', '.join(automation_status)}" if automation_status else ""
+
+    def _log_to_tensorboard(
+        self,
+        log_vars: dict[str, Any],
+        loss_vars: dict[str, Any],
+        other_vars: dict[str, Any],
+        dynamic_loss_stats: dict[str, Any],
+        gradient_stats: dict[str, Any],
+        training_automation_stats: dict[str, Any],
+        current_iter: int,
+    ) -> None:
+        """Log enhanced metrics to tensorboard with proper categorization."""
+        if self.tb_logger is None:
+            return
+
+        # Log loss variables
+        for k, v in loss_vars.items():
+            label = f"losses/{k}"
+            value = (
+                float(v)
+                if isinstance(v, (int, float))
+                else v.to(dtype=torch.float32).detach()
+            )
+            self.tb_logger.add_scalar(label, value, current_iter)
+
+        # Log other variables
+        for k, v in other_vars.items():
+            label = f"metrics/{k}"
+            value = (
+                float(v)
+                if isinstance(v, (int, float))
+                else v.to(dtype=torch.float32).detach()
+            )
+            self.tb_logger.add_scalar(label, value, current_iter)
+
+        # Log dynamic loss scheduler stats
+        if dynamic_loss_stats:
+            if "current_weights" in dynamic_loss_stats:
+                for loss_name, weight in dynamic_loss_stats["current_weights"].items():
+                    label = f"dynamic_loss/{loss_name}_weight"
+                    value = (
+                        float(weight)
+                        if isinstance(weight, (int, float))
+                        else weight.item()
+                    )
+                    self.tb_logger.add_scalar(label, value, current_iter)
+
+        # Log gradient stats
+        for stat_name, value in gradient_stats.items():
+            if isinstance(value, (int, float, torch.Tensor)):
+                label = f"gradients/{stat_name}"
+                tensor_value = (
+                    torch.tensor(value)
+                    if not isinstance(value, torch.Tensor)
+                    else value
+                )
+                final_value = (
+                    float(tensor_value.detach())
+                    if hasattr(tensor_value, "detach")
+                    else value
+                )
+                self.tb_logger.add_scalar(label, final_value, current_iter)
+
+        # Log automation stats
+        for automation_name, stats in training_automation_stats.items():
+            if isinstance(stats, dict):
+                for stat_name, value in stats.items():
+                    if isinstance(value, (int, float)):
+                        label = f"automation/{automation_name}_{stat_name}"
+                        self.tb_logger.add_scalar(label, value, current_iter)
 
 
 @master_only
@@ -229,16 +557,40 @@ def get_root_logger(
     logger.propagate = False
 
     rank, _ = get_dist_info()
+    print(f"🔍 Logger Debug: Current rank = {rank}")
+    print(f"🔍 Logger Debug: Log file = {log_file}")
+
     if rank != 0:
         logger.setLevel("ERROR")
+        print(
+            f"🔍 Logger Debug: Rank {rank != 0}, setting level to ERROR (no file logging)"
+        )
     else:
         logger.setLevel(log_level_file)
+        print(
+            f"🔍 Logger Debug: Rank {rank}, allowing file logging at level {log_level_file}"
+        )
         if log_file is not None:
-            # add file handler
-            file_handler = logging.FileHandler(log_file, "w")
-            file_handler.setFormatter(logging.Formatter(format_str))
-            file_handler.setLevel(log_level_file)
-            logger.addHandler(file_handler)
+            try:
+                # Ensure log directory exists
+                log_dir = osp.dirname(log_file)
+                if log_dir:
+                    os.makedirs(log_dir, exist_ok=True)
+                    print(f"🔍 Logger Debug: Created/verified log directory: {log_dir}")
+
+                # add file handler
+                file_handler = logging.FileHandler(log_file, "w")
+                file_handler.setFormatter(logging.Formatter(format_str))
+                file_handler.setLevel(log_level_file)
+                logger.addHandler(file_handler)
+                print(
+                    f"✅ Logger Debug: File handler added successfully for {log_file}"
+                )
+            except Exception as e:
+                print(f"❌ Logger Debug: Failed to create file handler: {e}")
+                print("📝 Logger Debug: Falling back to console-only logging")
+        else:
+            print("🔍 Logger Debug: No log_file specified, console-only logging")
     initialized_logger[logger_name] = True
     return logger
 

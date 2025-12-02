@@ -290,7 +290,34 @@ def train_pipeline(root_path: str) -> None:
     # WARNING: should not use get_root_logger in the above codes, including the called functions
     # Otherwise the logger will not be properly initialized
     log_file = osp.join(opt.path.log, f"train_{opt.name}_{get_time_str()}.log")
+
+    # Ensure log directory exists and add debugging
+    os.makedirs(opt.path.log, exist_ok=True)
+
+    # Debug log file creation
+    print(f"🔍 Debug: Log file path: {log_file}")
+    print(f"🔍 Debug: Log directory exists: {os.path.exists(opt.path.log)}")
+    print(f"🔍 Debug: Log directory writable: {os.access(opt.path.log, os.W_OK)}")
+
     logger = get_root_logger(logger_name="traiNNer", log_file=log_file)
+
+    # Verify log file was actually created
+    if os.path.exists(log_file):
+        print(f"✅ Log file successfully created: {log_file}")
+    else:
+        print(f"❌ Log file was not created: {log_file}")
+        # Try to create a fallback log file for debugging
+        fallback_log = osp.join(
+            opt.path.log, f"fallback_train_{opt.name}_{get_time_str()}.log"
+        )
+        try:
+            with open(fallback_log, "w") as f:
+                f.write(
+                    f"Training log file creation failed. Original path: {log_file}\n"
+                )
+            print(f"📝 Fallback log file created: {fallback_log}")
+        except Exception as e:
+            print(f"💥 Failed to create fallback log file: {e}")
     logger.info(get_env_info())
     logger.debug(opt.contents)
     opt.contents = None
@@ -507,6 +534,30 @@ def train_pipeline(root_path: str) -> None:
                         }
                     )
                     log_vars.update(model.get_current_log())
+
+                    # Add enhanced training statistics for comprehensive monitoring
+                    try:
+                        # Get gradients for enhanced logging (if available)
+                        gradients = []
+                        if hasattr(model, "net_g"):
+                            gradients = [
+                                p.grad
+                                for p in model.net_g.parameters()
+                                if p.grad is not None
+                            ]
+
+                        # Collect enhanced logging statistics
+                        if hasattr(model, "_collect_enhanced_logging_stats"):
+                            enhanced_stats = model._collect_enhanced_logging_stats(
+                                model.log_dict, current_iter, gradients
+                            )
+                            # Add enhanced stats to log_vars
+                            for key, value in enhanced_stats.items():
+                                log_vars[key] = value
+                    except Exception as e:
+                        # Fallback if enhanced logging fails
+                        logger.debug(f"Enhanced logging failed: {e}")
+
                     model.reset_current_log()
                     msg_logger(log_vars)
 

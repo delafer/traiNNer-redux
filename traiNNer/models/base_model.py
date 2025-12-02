@@ -181,7 +181,16 @@ class BaseModel:
             self.best_metric_results[dataset_name][metric]["iter"] = current_iter
 
     def get_current_log(self) -> dict[str, float | torch.Tensor]:
-        return {k: v / self.loss_samples for k, v in self.log_dict.items()}
+        """Get current log with safe division for numeric values only."""
+        result = {}
+        for k, v in self.log_dict.items():
+            if isinstance(v, (int, float, torch.Tensor)):
+                # Only divide numeric values
+                result[k] = v / self.loss_samples
+            else:
+                # Keep dictionary values (like training automation stats) as-is
+                result[k] = v
+        return result
 
     def reset_current_log(self) -> None:
         self.log_dict = {}
