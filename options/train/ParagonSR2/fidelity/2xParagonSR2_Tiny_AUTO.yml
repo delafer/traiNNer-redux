@@ -1,0 +1,114 @@
+#########################################################################################
+# ParagonSR2 Tiny Auto-Optimized VRAM Management Config
+# Automatically manages VRAM usage to prevent OOM crashes
+#########################################################################################
+name: 2xParagonSR2_Tiny_AUTO_fidelity
+scale: 2
+
+# VRAM MANAGEMENT SYSTEM
+auto_vram_management:
+  enabled: true                    # Enable automatic VRAM management
+  target_vram_usage: 0.85         # Target 85% VRAM usage (prevents OOM)
+  safety_margin: 0.05             # Additional 5% safety margin
+
+use_amp: true
+amp_bf16: true
+use_channels_last: true
+num_gpu: auto
+
+datasets:
+  train:
+    name: CC0_147k_Train
+    type: pairedimagedataset
+    dataroot_gt: /home/phips/Documents/dataset/cc0/filtered_versions/cc0_c5_hr
+    dataroot_lq: /home/phips/Documents/dataset/cc0/filtered_versions/cc0_c5_lr_x2
+
+    # AUTO-OPTIMIZED PARAMETERS (set by VRAM manager)
+    lq_size: AUTO                  # Automatically optimized for current GPU
+    batch_size_per_gpu: AUTO       # Automatically optimized for current GPU
+    num_worker_per_gpu: AUTO       # Automatically optimized for current GPU
+    accum_iter: AUTO               # Automatically optimized for current GPU
+
+    use_hflip: true
+    use_rot: true
+
+  val:
+    name: CC0_147k_Val
+    type: pairedimagedataset
+    dataroot_gt: /home/phips/Documents/dataset/cc0/val_hr
+    dataroot_lq: /home/phips/Documents/dataset/cc0/val_lr_x2_bicubic_aa
+
+network_g:
+  type: paragonsr2_tiny
+
+path:
+  pretrain_network_g: ~
+  strict_load_g: true
+
+train:
+  ema_decay: 0.999
+  ema_power: 0.75
+  grad_clip: true
+
+  optim_g:
+    type: AdamW
+    lr: !!float 2e-4
+    weight_decay: !!float 1e-4
+    betas: [0.9, 0.99]
+
+  scheduler:
+    type: MultiStepLR
+    milestones: [40000, 50000, 55000]
+    gamma: 0.5
+
+  total_iter: 60000
+  warmup_iter: 1000
+
+  # DYNAMIC LOSS SCHEDULING WITH AUTO-CALIBRATION
+  dynamic_loss_scheduling:
+    enabled: true
+
+  # TRAINING AUTOMATIONS
+  training_automations:
+    intelligent_learning_rate_scheduler:
+      enabled: true
+
+    dynamic_batch_size_optimizer:
+      enabled: true
+      use_vram_manager_integration: true
+
+    early_stopping:
+      enabled: true
+      patience: 3000
+      min_improvement: 0.0005
+      metric: "val/psnr"
+
+    adaptive_gradient_clipping:
+      enabled: true
+
+  # OPTIMAL FIDELITY LOSS COMBINATION
+  losses:
+    - type: l1loss
+      loss_weight: 1.0
+    - type: MSSIMLoss
+      loss_weight: 0.08
+
+val:
+  val_enabled: true
+  val_freq: 1000
+  save_img: true
+
+  metrics_enabled: true
+  metrics:
+    psnr:
+      type: calculate_psnr
+      crop_border: 4
+    ssim:
+      type: calculate_ssim
+      crop_border: 4
+
+logger:
+  print_freq: 100
+  save_checkpoint_freq: 10000
+  save_checkpoint_format: safetensors
+  use_tb_logger: true
