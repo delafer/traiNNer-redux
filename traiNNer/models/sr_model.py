@@ -317,48 +317,19 @@ class SRModel(BaseModel):
                     ),
                 }
 
-                # Automatically analyze dataset if not provided
+                # Use default dataset complexity values for auto-calibration
+                # Note: Automatic dataset analysis is disabled due to method availability issues
                 if not training_config["dataset_info"]:
-                    try:
-                        from traiNNer.utils.dataset_analyzer import (
-                            analyze_dataset_complexity,
-                        )
-
-                        logger.info(
-                            "🔍 Automatically analyzing dataset complexity for optimal calibration...",
-                            extra={"markup": True},
-                        )
-
-                        # Get training dataloader for analysis
-                        train_dataloader = self.get_train_dataloader()
-                        if train_dataloader is not None:
-                            # Analyze dataset complexity using first 50 samples
-                            dataset_info = analyze_dataset_complexity(
-                                train_dataloader,
-                                num_samples=50,  # Analyze first 50 samples for quick analysis
-                                device=self.device.type,
-                            )
-                            training_config["dataset_info"] = dataset_info
-
-                            logger.info(
-                                "🎯 Dataset analysis complete - automatically optimized for your data",
-                                extra={"markup": True},
-                            )
-                        else:
-                            logger.warning(
-                                "Could not access training dataloader for dataset analysis"
-                            )
-
-                    except Exception as e:
-                        logger.warning(
-                            f"Dataset analysis failed: {e}. Using default values."
-                        )
-                        training_config["dataset_info"] = {
-                            "texture_variance": 0.5,
-                            "edge_density": 0.5,
-                            "color_variation": 0.5,
-                            "overall_complexity": 0.5,
-                        }
+                    logger.info(
+                        "📊 Using default dataset complexity for auto-calibration",
+                        extra={"markup": True},
+                    )
+                    training_config["dataset_info"] = {
+                        "texture_variance": 0.5,
+                        "edge_density": 0.5,
+                        "color_variation": 0.5,
+                        "overall_complexity": 0.5,
+                    }
 
                 # Add context to scheduler config
                 scheduler_config["architecture_type"] = architecture_type

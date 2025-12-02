@@ -77,7 +77,21 @@ class DynamicLossScheduler(nn.Module):
         """
         super().__init__()
 
-        # Validate parameters
+        # Convert parameters to proper types and validate
+        try:
+            momentum = float(momentum)
+            adaptation_rate = float(adaptation_rate)
+            min_weight = float(min_weight)
+            max_weight = float(max_weight)
+            adaptation_threshold = float(adaptation_threshold)
+            baseline_iterations = int(baseline_iterations)
+            enable_monitoring = bool(enable_monitoring)
+        except (ValueError, TypeError) as e:
+            raise ValueError(
+                f"Failed to convert scheduler parameters to proper types: {e}"
+            )
+
+        # Validate parameter ranges
         if not 0.0 <= momentum <= 1.0:
             raise ValueError(f"Momentum must be between 0.0 and 1.0, got {momentum}")
         if not 0.0 < adaptation_rate <= 1.0:
@@ -567,7 +581,30 @@ def _create_intelligent_loss_scheduler(
         extra={"markup": True},
     )
 
-    return DynamicLossScheduler(base_weights=base_weights, **intelligent_params)
+    # Ensure all parameters are properly typed before passing to DynamicLossScheduler
+    typed_params = {}
+    for key, value in intelligent_params.items():
+        if key == "momentum":
+            typed_params[key] = float(value)
+        elif key == "adaptation_rate":
+            typed_params[key] = float(value)
+        elif key == "min_weight":
+            typed_params[key] = float(value)
+        elif key == "max_weight":
+            typed_params[key] = float(value)
+        elif key == "adaptation_threshold":
+            typed_params[key] = float(value)
+        elif key == "baseline_iterations":
+            typed_params[key] = int(value)
+        elif key == "enable_monitoring":
+            if isinstance(value, str):
+                typed_params[key] = value.lower() in ("true", "1", "yes", "on")
+            else:
+                typed_params[key] = bool(value)
+        else:
+            typed_params[key] = value
+
+    return DynamicLossScheduler(base_weights=base_weights, **typed_params)
 
 
 def _determine_intelligent_parameters(
