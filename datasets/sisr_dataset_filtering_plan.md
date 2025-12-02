@@ -1,4 +1,9 @@
-# SISR Dataset Optimization Plan
+# SISR Dataset Optimization Plan (Updated with User Feedback)
+
+User tests:
+- complexity >=0.45 & arniqa >=0.72: 6.3k tiles
+- complexity >=0.45 & arniqa >=0.65: 28k tiles
+- complexity >=0.45 & arniqa >=0.70: 10k tiles
 
 ## Executive Summary
 The current dataset (~147k 512x512 tiles from CC0) is already filtered through a 3-stage pipeline:
@@ -14,15 +19,12 @@ The current dataset (~147k 512x512 tiles from CC0) is already filtered through a
 ## Statistical Analysis (Sample of first 750 tiles)
 | Metric | Min | Max | Mean | Median | P90 | Notes |
 |--------|-----|-----|------|--------|----|-------|
-| complexity_score | 0.068 | 0.716 | ~0.38 | ~0.37 | 0.55 | Higher = better for convergence |
-| arniqa_score | 0.60 | 0.86 | 0.70 | 0.70 | 0.78 | Higher technical quality |
-| nima_score | 4.50 | 6.27 | 5.00 | 4.98 | 5.40 | Aesthetic; cap upper to avoid sharpen bias |
-| brisque | -10.6 | 39.9 | 16 | 15 | 27 | Lower distortion |
-| oversharpen | 50 | 2939 | 700 | 550 | 1600 | 300-2500 optimal |
-| entropy | 5.03 | 7.84 | 6.8 | 6.8 | 7.4 | Higher info |
-| blockiness | 14 | 32 | 27 | 27 | 30 | Lower better |
-| aliasing | 0.10 | 0.35 | 0.27 | 0.27 | 0.33 | Lower better |
-| contrast | 15 | 105 | 50 | 50 | 70 | Higher better |
+| complexity_score | 0.068 | 0.716 | ~0.38 | ~0.37 | 0.55 | #1 Priority: Higher = texture/convergence |
+| arniqa_score | 0.60 | 0.86 | 0.70 | 0.70 | 0.78 | #2: Technical quality |
+| brisque | -10.6 | 39.9 | 16 | 15 | 27 | #3: Low distortion |
+| nima_score | 4.50 | 6.27 | 5.00 | 4.98 | 5.40 | Lower priority: Aesthetic bias |
+| oversharpen | 50 | 2939 | 700 | 550 | 1600 | Secondary: Avoid extremes |
+| entropy | 5.03 | 7.84 | 6.8 | 6.8 | 7.4 | Secondary: Info content |
 
 *(Full stats require Python analysis; sample representative)*
 
@@ -48,9 +50,9 @@ entropy > 6.7
 Expected yield: ~35k tiles (~25%).
 
 ## 3 Dataset Variants
-1. **Convergence King** (~25k): complexity >0.50, arniqa>0.70, brisque<20 (prioritize texture)
-2. **Peak Performer** (~35k): Full thresholds above (balanced)
-3. **Elite Quality** (~20k): complexity>0.55, arniqa>0.75, brisque<10, oversharpen 500-2000 (highest metrics)
+1. **Convergence King** (28k): complexity >=0.45 & arniqa >=0.65 (user-tested)
+2. **Balanced** (20k): complexity >=0.45 & arniqa >=0.70 (user-tested)
+3. **Elite** (10k): complexity >=0.45 & arniqa >=0.72 + brisque <15 (user-tested + low dist)
 
 ## Testing Protocol
 - Use [fair configs](dataset_comparison_testing_guide.md): disable dynamic_loss/auto_calib
