@@ -894,5 +894,13 @@ class ReduxOptions(StrictStruct):
     )
     onnx: OnnxOptions | None = None
 
+    # Automatic VRAM Management System
+    auto_vram_management: Annotated[
+        dict[str, Any] | None,
+        Meta(
+            description="Configuration for automatic VRAM management system that optimizes training parameters (lq_size, batch_size, workers) based on available GPU memory. Enable with {'enabled': true, 'target_vram_usage': 0.85, 'safety_margin': 0.05}."
+        ),
+    ] = None
+
     find_unused_parameters: bool = False
     contents: str | None = None

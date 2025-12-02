@@ -23,11 +23,11 @@ datasets:
     dataroot_gt: /home/phips/Documents/dataset/cc0/filtered_versions/cc0_c5_hr
     dataroot_lq: /home/phips/Documents/dataset/cc0/filtered_versions/cc0_c5_lr_x2
 
-    # AUTO-OPTIMIZED PARAMETERS (set by VRAM manager)
-    lq_size: AUTO                  # Automatically optimized for current GPU
-    batch_size_per_gpu: AUTO       # Automatically optimized for current GPU
-    num_worker_per_gpu: AUTO       # Automatically optimized for current GPU
-    accum_iter: AUTO               # Automatically optimized for current GPU
+    # OPTIMIZED PARAMETERS for RTX 3060 12GB (Auto-VRAM managed)
+    lq_size: 128                   # Safe LR patch size for RTX 3060
+    batch_size_per_gpu: 3          # Optimized batch size for M
+    num_worker_per_gpu: 8          # Workers for efficient data loading
+    accum_iter: 1                  # No gradient accumulation needed for M
 
     use_hflip: true
     use_rot: true
@@ -73,9 +73,16 @@ train:
     intelligent_learning_rate_scheduler:
       enabled: true
 
-    dynamic_batch_size_optimizer:
+    DynamicBatchSizeOptimizer:
       enabled: true
-      use_vram_manager_integration: true
+      target_vram_usage: 0.85
+      safety_margin: 0.05
+      adjustment_frequency: 100
+      min_batch_size: 2
+      max_batch_size: 64
+      min_lq_size: 32
+      max_lq_size: 256
+      vram_history_size: 50
 
     early_stopping:
       enabled: true
@@ -90,7 +97,7 @@ train:
   losses:
     - type: l1loss
       loss_weight: 1.0
-    - type: MSSIMLoss
+    - type: mssimloss
       loss_weight: 0.08
 
 val:

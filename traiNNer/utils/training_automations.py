@@ -284,10 +284,12 @@ class IntelligentLearningRateScheduler(TrainingAutomationBase):
 @AUTOMATION_REGISTRY.register()
 class DynamicBatchSizeOptimizer(TrainingAutomationBase):
     """
-    Dynamic Batch Size Optimizer
+    Enhanced Dynamic VRAM Optimizer
 
-    Monitors VRAM usage and automatically adjusts batch size to optimize
-    training efficiency while preventing out-of-memory errors.
+    Monitors VRAM usage and automatically adjusts lq_size and batch size to optimize
+    training efficiency while preventing out-of-memory errors. Priority system:
+    1. Increase lq_size first (better final metrics)
+    2. Then increase batch size (better stability)
     """
 
     def __init__(self, config: dict[str, Any]) -> None:
@@ -297,24 +299,35 @@ class DynamicBatchSizeOptimizer(TrainingAutomationBase):
         self.target_vram_usage = config.get("target_vram_usage", 0.85)
         self.safety_margin = config.get("safety_margin", 0.05)
         self.adjustment_frequency = config.get("adjustment_frequency", 100)
-        self.min_batch_size = config.get("min_batch_size", 1)
-        self.max_batch_size = config.get("max_batch_size", 32)
+
+        # Batch size bounds
+        self.min_batch_size = config.get("min_batch_size", 2)
+        self.max_batch_size = config.get("max_batch_size", 64)
+
+        # lq_size bounds (for 2x training)
+        self.min_lq_size = config.get("min_lq_size", 32)
+        self.max_lq_size = config.get("max_lq_size", 256)
+
         self.vram_history_size = config.get("vram_history_size", 50)
 
         # State tracking
         self.vram_history = deque(maxlen=self.vram_history_size)
+        self.peak_vram_usage = 0.0  # Track peak VRAM usage
         self.current_batch_size = None
+        self.current_lq_size = None
         self.target_batch_size = None
+        self.target_lq_size = None
         self.adjustment_cooldown = 0
 
         # Monitoring
         self.oom_detected = False
         self.oom_recovery_count = 0
+        self.vram_manager = None  # Will be set during training
 
-    def update_vram_monitoring(self) -> int | None:
-        """Update VRAM monitoring and return suggested batch size adjustment."""
+    def update_vram_monitoring(self) -> tuple[int | None, int | None]:
+        """Update VRAM monitoring and return suggested (batch_size_adjustment, lq_size_adjustment)."""
         if not self.enabled:
-            return None
+            return None, None
 
         if torch.cuda.is_available():
             # Get current VRAM usage
@@ -322,6 +335,8 @@ class DynamicBatchSizeOptimizer(TrainingAutomationBase):
             total_memory = torch.cuda.get_device_properties(0).total_memory
             current_usage_ratio = current_memory / total_memory
 
+            # Update peak VRAM tracking
+            self.peak_vram_usage = max(self.peak_vram_usage, current_usage_ratio)
             self.vram_history.append(current_usage_ratio)
 
             # Check for OOM detection (usually handled by exception, but monitor anyway)
@@ -333,69 +348,125 @@ class DynamicBatchSizeOptimizer(TrainingAutomationBase):
             # Only adjust every adjustment_frequency iterations to avoid thrashing
             if self.adjustment_cooldown > 0:
                 self.adjustment_cooldown -= 1
-                return None
+                return None, None
 
-            # Calculate suggested batch size adjustment
-            suggested_adjustment = self._calculate_batch_adjustment(current_usage_ratio)
+            # Calculate suggested adjustments using priority system
+            batch_adjustment, lq_adjustment = self._calculate_dual_adjustment(
+                current_usage_ratio
+            )
 
-            if suggested_adjustment != 0:
+            if batch_adjustment != 0 or lq_adjustment != 0:
                 self.adjustment_cooldown = self.adjustment_frequency
-                return suggested_adjustment
+                return batch_adjustment, lq_adjustment
 
-        return None
+        return None, None
 
-    def _calculate_batch_adjustment(self, current_usage_ratio: float) -> int:
-        """Calculate suggested batch size adjustment."""
-        if self.current_batch_size is None:
-            return 0
+    def _calculate_dual_adjustment(self, current_usage_ratio: float) -> tuple[int, int]:
+        """Calculate suggested adjustments with lq_size priority, then batch_size."""
+        if self.current_batch_size is None or self.current_lq_size is None:
+            return 0, 0
 
         target_usage = self.target_vram_usage
+        batch_adjustment = 0
+        lq_adjustment = 0
 
-        # If significantly under target, try to increase batch size
+        # If significantly under target, try to increase parameters
         if current_usage_ratio < target_usage - self.safety_margin:
-            if self.current_batch_size < self.max_batch_size:
-                # Calculate how much we can increase
-                available_memory_ratio = target_usage - current_usage_ratio
-                suggested_increase = min(
-                    2, int(available_memory_ratio / 0.1)
-                )  # Increase by 1-2
-                return suggested_increase
+            available_memory_ratio = target_usage - current_usage_ratio
 
-        # If significantly over target, decrease batch size
+            # PRIORITY 1: Increase lq_size first (better final metrics)
+            if (
+                self.current_lq_size < self.max_lq_size
+                and available_memory_ratio > 0.05
+            ):
+                suggested_lq_increase = min(
+                    2, int(available_memory_ratio / 0.05)
+                )  # Increase by 1-2 patch sizes
+                lq_adjustment = suggested_lq_increase
+
+            # PRIORITY 2: Then increase batch size if still under target
+            elif self.current_batch_size < self.max_batch_size:
+                remaining_memory = target_usage - current_usage_ratio
+                if (
+                    remaining_memory > 0.03
+                ):  # Only increase batch if substantial memory available
+                    suggested_batch_increase = min(
+                        2, int(remaining_memory / 0.1)
+                    )  # Increase by 1-2 batch sizes
+                    batch_adjustment = suggested_batch_increase
+
+        # If significantly over target, decrease parameters (reverse priority)
         elif current_usage_ratio > target_usage + self.safety_margin:
+            # PRIORITY 1: First decrease batch size (less impact on final metrics)
             if self.current_batch_size > self.min_batch_size:
-                # Aggressive decrease if way over target
                 if current_usage_ratio > target_usage + 0.1:
-                    return -2  # Decrease by 2
+                    batch_adjustment = -2  # Aggressive decrease
                 else:
-                    return -1  # Decrease by 1
+                    batch_adjustment = -1  # Conservative decrease
 
-        return 0
+            # PRIORITY 2: Then decrease lq_size if batch is already at minimum
+            elif self.current_lq_size > self.min_lq_size:
+                lq_adjustment = -1  # Decrease patch size
 
-    def set_current_batch_size(self, batch_size: int) -> None:
-        """Set the current batch size for monitoring."""
+        return batch_adjustment, lq_adjustment
+
+    def set_current_parameters(self, batch_size: int, lq_size: int) -> None:
+        """Set the current batch size and lq_size for monitoring."""
         self.current_batch_size = batch_size
+        self.current_lq_size = lq_size
 
-    def handle_oom_recovery(self, new_batch_size: int) -> None:
-        """Handle OOM recovery and adjust batch size."""
+    def set_target_parameters(self, batch_size: int, lq_size: int) -> None:
+        """Set the target batch size and lq_size for optimization."""
+        self.target_batch_size = batch_size
+        self.target_lq_size = lq_size
+
+    def handle_oom_recovery(self, new_batch_size: int, new_lq_size: int) -> None:
+        """Handle OOM recovery and adjust both batch size and lq_size."""
         self.oom_detected = True
         self.oom_recovery_count += 1
 
         logger.warning(
-            f"Automation {self.name}: OOM detected, adjusting batch size to {new_batch_size}"
+            f"Automation {self.name}: OOM detected, adjusting batch size to {new_batch_size} and lq_size to {new_lq_size}"
         )
 
-        # Reduce batch size more aggressively after OOM
+        # Reduce parameters more aggressively after OOM
         safe_batch_size = max(self.min_batch_size, new_batch_size // 2)
+        safe_lq_size = max(self.min_lq_size, new_lq_size // 2)
+
         self.current_batch_size = safe_batch_size
+        self.current_lq_size = safe_lq_size
 
         # Set longer cooldown after OOM
         self.adjustment_cooldown = self.adjustment_frequency * 2
 
-        # Record the adjustment
+        # Record the adjustments
         self.record_adjustment(
             "batch_size", new_batch_size, safe_batch_size, "OOM recovery"
         )
+        self.record_adjustment("lq_size", new_lq_size, safe_lq_size, "OOM recovery")
+
+    def get_peak_vram_usage(self) -> float:
+        """Get the peak VRAM usage during training."""
+        return self.peak_vram_usage
+
+    def get_vram_stats(self) -> dict[str, Any]:
+        """Get comprehensive VRAM statistics."""
+        if not self.vram_history:
+            return {"peak_usage": 0.0, "avg_usage": 0.0, "current_usage": 0.0}
+
+        current_usage = self.vram_history[-1] if self.vram_history else 0.0
+        avg_usage = sum(self.vram_history) / len(self.vram_history)
+
+        return {
+            "peak_usage": self.peak_vram_usage,
+            "avg_usage": avg_usage,
+            "current_usage": current_usage,
+            "target_usage": self.target_vram_usage,
+            "safety_margin": self.safety_margin,
+            "current_batch_size": self.current_batch_size,
+            "current_lq_size": self.current_lq_size,
+            "oom_recovery_count": self.oom_recovery_count,
+        }
 
 
 @AUTOMATION_REGISTRY.register()
@@ -422,6 +493,7 @@ class AdaptiveGradientClipping(TrainingAutomationBase):
         # State tracking - all auto-calibrated
         self.current_threshold = None
         self.gradient_history = deque(maxlen=100)
+        self.gradient_stats_history = deque(maxlen=100)
         self.adjustment_cooldown = 0
         self.exploding_gradient_count = 0
 
@@ -429,6 +501,7 @@ class AdaptiveGradientClipping(TrainingAutomationBase):
         self.auto_calibrated = False
         self.calibration_iterations = 0
         self.detected_architecture = None
+        self.monitoring_frequency = 10  # Check gradients every 10 iterations
         self.autonomous_bounds = {"min_threshold": 0.1, "max_threshold": 10.0}
 
         # Performance tracking
@@ -542,7 +615,6 @@ class AdaptiveGradientClipping(TrainingAutomationBase):
                 self._calibrate_for_simple_model()
 
             self.auto_calibrated = True
-            self.architecture_detected = True
 
             logger.info(
                 f"🤖 AdaptiveGradientClipping: Auto-calibration complete. "
@@ -866,11 +938,19 @@ class TrainingAutomationManager:
         """Get statistics from all automations."""
         stats = {}
         for name, automation in self.automations.items():
-            stats[name] = {
+            automation_stats = {
                 "enabled": automation.enabled,
                 "iteration": automation.iteration,
                 "adjustments": automation.adjustment_count,
             }
+
+            # Add VRAM-specific stats for DynamicBatchSizeOptimizer
+            if name == "DynamicBatchSizeOptimizer" and hasattr(
+                automation, "get_vram_stats"
+            ):
+                automation_stats["vram"] = automation.get_vram_stats()
+
+            stats[name] = automation_stats
         return stats
 
 
