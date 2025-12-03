@@ -1,10 +1,11 @@
 #########################################################################################
-# ParagonSR2 Realtime Auto-Optimized VRAM Management Config - FIDELITY OPTIMIZED
+# ParagonSR2 Pro Auto-Optimized VRAM Management Config - FIDELITY OPTIMIZED
 # Optimized for highest PSNR/SSIM metrics with pure reconstruction (no sharpening)
-# For RTX 3060 12GB: lq_size=128, batch=16, workers=8
-# For RTX 4090 24GB: lq_size=256, batch=32, workers=8
+# High-fidelity archival variant for benchmark-level restoration
+# For RTX 3080/4080 12GB: lq_size=128, batch=12, workers=8
+# For RTX 4090 24GB: lq_size=256, batch=24, workers=8
 #########################################################################################
-name: 2xParagonSR2_Realtime_AUTO_fidelity
+name: 2xParagonSR2_Pro_AUTO_fidelity
 scale: 2
 
 # VRAM MANAGEMENT SYSTEM
@@ -25,12 +26,12 @@ datasets:
     dataroot_gt: /home/phips/Documents/dataset/cc0/filtered_versions/cc0_c5_hr
     dataroot_lq: /home/phips/Documents/dataset/cc0/filtered_versions/cc0_c5_lr_x2
 
-    # METRIC-OPTIMIZED PARAMETERS for RTX 3060 12GB (Auto-VRAM managed)
-    # Aggressive settings for maximum PSNR/SSIM with lightweight realtime architecture
-    lq_size: 256                   # Large patches = better global context = higher metrics
-    batch_size_per_gpu: 32         # Large batch for training stability and convergence
+    # METRIC-OPTIMIZED PARAMETERS for RTX 3080 12GB (Auto-VRAM managed)
+    # Conservative base parameters so VRAM optimizer has room to increase
+    lq_size: 64                    # Starting patch size - VRAM optimizer will increase
+    batch_size_per_gpu: 4          # Starting batch size - VRAM optimizer will increase
     num_worker_per_gpu: 8          # Workers for efficient data loading
-    accum_iter: 1                  # No gradient accumulation needed for realtime
+    accum_iter: 1                  # No gradient accumulation needed
 
     use_hflip: true
     use_rot: true
@@ -42,10 +43,10 @@ datasets:
     dataroot_lq: /home/phips/Documents/dataset/cc0/val_lr_x2_bicubic_aa
 
 network_g:
-  type: paragonsr2_realtime
+  type: paragonsr2_pro
   # FIDELITY OPTIMIZATION: Pure reconstruction for highest PSNR/SSIM
   upsampler_alpha: 0.0          # No sharpening - pure reconstruction for metrics
-  detail_gain: 0.05             # Conservative detail enhancement
+  detail_gain: 0.12             # Higher detail enhancement for archival quality
   use_content_aware: false      # Zero overhead for maximum training speed
 
 path:
@@ -77,6 +78,7 @@ train:
 
   # TRAINING AUTOMATIONS
   training_automations:
+    enabled: true                    # Master enable for all automations
     intelligent_learning_rate_scheduler:
       enabled: true
 
@@ -84,11 +86,11 @@ train:
       enabled: true
       target_vram_usage: 0.85
       safety_margin: 0.05
-      adjustment_frequency: 100
-      min_batch_size: 2
-      max_batch_size: 64
-      min_lq_size: 32
-      max_lq_size: 256
+      adjustment_frequency: 25        # More responsive adjustments
+      min_batch_size: 2               # Very conservative minimum for largest model
+      max_batch_size: 24
+      min_lq_size: 64                 # Conservative minimum for quality
+      max_lq_size: 128
       vram_history_size: 50
 
     early_stopping:

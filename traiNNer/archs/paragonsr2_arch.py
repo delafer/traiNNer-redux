@@ -632,43 +632,61 @@ class ParagonSR2(nn.Module):
 
 
 @ARCH_REGISTRY.register()
-def paragonsr2_realtime(scale: int = 4, **kwargs) -> ParagonSR2:
+def paragonsr2_realtime(
+    scale: int = 4, upsampler_alpha: float = 0.35, **kwargs
+) -> ParagonSR2:
     """
     [Realtime Edition] - The 'Nano'
     Target: 1080p -> 4K Gaming/Anime @ 60fps.
     Hardware: iGPU, Mobile, Mid-range.
     Tech: 16ch, MBConv (NanoBlock), No Attention.
     """
+    # Ensure default is applied if not provided in kwargs
+    if "upsampler_alpha" in kwargs:
+        upsampler_alpha = kwargs.pop("upsampler_alpha")
+    else:
+        upsampler_alpha = 0.35  # Crisp base default
+
     return ParagonSR2(
         scale=scale,
         num_feat=16,
         num_groups=1,
         num_blocks=3,
         ffn_expansion=1.5,
-        upsampler_alpha=kwargs.get("upsampler_alpha", 0.35),  # Crisp base
-        detail_gain=0.05,
-        use_content_aware=False,  # Zero overhead
+        upsampler_alpha=upsampler_alpha,
+        detail_gain=kwargs.pop("detail_gain", 0.05),
+        use_content_aware=kwargs.pop("use_content_aware", False),  # Zero overhead
         block_type="nano",
         **kwargs,
     )
 
 
 @ARCH_REGISTRY.register()
-def paragonsr2_stream(scale: int = 4, **kwargs) -> ParagonSR2:
+def paragonsr2_stream(
+    scale: int = 4, upsampler_alpha: float = 0.0, **kwargs
+) -> ParagonSR2:
     """
     [Stream Edition] - The 'Tiny'
     Target: Compressed Video (YouTube/Twitch).
     Hardware: RTX 3050 / Laptops.
     Tech: 32ch, GateBlock, Wide Receptive Field (21), Alpha 0.
     """
+    # Ensure default is applied if not provided in kwargs
+    if "upsampler_alpha" in kwargs:
+        upsampler_alpha = kwargs.pop("upsampler_alpha")
+    else:
+        upsampler_alpha = 0.0  # No sharpening artifacts default
+
     return ParagonSR2(
         scale=scale,
         num_feat=32,
         num_groups=2,
         num_blocks=3,
-        upsampler_alpha=kwargs.get("upsampler_alpha", 0.0),  # No sharpening artifacts
-        detail_gain=0.1,
-        use_content_aware=True,  # Detect compression blocks
+        upsampler_alpha=upsampler_alpha,
+        detail_gain=kwargs.pop("detail_gain", 0.1),
+        use_content_aware=kwargs.pop(
+            "use_content_aware", True
+        ),  # Detect compression blocks
         block_type="gate",
         # Large kernel to see across macroblocks
         block_kwargs={"band_kernel_size": 21},
@@ -677,21 +695,29 @@ def paragonsr2_stream(scale: int = 4, **kwargs) -> ParagonSR2:
 
 
 @ARCH_REGISTRY.register()
-def paragonsr2_photo(scale: int = 4, **kwargs) -> ParagonSR2:
+def paragonsr2_photo(
+    scale: int = 4, upsampler_alpha: float = 0.4, **kwargs
+) -> ParagonSR2:
     """
     [Photo Edition] - The 'Base'
     Target: General Photography / Wallpapers.
     Hardware: RTX 3060 / 4060.
     Tech: 64ch, ParagonBlock, Attention, Content-Aware.
     """
+    # Ensure default is applied if not provided in kwargs
+    if "upsampler_alpha" in kwargs:
+        upsampler_alpha = kwargs.pop("upsampler_alpha")
+    else:
+        upsampler_alpha = 0.4  # Default photo balance
+
     return ParagonSR2(
         scale=scale,
         num_feat=64,
         num_groups=4,
         num_blocks=6,
-        upsampler_alpha=kwargs.get("upsampler_alpha", 0.4),
-        detail_gain=0.1,
-        use_content_aware=True,
+        upsampler_alpha=upsampler_alpha,
+        detail_gain=kwargs.pop("detail_gain", 0.1),
+        use_content_aware=kwargs.pop("use_content_aware", True),
         block_type="paragon",
         block_kwargs={"band_kernel_size": 11, "use_attention": True},
         **kwargs,
@@ -699,7 +725,9 @@ def paragonsr2_photo(scale: int = 4, **kwargs) -> ParagonSR2:
 
 
 @ARCH_REGISTRY.register()
-def paragonsr2_pro(scale: int = 4, **kwargs) -> ParagonSR2:
+def paragonsr2_pro(
+    scale: int = 4, upsampler_alpha: float = 0.6, **kwargs
+) -> ParagonSR2:
     """
     [Pro Edition] - The 'Large'
     Target: Archival Restoration / Benchmark Fidelity.
@@ -708,14 +736,20 @@ def paragonsr2_pro(scale: int = 4, **kwargs) -> ParagonSR2:
 
     Note: For benchmark metrics (PSNR), set upsampler_alpha=0.0 in training.
     """
+    # Ensure default is applied if not provided in kwargs
+    if "upsampler_alpha" in kwargs:
+        upsampler_alpha = kwargs.pop("upsampler_alpha")
+    else:
+        upsampler_alpha = 0.6  # Sharper start default
+
     return ParagonSR2(
         scale=scale,
         num_feat=96,
         num_groups=6,
         num_blocks=8,
-        upsampler_alpha=kwargs.get("upsampler_alpha", 0.6),  # Sharper start
-        detail_gain=0.15,
-        use_content_aware=True,
+        upsampler_alpha=upsampler_alpha,
+        detail_gain=kwargs.pop("detail_gain", 0.15),
+        use_content_aware=kwargs.pop("use_content_aware", True),
         block_type="paragon",
         block_kwargs={"band_kernel_size": 17, "use_attention": True},
         **kwargs,

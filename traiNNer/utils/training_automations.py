@@ -298,7 +298,9 @@ class DynamicBatchSizeOptimizer(TrainingAutomationBase):
         # Configuration
         self.target_vram_usage = config.get("target_vram_usage", 0.85)
         self.safety_margin = config.get("safety_margin", 0.05)
-        self.adjustment_frequency = config.get("adjustment_frequency", 100)
+        self.adjustment_frequency = config.get(
+            "adjustment_frequency", 25
+        )  # More responsive (was 100)
 
         # Batch size bounds
         self.min_batch_size = config.get("min_batch_size", 2)
@@ -390,51 +392,102 @@ class DynamicBatchSizeOptimizer(TrainingAutomationBase):
         batch_adjustment = 0
         lq_adjustment = 0
 
-        # If significantly under target, try to increase parameters
+        # Enhanced logging for debugging (reduced frequency to avoid spam)
+        if self.iteration % 50 == 0:
+            logger.info(
+                f"VRAM DEBUG: Current usage: {current_usage_ratio:.3f}, "
+                f"Target: {target_usage:.3f}, "
+                f"Safety margin: {self.safety_margin:.3f}, "
+                f"Current batch: {self.current_batch_size}, "
+                f"Current lq_size: {self.current_lq_size}"
+            )
+
+        # If significantly under target, try to increase parameters (MORE AGGRESSIVE)
         if current_usage_ratio < target_usage - self.safety_margin:
             available_memory_ratio = target_usage - current_usage_ratio
 
-            # PRIORITY 1: Increase lq_size first (better final metrics)
+            # PRIORITY 1: Increase lq_size first (better final metrics) - MORE AGGRESSIVE
             if self.current_lq_size < self.max_lq_size:
-                # More aggressive approach: increase lq_size when there's significant VRAM available
-                if available_memory_ratio > 0.05:  # More than 5% memory available
-                    # Calculate how much we can increase lq_size
+                # Much more aggressive: increase lq_size with even small memory available
+                if (
+                    available_memory_ratio > 0.02
+                ):  # Only 2% memory available needed (was 5%)
+                    # Calculate how much we can increase lq_size - more aggressive increases
                     suggested_lq_increase = min(
-                        4, max(1, int(available_memory_ratio / 0.1))
-                    )  # Increase by 1-4 patch sizes, more aggressive
-                    lq_adjustment = suggested_lq_increase
-                    logger.info(
-                        f"VRAM optimization: Available memory {available_memory_ratio:.3f}, "
-                        f"suggesting lq_size increase of +{suggested_lq_increase}"
+                        8, max(2, int(available_memory_ratio / 0.05))
+                    )  # Increase by 2-8 patch sizes (was 1-4)
+                    # Ensure we don't exceed max limits
+                    suggested_lq_increase = min(
+                        suggested_lq_increase, self.max_lq_size - self.current_lq_size
                     )
+
+                    if suggested_lq_increase > 0:
+                        lq_adjustment = suggested_lq_increase
+                        logger.info(
+                            f"🔄 VRAM OPTIMIZATION: Available memory {available_memory_ratio:.3f} ({available_memory_ratio * 100:.1f}%), "
+                            f"suggesting lq_size increase of +{suggested_lq_increase} "
+                            f"({self.current_lq_size} → {self.current_lq_size + suggested_lq_increase})"
+                        )
 
             # PRIORITY 2: Then increase batch size if lq_size is already at maximum
             elif self.current_batch_size < self.max_batch_size:
                 remaining_memory = target_usage - current_usage_ratio
-                if (
-                    remaining_memory > 0.02
-                ):  # More aggressive: increase batch if even 2% memory available
+                if remaining_memory > 0.01:  # Even 1% memory available (was 2%)
                     suggested_batch_increase = min(
-                        4, max(1, int(remaining_memory / 0.05))
-                    )  # Increase by 1-4 batch sizes
-                    batch_adjustment = suggested_batch_increase
-                    logger.info(
-                        f"VRAM optimization: Remaining memory {remaining_memory:.3f}, "
-                        f"suggesting batch_size increase of +{suggested_batch_increase}"
+                        8, max(2, int(remaining_memory / 0.03))
+                    )  # Increase by 2-8 batch sizes (was 1-4)
+                    # Ensure we don't exceed max limits
+                    suggested_batch_increase = min(
+                        suggested_batch_increase,
+                        self.max_batch_size - self.current_batch_size,
                     )
+
+                    if suggested_batch_increase > 0:
+                        batch_adjustment = suggested_batch_increase
+                        logger.info(
+                            f"🔄 VRAM OPTIMIZATION: Remaining memory {remaining_memory:.3f} ({remaining_memory * 100:.1f}%), "
+                            f"suggesting batch_size increase of +{suggested_batch_increase} "
+                            f"({self.current_batch_size} → {self.current_batch_size + suggested_batch_increase})"
+                        )
 
         # If significantly over target, decrease parameters (reverse priority)
         elif current_usage_ratio > target_usage + self.safety_margin:
             # PRIORITY 1: First decrease batch size (less impact on final metrics)
             if self.current_batch_size > self.min_batch_size:
                 if current_usage_ratio > target_usage + 0.1:
-                    batch_adjustment = -2  # Aggressive decrease
+                    batch_adjustment = -4  # More aggressive decrease (was -2)
                 else:
-                    batch_adjustment = -1  # Conservative decrease
+                    batch_adjustment = (
+                        -2
+                    )  # More conservative but still significant (was -1)
+
+                logger.info(
+                    f"🔄 VRAM OPTIMIZATION: High usage {current_usage_ratio:.3f}, "
+                    f"suggesting batch_size decrease of {batch_adjustment} "
+                    f"({self.current_batch_size} → {self.current_batch_size + batch_adjustment})"
+                )
 
             # PRIORITY 2: Then decrease lq_size if batch is already at minimum
             elif self.current_lq_size > self.min_lq_size:
-                lq_adjustment = -1  # Decrease patch size
+                if current_usage_ratio > target_usage + 0.15:
+                    lq_adjustment = -4  # More aggressive lq decrease
+                else:
+                    lq_adjustment = -2  # Conservative lq decrease (was -1)
+
+                logger.info(
+                    f"🔄 VRAM OPTIMIZATION: High usage {current_usage_ratio:.3f}, "
+                    f"suggesting lq_size decrease of {lq_adjustment} "
+                    f"({self.current_lq_size} → {self.current_lq_size + lq_adjustment})"
+                )
+
+        # Log final decision (only log adjustments, not "no adjustments" to reduce spam)
+        if batch_adjustment != 0 or lq_adjustment != 0:
+            logger.info(
+                f"🎯 VRAM OPTIMIZATION DECISION: "
+                f"Batch adjustment: {batch_adjustment:+d}, "
+                f"LQ adjustment: {lq_adjustment:+d}"
+            )
+        # Removed the "No adjustments needed" log to reduce spam
 
         return batch_adjustment, lq_adjustment
 

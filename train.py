@@ -398,8 +398,30 @@ def train_pipeline(root_path: str) -> None:
                 dynamic_dataloader_wrapper, dynamic_dataset_wrapper
             )
 
-            # Initialize automation parameters
+            # Initialize automation parameters with explicit validation
             model.set_automation_parameters(current_batch_size, current_lq_size)
+
+            # Verify automation parameters are correctly set
+            automation = model.training_automation_manager.automations.get(
+                "DynamicBatchSizeOptimizer"
+            )
+            if automation and automation.enabled:
+                logger.info(
+                    f"✅ VRAM Automation verification - "
+                    f"Config batch: {current_batch_size}, lq: {current_lq_size}, "
+                    f"Automation batch: {automation.current_batch_size}, "
+                    f"Automation lq: {automation.current_lq_size}"
+                )
+
+                # Initialize VRAM monitoring immediately if possible
+                if torch.cuda.is_available():
+                    initial_vram = (
+                        torch.cuda.memory_allocated()
+                        / torch.cuda.get_device_properties(0).total_memory
+                    )
+                    logger.info(
+                        f"🔥 Initial VRAM usage: {initial_vram:.3f} ({initial_vram * 100:.1f}%)"
+                    )
 
             logger.info(
                 f"Dynamic VRAM management initialized - "
@@ -470,6 +492,24 @@ def train_pipeline(root_path: str) -> None:
     gc.collect()
     torch.cuda.empty_cache()
 
+    # Early VRAM monitoring during warmup to ensure automation starts working
+    if (
+        hasattr(model, "training_automation_manager")
+        and model.training_automation_manager
+    ):
+        automation = model.training_automation_manager.automations.get(
+            "DynamicBatchSizeOptimizer"
+        )
+        if automation and automation.enabled:
+            # Trigger initial VRAM monitoring to establish baseline
+            initial_adjustments = model.update_automation_vram_monitoring()
+            if initial_adjustments:
+                batch_adj, lq_adj = initial_adjustments
+                logger.info(
+                    f"🚀 Early VRAM monitoring - Initial adjustments suggested: "
+                    f"Batch: {batch_adj:+d}, LQ: {lq_adj:+d}"
+                )
+
     logger.info("Start training from epoch: %d, iter: %d.", start_epoch, current_iter)
     data_timer, iter_timer = AvgTimer(), AvgTimer()
     start_time = time.time()
@@ -529,10 +569,10 @@ def train_pipeline(root_path: str) -> None:
                         # Update VRAM monitoring for batch size and lq_size optimization
                         adjustments = model.update_automation_vram_monitoring()
 
-                        # Debug VRAM automation status
+                        # Enhanced VRAM automation debugging - more frequent and detailed
                         if (
-                            current_iter % 100 == 0
-                        ):  # Log every 100 iterations for debugging
+                            current_iter % 25 == 0
+                        ):  # Log every 25 iterations for better monitoring
                             if (
                                 hasattr(model, "training_automation_manager")
                                 and model.training_automation_manager
@@ -543,24 +583,49 @@ def train_pipeline(root_path: str) -> None:
                                     )
                                 )
                                 if automation and automation.enabled:
-                                    logger.info(
-                                        f"DEBUG: VRAM automation enabled, current batch: {automation.current_batch_size}, current lq: {automation.current_lq_size}"
-                                    )
+                                    # Get current VRAM usage for debugging
+                                    if torch.cuda.is_available():
+                                        current_vram = (
+                                            torch.cuda.memory_allocated()
+                                            / torch.cuda.get_device_properties(
+                                                0
+                                            ).total_memory
+                                        )
+                                        logger.info(
+                                            f"🔍 VRAM DEBUG (iter {current_iter}): "
+                                            f"VRAM: {current_vram:.3f} ({current_vram * 100:.1f}%), "
+                                            f"Target: {automation.target_vram_usage:.3f} ({automation.target_vram_usage * 100:.1f}%), "
+                                            f"Current batch: {automation.current_batch_size}, "
+                                            f"Current lq: {automation.current_lq_size}, "
+                                            f"Min batch: {automation.min_batch_size}, "
+                                            f"Max batch: {automation.max_batch_size}, "
+                                            f"Min lq: {automation.min_lq_size}, "
+                                            f"Max lq: {automation.max_lq_size}"
+                                        )
+                                    else:
+                                        logger.info(
+                                            f"🔍 VRAM DEBUG (iter {current_iter}): "
+                                            f"CUDA not available, batch: {automation.current_batch_size}, lq: {automation.current_lq_size}"
+                                        )
                                 else:
                                     logger.info(
-                                        "DEBUG: VRAM automation not found or disabled"
+                                        f"🔍 VRAM DEBUG (iter {current_iter}): DynamicBatchSizeOptimizer not found or disabled"
                                     )
                             else:
                                 logger.info(
-                                    "DEBUG: No training automation manager found"
+                                    f"🔍 VRAM DEBUG (iter {current_iter}): No training automation manager found"
                                 )
 
                         if adjustments is not None:
                             batch_adjustment, lq_adjustment = adjustments
-                            if batch_adjustment != 0 or lq_adjustment != 0:
-                                logger.info(
-                                    f"Automation suggests adjustments - Batch size: {batch_adjustment:+d}, LQ size: {lq_adjustment:+d}"
-                                )
+                            if (
+                                batch_adjustment is not None
+                                and lq_adjustment is not None
+                            ):
+                                if batch_adjustment != 0 or lq_adjustment != 0:
+                                    logger.info(
+                                        f"Automation suggests adjustments - Batch size: {batch_adjustment:+d}, LQ size: {lq_adjustment:+d}"
+                                    )
                                 try:
                                     # Update batch size in options and apply to dynamic wrapper
                                     if batch_adjustment != 0:
