@@ -869,6 +869,11 @@ class BaseModel:
         if not self.training_automation_manager:
             return
 
+        # Import logging here to avoid issues
+        from traiNNer.utils import get_root_logger
+
+        logger = get_root_logger()
+
         automation = self.training_automation_manager.automations.get(
             "IntelligentLearningRateScheduler"
         )
@@ -909,8 +914,8 @@ class BaseModel:
 
         return should_stop, stop_reason
 
-    def update_automation_vram_monitoring(self) -> int | None:
-        """Update VRAM monitoring and return suggested batch size adjustment."""
+    def update_automation_vram_monitoring(self) -> tuple[int, int] | None:
+        """Update VRAM monitoring and return suggested batch size and lq_size adjustments."""
         if not self.training_automation_manager:
             return None
 
@@ -956,7 +961,9 @@ class BaseModel:
             return self.training_automation_manager.get_automation_stats()
         return {}
 
-    def handle_automation_oom_recovery(self, new_batch_size: int) -> None:
+    def handle_automation_oom_recovery(
+        self, new_batch_size: int, new_lq_size: int
+    ) -> None:
         """Handle OOM recovery through automation."""
         if not self.training_automation_manager:
             return
@@ -965,7 +972,7 @@ class BaseModel:
             "DynamicBatchSizeOptimizer"
         )
         if automation and automation.enabled:
-            automation.handle_oom_recovery(new_batch_size)
+            automation.handle_oom_recovery(new_batch_size, new_lq_size)
 
     def set_automation_batch_size(self, batch_size: int) -> None:
         """Set current batch size for automation monitoring."""
@@ -976,4 +983,42 @@ class BaseModel:
             "DynamicBatchSizeOptimizer"
         )
         if automation and automation.enabled:
-            automation.set_current_batch_size(batch_size)
+            # Set both batch size and lq_size (use current lq_size if available)
+            current_lq_size = (
+                automation.current_lq_size if automation.current_lq_size else 128
+            )
+            automation.set_current_parameters(batch_size, current_lq_size)
+
+    def set_automation_parameters(self, batch_size: int, lq_size: int) -> None:
+        """Set current batch size and lq_size for automation monitoring."""
+        if not self.training_automation_manager:
+            return
+
+        automation = self.training_automation_manager.automations.get(
+            "DynamicBatchSizeOptimizer"
+        )
+        if automation and automation.enabled:
+            automation.set_current_parameters(batch_size, lq_size)
+
+    def set_dynamic_wrappers(
+        self, dynamic_dataloader=None, dynamic_dataset=None
+    ) -> None:
+        """Set dynamic dataloader and dataset wrappers for real-time VRAM management."""
+        if not self.training_automation_manager:
+            return
+
+        # Import logging here to avoid issues
+        from traiNNer.utils import get_root_logger
+
+        logger = get_root_logger()
+
+        automation = self.training_automation_manager.automations.get(
+            "DynamicBatchSizeOptimizer"
+        )
+        if automation and automation.enabled:
+            automation.set_dynamic_wrappers(dynamic_dataloader, dynamic_dataset)
+            logger.info(
+                f"BaseModel: Dynamic wrappers set for VRAM management - "
+                f"Dataloader: {dynamic_dataloader is not None}, "
+                f"Dataset: {dynamic_dataset is not None}"
+            )

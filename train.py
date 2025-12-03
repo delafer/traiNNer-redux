@@ -360,14 +360,60 @@ def train_pipeline(root_path: str) -> None:
     # create model
     model = build_model(opt)
 
-    # Initialize automation batch size tracking
+    # Initialize dynamic wrappers for VRAM management
+    dynamic_dataloader_wrapper = None
+    dynamic_dataset_wrapper = None
+
     if (
         hasattr(model, "training_automation_manager")
         and model.training_automation_manager
     ):
-        current_batch_size = opt.datasets["train"].batch_size_per_gpu
-        model.set_automation_batch_size(current_batch_size)
-        logger.info(f"Automation batch size initialized: {current_batch_size}")
+        # Create dynamic dataloader wrapper if VRAM management is enabled
+        automation = model.training_automation_manager.automations.get(
+            "DynamicBatchSizeOptimizer"
+        )
+        if automation and automation.enabled:
+            from traiNNer.data.dynamic_dataloader_wrapper import (
+                create_dynamic_dataloader,
+                patch_dataset_for_dynamic_updates,
+            )
+
+            current_batch_size = opt.datasets["train"].batch_size_per_gpu or 8
+            current_lq_size = opt.datasets["train"].lq_size or 128
+
+            # Create dynamic dataloader wrapper
+            dynamic_dataloader_wrapper = create_dynamic_dataloader(
+                train_loader,
+                current_batch_size,
+                update_callback=lambda bs: logger.debug(f"Batch size updated to: {bs}"),
+            )
+
+            # Create dynamic dataset wrapper
+            dynamic_dataset_wrapper = patch_dataset_for_dynamic_updates(
+                train_loader.dataset
+            )
+
+            # Set dynamic wrappers in the model for VRAM management
+            model.set_dynamic_wrappers(
+                dynamic_dataloader_wrapper, dynamic_dataset_wrapper
+            )
+
+            # Initialize automation parameters
+            model.set_automation_parameters(current_batch_size, current_lq_size)
+
+            logger.info(
+                f"Dynamic VRAM management initialized - "
+                f"Batch: {current_batch_size}, LQ: {current_lq_size}, "
+                f"Dynamic Wrappers: Enabled"
+            )
+        else:
+            # Fallback to traditional automation without dynamic wrappers
+            current_batch_size = opt.datasets["train"].batch_size_per_gpu or 8
+            current_lq_size = opt.datasets["train"].lq_size or 128
+            model.set_automation_parameters(current_batch_size, current_lq_size)
+            logger.info(
+                f"Automation parameters initialized - Batch: {current_batch_size}, LQ: {current_lq_size}"
+            )
 
     if model.with_metrics:
         if not any(
@@ -480,13 +526,92 @@ def train_pipeline(root_path: str) -> None:
 
                     # Update training automations with training progress
                     if apply_gradient:
-                        # Update VRAM monitoring for batch size optimization
-                        batch_adjustment = model.update_automation_vram_monitoring()
-                        if batch_adjustment is not None and batch_adjustment != 0:
-                            logger.info(
-                                f"Automation suggests batch size adjustment: {batch_adjustment}"
-                            )
-                            # Note: Actual batch size adjustment would need dataloader reconfiguration
+                        # Update VRAM monitoring for batch size and lq_size optimization
+                        adjustments = model.update_automation_vram_monitoring()
+
+                        # Debug VRAM automation status
+                        if (
+                            current_iter % 100 == 0
+                        ):  # Log every 100 iterations for debugging
+                            if (
+                                hasattr(model, "training_automation_manager")
+                                and model.training_automation_manager
+                            ):
+                                automation = (
+                                    model.training_automation_manager.automations.get(
+                                        "DynamicBatchSizeOptimizer"
+                                    )
+                                )
+                                if automation and automation.enabled:
+                                    logger.info(
+                                        f"DEBUG: VRAM automation enabled, current batch: {automation.current_batch_size}, current lq: {automation.current_lq_size}"
+                                    )
+                                else:
+                                    logger.info(
+                                        "DEBUG: VRAM automation not found or disabled"
+                                    )
+                            else:
+                                logger.info(
+                                    "DEBUG: No training automation manager found"
+                                )
+
+                        if adjustments is not None:
+                            batch_adjustment, lq_adjustment = adjustments
+                            if batch_adjustment != 0 or lq_adjustment != 0:
+                                logger.info(
+                                    f"Automation suggests adjustments - Batch size: {batch_adjustment:+d}, LQ size: {lq_adjustment:+d}"
+                                )
+                                try:
+                                    # Update batch size in options and apply to dynamic wrapper
+                                    if batch_adjustment != 0:
+                                        current_batch = opt.datasets[
+                                            "train"
+                                        ].batch_size_per_gpu
+                                        new_batch = max(
+                                            1, current_batch + batch_adjustment
+                                        )
+                                        opt.datasets[
+                                            "train"
+                                        ].batch_size_per_gpu = new_batch
+                                        model.set_automation_batch_size(new_batch)
+
+                                        # Apply to dynamic wrapper if available
+                                        if dynamic_dataloader_wrapper:
+                                            dynamic_dataloader_wrapper.set_batch_size(
+                                                new_batch
+                                            )
+
+                                        logger.info(
+                                            f"Batch size adjusted: {current_batch} → {new_batch}"
+                                        )
+
+                                    # Update lq_size in options and apply to dynamic wrapper
+                                    if lq_adjustment != 0:
+                                        current_lq = opt.datasets["train"].lq_size
+                                        new_lq = max(32, current_lq + lq_adjustment)
+                                        # Update corresponding gt_size
+                                        opt.datasets["train"].lq_size = new_lq
+                                        opt.datasets["train"].gt_size = (
+                                            new_lq * opt.scale
+                                        )
+
+                                        # Apply to dynamic wrapper if available
+                                        if dynamic_dataset_wrapper and hasattr(
+                                            dynamic_dataset_wrapper,
+                                            "set_dynamic_gt_size",
+                                        ):
+                                            dynamic_dataset_wrapper.set_dynamic_gt_size(
+                                                new_lq * opt.scale
+                                            )
+
+                                        logger.info(
+                                            f"LQ size adjusted: {current_lq} → {new_lq} (GT: {new_lq * opt.scale})"
+                                        )
+
+                                except Exception as e:
+                                    logger.warning(
+                                        f"Failed to apply automation adjustments: {e}"
+                                    )
 
                 except RuntimeError as e:
                     # Check to see if its actually the CUDA out of memory error
@@ -505,7 +630,22 @@ def train_pipeline(root_path: str) -> None:
                             ].batch_size_per_gpu
                             # Suggest reduced batch size (automation will handle actual adjustment)
                             suggested_batch_size = max(1, current_batch_size // 2)
-                            model.handle_automation_oom_recovery(suggested_batch_size)
+                            suggested_lq_size = opt.datasets["train"].lq_size // 2
+                            model.handle_automation_oom_recovery(
+                                suggested_batch_size, suggested_lq_size
+                            )
+
+                            # Apply OOM recovery to dynamic wrappers
+                            if dynamic_dataloader_wrapper:
+                                dynamic_dataloader_wrapper.set_batch_size(
+                                    suggested_batch_size
+                                )
+                            if dynamic_dataset_wrapper and hasattr(
+                                dynamic_dataset_wrapper, "set_dynamic_gt_size"
+                            ):
+                                dynamic_dataset_wrapper.set_dynamic_gt_size(
+                                    suggested_lq_size * opt.scale
+                                )
 
                         # Collect garbage (clear VRAM)
                         raise RuntimeError(

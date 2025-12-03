@@ -19,6 +19,7 @@ from traiNNer.utils.misc import free_space_gb_str
 from traiNNer.utils.redux_options import ReduxOptions
 
 initialized_logger = {}
+logger_log_file = {}
 
 
 class AvgTimer:
@@ -830,30 +831,33 @@ def get_root_logger(
         logging.Logger: The root logger.
     """
     logger = logging.getLogger(logger_name)
-    # if the logger has been initialized, just return it
-    if logger_name in initialized_logger:
-        return logger
-    format_str = "%(asctime)s %(levelname)s: %(message)s"
-    rich_handler = RichHandler(
-        markup=True, rich_tracebacks=True, omit_repeated_times=False
-    )
-    rich_handler.setLevel(log_level_console)
-    logger.addHandler(rich_handler)
-    logger.propagate = False
+
+    # Check if this is a new logger initialization or an update to an existing one
+    is_new_logger = logger_name not in initialized_logger
 
     rank, _ = get_dist_info()
     logger.info(f"🔍 Logger initialization: rank={rank}, log_file={log_file}")
 
-    if rank != 0:
-        logger.setLevel("ERROR")
-        logger.info(
-            f"📝 Logger: Non-master process (rank {rank}), console-only logging"
+    # Always set up basic console logging for new loggers
+    if is_new_logger:
+        format_str = "%(asctime)s %(levelname)s: %(message)s"
+        rich_handler = RichHandler(
+            markup=True, rich_tracebacks=True, omit_repeated_times=False
         )
-    else:
-        logger.setLevel(log_level_file)
-        logger.info(
-            f"📝 Logger: Master process, allowing file logging at level {log_level_file}"
-        )
+        rich_handler.setLevel(log_level_console)
+        logger.addHandler(rich_handler)
+        logger.propagate = False
+
+        if rank != 0:
+            logger.setLevel("ERROR")
+            logger.info(
+                f"📝 Logger: Non-master process (rank {rank}), console-only logging"
+            )
+        else:
+            logger.setLevel(log_level_file)
+            logger.info(
+                f"📝 Logger: Master process, allowing file logging at level {log_level_file}"
+            )
 
         if log_file is not None:
             # Try multiple approaches to create log file
@@ -871,9 +875,24 @@ def get_root_logger(
                     logger.warning(
                         "📝 Logger: All file logging attempts failed, console-only mode"
                     )
+            else:
+                # Store the log file info for future reference
+                logger_log_file[logger_name] = log_file
         else:
             logger.info("📝 Logger: No log_file specified, console-only logging")
-    initialized_logger[logger_name] = True
+
+        initialized_logger[logger_name] = True
+    # Logger already exists, but check if we need to add file logging
+    elif log_file is not None and logger_name not in logger_log_file:
+        logger.info("📝 Logger: Adding file logging to existing logger")
+        format_str = "%(asctime)s %(levelname)s: %(message)s"
+        success = _setup_file_logging(logger, log_file, format_str, log_level_file)
+        if success:
+            logger_log_file[logger_name] = log_file
+            logger.info("📝 Logger: File logging successfully added to existing logger")
+        else:
+            logger.warning("📝 Logger: Failed to add file logging to existing logger")
+
     return logger
 
 
@@ -895,8 +914,8 @@ def _validate_and_sanitize_path(file_path: str) -> tuple[bool, str, str]:
     except Exception as e:
         return False, "", f"Path normalization failed: {e}"
 
-    # Check for path traversal attacks
-    if ".." in normalized_path or normalized_path.startswith("/"):
+    # Check for path traversal attacks (but allow absolute paths)
+    if ".." in normalized_path:
         return False, "", "Invalid path: potential security risk detected"
 
     # Check path length (common filesystem limits)

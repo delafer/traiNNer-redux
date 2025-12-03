@@ -97,9 +97,9 @@ def test_enhanced_vram_optimizer() -> bool:
     optimizer.peak_vram_usage = 0.89
     vram_stats = optimizer.get_vram_stats()
     print(f"   Peak usage: {vram_stats['peak_usage']:.1%}")
-    print(f"   Current batch_size: {vram_stats['current_batch_size']}")
-    print(f"   Current lq_size: {vram_stats['current_lq_size']}")
-    print(f"   OOM recoveries: {vram_stats['oom_recovery_count']}")
+    print(f"   Current batch_size: {vram_stats.get('current_batch_size', 'N/A')}")
+    print(f"   Current lq_size: {vram_stats.get('current_lq_size', 'N/A')}")
+    print(f"   OOM recoveries: {vram_stats.get('oom_recovery_count', 0)}")
 
     # Test OOM recovery
     print("\n🚨 Testing OOM Recovery:")

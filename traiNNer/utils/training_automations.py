@@ -324,6 +324,10 @@ class DynamicBatchSizeOptimizer(TrainingAutomationBase):
         self.oom_recovery_count = 0
         self.vram_manager = None  # Will be set during training
 
+        # Dynamic wrappers for real-time updates
+        self.dynamic_dataloader = None
+        self.dynamic_dataset = None
+
     def update_vram_monitoring(self) -> tuple[int | None, int | None]:
         """Update VRAM monitoring and return suggested (batch_size_adjustment, lq_size_adjustment)."""
         if not self.enabled:
@@ -339,6 +343,12 @@ class DynamicBatchSizeOptimizer(TrainingAutomationBase):
             self.peak_vram_usage = max(self.peak_vram_usage, current_usage_ratio)
             self.vram_history.append(current_usage_ratio)
 
+            # Always log VRAM status for debugging (but not too frequently)
+            if self.iteration % 50 == 0:
+                logger.info(
+                    f"Automation {self.name}: VRAM usage {current_usage_ratio:.4f} ({current_memory / 1e9:.2f}GB/{total_memory / 1e9:.2f}GB), target: {self.target_vram_usage:.2f}"
+                )
+
             # Check for OOM detection (usually handled by exception, but monitor anyway)
             if current_usage_ratio > 0.95:
                 logger.warning(
@@ -350,6 +360,13 @@ class DynamicBatchSizeOptimizer(TrainingAutomationBase):
                 self.adjustment_cooldown -= 1
                 return None, None
 
+            # Check if parameters are initialized
+            if self.current_batch_size is None or self.current_lq_size is None:
+                logger.warning(
+                    f"Automation {self.name}: Parameters not initialized - batch: {self.current_batch_size}, lq: {self.current_lq_size}"
+                )
+                return None, None
+
             # Calculate suggested adjustments using priority system
             batch_adjustment, lq_adjustment = self._calculate_dual_adjustment(
                 current_usage_ratio
@@ -357,6 +374,9 @@ class DynamicBatchSizeOptimizer(TrainingAutomationBase):
 
             if batch_adjustment != 0 or lq_adjustment != 0:
                 self.adjustment_cooldown = self.adjustment_frequency
+                logger.info(
+                    f"Automation {self.name}: Suggested adjustments - Batch: {batch_adjustment:+d}, LQ: {lq_adjustment:+d}"
+                )
                 return batch_adjustment, lq_adjustment
 
         return None, None
@@ -375,25 +395,33 @@ class DynamicBatchSizeOptimizer(TrainingAutomationBase):
             available_memory_ratio = target_usage - current_usage_ratio
 
             # PRIORITY 1: Increase lq_size first (better final metrics)
-            if (
-                self.current_lq_size < self.max_lq_size
-                and available_memory_ratio > 0.05
-            ):
-                suggested_lq_increase = min(
-                    2, int(available_memory_ratio / 0.05)
-                )  # Increase by 1-2 patch sizes
-                lq_adjustment = suggested_lq_increase
+            if self.current_lq_size < self.max_lq_size:
+                # More aggressive approach: increase lq_size when there's significant VRAM available
+                if available_memory_ratio > 0.05:  # More than 5% memory available
+                    # Calculate how much we can increase lq_size
+                    suggested_lq_increase = min(
+                        4, max(1, int(available_memory_ratio / 0.1))
+                    )  # Increase by 1-4 patch sizes, more aggressive
+                    lq_adjustment = suggested_lq_increase
+                    logger.info(
+                        f"VRAM optimization: Available memory {available_memory_ratio:.3f}, "
+                        f"suggesting lq_size increase of +{suggested_lq_increase}"
+                    )
 
-            # PRIORITY 2: Then increase batch size if still under target
+            # PRIORITY 2: Then increase batch size if lq_size is already at maximum
             elif self.current_batch_size < self.max_batch_size:
                 remaining_memory = target_usage - current_usage_ratio
                 if (
-                    remaining_memory > 0.03
-                ):  # Only increase batch if substantial memory available
+                    remaining_memory > 0.02
+                ):  # More aggressive: increase batch if even 2% memory available
                     suggested_batch_increase = min(
-                        2, int(remaining_memory / 0.1)
-                    )  # Increase by 1-2 batch sizes
+                        4, max(1, int(remaining_memory / 0.05))
+                    )  # Increase by 1-4 batch sizes
                     batch_adjustment = suggested_batch_increase
+                    logger.info(
+                        f"VRAM optimization: Remaining memory {remaining_memory:.3f}, "
+                        f"suggesting batch_size increase of +{suggested_batch_increase}"
+                    )
 
         # If significantly over target, decrease parameters (reverse priority)
         elif current_usage_ratio > target_usage + self.safety_margin:
@@ -414,6 +442,12 @@ class DynamicBatchSizeOptimizer(TrainingAutomationBase):
         """Set the current batch size and lq_size for monitoring."""
         self.current_batch_size = batch_size
         self.current_lq_size = lq_size
+
+        # Log parameter initialization for debugging
+        if self.enabled:
+            logger.info(
+                f"Automation {self.name}: Parameters initialized - Batch: {batch_size}, LQ: {lq_size}"
+            )
 
     def set_target_parameters(self, batch_size: int, lq_size: int) -> None:
         """Set the target batch size and lq_size for optimization."""
@@ -439,11 +473,30 @@ class DynamicBatchSizeOptimizer(TrainingAutomationBase):
         # Set longer cooldown after OOM
         self.adjustment_cooldown = self.adjustment_frequency * 2
 
+        # Apply adjustments through dynamic wrappers if available
+        if hasattr(self, "dynamic_dataloader") and self.dynamic_dataloader:
+            self.dynamic_dataloader.set_batch_size(safe_batch_size)
+        if hasattr(self, "dynamic_dataset") and self.dynamic_dataset:
+            self.dynamic_dataset.set_gt_size(safe_lq_size * 2)  # Assuming 2x scale
+
         # Record the adjustments
         self.record_adjustment(
             "batch_size", new_batch_size, safe_batch_size, "OOM recovery"
         )
         self.record_adjustment("lq_size", new_lq_size, safe_lq_size, "OOM recovery")
+
+    def set_dynamic_wrappers(
+        self, dynamic_dataloader=None, dynamic_dataset=None
+    ) -> None:
+        """Set dynamic wrappers for real-time parameter updates."""
+        self.dynamic_dataloader = dynamic_dataloader
+        self.dynamic_dataset = dynamic_dataset
+
+        logger.info(
+            f"Automation {self.name}: Dynamic wrappers set - "
+            f"Dataloader: {dynamic_dataloader is not None}, "
+            f"Dataset: {dynamic_dataset is not None}"
+        )
 
     def get_peak_vram_usage(self) -> float:
         """Get the peak VRAM usage during training."""
