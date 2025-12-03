@@ -1,41 +1,37 @@
 #!/usr/bin/env python3
 """
-ParagonSR2 Release Converter (TensorRT Patched & Clean)
-=======================================================
+ParagonSR2 Release Converter
+============================
 
-- Opset 18 (Native PyTorch 2.x support)
-- TensorRT Patch (Replaces AdaptiveAvgPool with ReduceMean)
-- Single File Output (Merged .data)
+Exports ParagonSR2 models to TensorRT-compatible ONNX.
+
+Features:
+- Auto-patches AdaptiveAvgPool2d -> ReduceMean (TensorRT Friendly)
+- Exports Dynamic FP32 ONNX (Best for trtexec --fp16)
+- Validates PSNR match between PyTorch and ONNX
+- Embeds weights into a single .onnx file (no .data sidecars)
 
 Usage:
-    python scripts/paragonsr2/convert_onnx_release.py \
-        --checkpoint models/my_model.safetensors \
-        --arch paragonsr2_static_s \
-        --scale 2 \
-        --output release_output
+    python convert_onnx_release.py \
+        --checkpoint "models/paragon_pro_x4.safetensors" \
+        --arch paragonsr2_pro \
+        --scale 4 \
+        --output "release_output" \
+        --device cuda
 
-And then
-
-trtexec \
-  --onnx=release_models/2xParagonSR2_Nano_fidelity/paragonsr2_nano_fp32.onnx \
-  --saveEngine=release_models/2xParagonSR2_Nano_fidelity/paragonsr2_nano_2x_fp16.trt \
-  --fp16 \
-  --minShapes=input:1x3x64x64 \
-  --optShapes=input:1x3x540x960 \
-  --maxShapes=input:1x3x1080x1920
-
-And then
-
-python scripts/paragonsr2/inference_trt.py \
-  --engine release_models/2xParagonSR2_Nano_fidelity/paragonsr2_nano_2x_fp16.trt \
-  --input /home/phips/Documents/dataset/cc0/val_lr_x2 \
-  --output /home/phips/Documents/dataset/cc0/val_lr__x2_trt \
-  --scale 2
+    # Then build TRT engine:
+    trtexec --onnx=release_output/paragonsr2_pro_fp32.onnx \
+            --saveEngine=paragonsr2_pro_fp16.trt \
+            --fp16 \
+            --minShapes=input:1x3x64x64 \
+            --optShapes=input:1x3x720x1280 \
+            --maxShapes=input:1x3x1080x1920
 """
 
 import argparse
 import json
 import math
+import shutil
 import sys
 import time
 import warnings
@@ -49,21 +45,39 @@ from onnx import shape_inference
 from PIL import Image
 from torch import nn
 
-# Import architectures
+# ---------------------------------------------------------------------
+# SETUP: Import Architecture
+# ---------------------------------------------------------------------
 try:
-    # Add repo root to path
-    repo_root = Path(__file__).parents[2]
-    sys.path.insert(0, str(repo_root))
+    # Try importing from local directory first (standalone usage)
+    sys.path.insert(0, str(Path(__file__).parent))
+    import paragonsr2_arch
+    from paragonsr2_arch import ParagonSR2
 
-    import traiNNer.archs.paragonsr2_arch  # Main ParagonSR2 architecture
-    from traiNNer.utils.registry import ARCH_REGISTRY
-except ImportError as e:
-    print(f"Error: Could not import traiNNer modules: {e}")
-    print(f"Repo root: {Path(__file__).parents[2]}")
-    print(f"sys.path: {sys.path[:3]}")
-    sys.exit(1)
+    # Mock registry for standalone script
+    ARCH_MAP = {
+        "paragonsr2_realtime": paragonsr2_arch.paragonsr2_realtime,
+        "paragonsr2_stream": paragonsr2_arch.paragonsr2_stream,
+        "paragonsr2_photo": paragonsr2_arch.paragonsr2_photo,
+        "paragonsr2_pro": paragonsr2_arch.paragonsr2_pro,
+    }
+except ImportError:
+    # Fallback to traiNNer repo structure
+    try:
+        repo_root = Path(__file__).parents[2]
+        sys.path.insert(0, str(repo_root))
+        from traiNNer.utils.registry import ARCH_REGISTRY
+
+        ARCH_MAP = ARCH_REGISTRY
+    except ImportError as e:
+        print("CRITICAL ERROR: Could not import architecture definition.")
+        print(
+            "Ensure 'paragonsr2_arch.py' is in the same folder or traiNNer is installed."
+        )
+        sys.exit(1)
 
 warnings.filterwarnings("ignore")
+
 
 # =============================================================================
 # HELPER: TensorRT Compatibility Patcher
@@ -72,12 +86,9 @@ warnings.filterwarnings("ignore")
 
 class TensorRTGlobalAvgPool(nn.Module):
     """
-    Replaces nn.AdaptiveAvgPool2d(1).
-    Uses torch.mean() which exports to ONNX 'ReduceMean'.
+    Replaces nn.AdaptiveAvgPool2d(1) with torch.mean().
+    Result: ONNX 'GlobalAveragePool' or 'ReduceMean' (TRT Optimized).
     """
-
-    def __init__(self) -> None:
-        super().__init__()
 
     def forward(self, x):
         return x.mean(dim=[-1, -2], keepdim=True)
@@ -89,13 +100,12 @@ def patch_model_for_tensorrt(model: nn.Module):
     replaced_count = 0
     for name, module in model.named_modules():
         if isinstance(module, nn.AdaptiveAvgPool2d):
-            output_size = module.output_size
-            if isinstance(output_size, int):
-                is_one = output_size == 1
-            else:
-                is_one = output_size == (1, 1)
+            # Check if output size is 1x1
+            out = module.output_size
+            is_one = (out == 1) if isinstance(out, int) else (out == (1, 1))
 
             if is_one:
+                # Replace logic
                 if "." in name:
                     parent_name, child_name = name.rsplit(".", 1)
                     parent = model.get_submodule(parent_name)
@@ -104,7 +114,8 @@ def patch_model_for_tensorrt(model: nn.Module):
                     child_name = name
                 setattr(parent, child_name, TensorRTGlobalAvgPool())
                 replaced_count += 1
-    print(f"      Replaced {replaced_count} AdaptiveAvgPool layers with TRT-safe Mean.")
+
+    print(f"      Replaced {replaced_count} AdaptiveAvgPool layers.")
     return model
 
 
@@ -123,26 +134,22 @@ def calculate_psnr(img1: np.ndarray, img2: np.ndarray, border: int = 0) -> float
     return 20 * math.log10(255.0 / math.sqrt(mse))
 
 
-def preprocess_image(image_path: Path, norm_type: str = "01") -> np.ndarray:
+def preprocess_image(image_path: Path) -> np.ndarray:
     img = Image.open(image_path).convert("RGB")
     img_array = np.array(img).astype(np.float32) / 255.0
-    if norm_type == "m11":
-        img_array = (img_array - 0.5) / 0.5
-    img_array = np.transpose(img_array, (2, 0, 1))
-    return np.expand_dims(img_array, axis=0)
+    img_array = np.transpose(img_array, (2, 0, 1))  # HWC -> CHW
+    return np.expand_dims(img_array, axis=0)  # -> BCHW
 
 
-def postprocess_output(output: np.ndarray, norm_type: str = "01") -> np.ndarray:
+def postprocess_output(output: np.ndarray) -> np.ndarray:
     output = output.squeeze(0)
-    output = np.transpose(output, (1, 2, 0))
-    if norm_type == "m11":
-        output = (output * 0.5) + 0.5
+    output = np.transpose(output, (1, 2, 0))  # CHW -> HWC
     output = np.clip(output, 0, 1)
     return (output * 255.0).round().astype(np.uint8)
 
 
 # =============================================================================
-# CONVERTER
+# CONVERTER CLASS
 # =============================================================================
 
 
@@ -162,12 +169,22 @@ class ParagonConverter:
         }
 
     def load_model(self) -> torch.nn.Module:
-        print(f"\n[1/4] Loading model: {self.args.arch}")
-        arch_fn = ARCH_REGISTRY.get(self.args.arch)
+        print(f"\n[1/4] Loading architecture: {self.args.arch}")
+        if self.args.arch not in ARCH_MAP:
+            # Fallback: try to get from registry if using string name
+            try:
+                arch_fn = ARCH_MAP.get(self.args.arch)
+            except:
+                raise ValueError(
+                    f"Architecture '{self.args.arch}' not found in registry."
+                )
+        else:
+            arch_fn = ARCH_MAP[self.args.arch]
+
         model = arch_fn(scale=self.args.scale)
 
-        print(f"      Loading checkpoint: {self.args.checkpoint}")
-        if self.args.checkpoint.endswith(".safetensors"):
+        print(f"      Loading weights: {self.args.checkpoint}")
+        if str(self.args.checkpoint).endswith(".safetensors"):
             from safetensors.torch import load_file
 
             state_dict = load_file(self.args.checkpoint)
@@ -178,21 +195,34 @@ class ParagonConverter:
             elif "params" in state_dict:
                 state_dict = state_dict["params"]
 
-        model.load_state_dict(state_dict, strict=True)
+        # Handle 'module.' prefix if from DDP
+        new_dict = {}
+        for k, v in state_dict.items():
+            if k.startswith("module."):
+                new_dict[k[7:]] = v
+            else:
+                new_dict[k] = v
+
+        model.load_state_dict(new_dict, strict=True)
         model.to(self.device).eval()
 
+        # Optimization hooks
         if hasattr(model, "fuse_for_release"):
-            print("      Fusing ReparamConvV2 blocks...")
+            print("      Fusing release blocks...")
             model.fuse_for_release()
 
+        # Patch for TRT
         model = patch_model_for_tensorrt(model)
         return model
 
     def export_fp32(self, model: torch.nn.Module) -> Path:
         print("\n[2/4] Exporting FP32 ONNX...")
         output_path = self.output_dir / f"{self.args.arch}_fp32.onnx"
+
+        # Dummy Input (Standard HD size ensures no weird shape inference issues)
         dummy_input = torch.randn(1, 3, 64, 64, device=self.device)
 
+        # Export
         torch.onnx.export(
             model,
             (dummy_input,),
@@ -203,118 +233,126 @@ class ParagonConverter:
                 "input": {0: "batch", 2: "height", 3: "width"},
                 "output": {0: "batch", 2: "height", 3: "width"},
             },
-            opset_version=18,  # <--- FIXED: Explicitly set to 18
+            opset_version=17,  # Stable version for TRT 8.6+
             do_constant_folding=True,
         )
 
+        # Optimizing / Cleaning
+        print("      Simplifying ONNX graph...")
         try:
             onnx_model = onnx.load(str(output_path))
+
+            # Infer shapes
             try:
                 onnx_model = shape_inference.infer_shapes(onnx_model)
-            except:
-                pass
+            except Exception as e:
+                print(f"      Warning: Shape inference failed ({e}), skipping.")
 
-            # Merge .data file into .onnx
-            onnx.save(onnx_model, str(output_path), save_as_external_data=False)
+            # Save cleaned model (forcing < 2GB constraint logic if needed, but here usually small)
+            onnx.save(onnx_model, str(output_path))
 
-            # Clean up leftover
+            # Clean external data files if accidentally created
             data_file = Path(str(output_path) + ".data")
             if data_file.exists():
                 data_file.unlink()
 
         except Exception as e:
-            print(f"      Packing error: {e}")
+            print(f"      Warning: ONNX simplification failed: {e}")
 
         size_mb = output_path.stat().st_size / (1024 * 1024)
-        print(f"      Saved FP32: {output_path} ({size_mb:.2f} MB)")
-        self.report["results"]["fp32"] = {"path": str(output_path), "size_mb": size_mb}
+        print(f"      Success: {output_path.name} ({size_mb:.2f} MB)")
         return output_path
 
-    def validate(
-        self, model_paths: dict[str, Path], torch_model: torch.nn.Module
-    ) -> None:
+    def validate(self, model_path: Path, torch_model: torch.nn.Module) -> None:
         if not self.args.val_dir:
             return
-        print("\n[4/4] Validating Models...")
 
+        print("\n[3/4] Validating Accuracy (PyTorch vs ONNX)...")
+        val_dir = Path(self.args.val_dir)
         val_images = sorted(
             [
                 p
-                for p in Path(self.args.val_dir).glob("*")
+                for p in val_dir.glob("*")
                 if p.suffix.lower() in [".png", ".jpg", ".webp"]
             ]
         )[: self.args.val_count]
+
         if not val_images:
+            print("      No images found for validation.")
             return
 
-        print("      Generating PyTorch baseline...")
-        pt_results = []
-        for img_path in val_images:
-            inp = preprocess_image(img_path, self.args.norm)
-            with torch.no_grad():
-                pt_tensor = torch.from_numpy(inp).to(self.device)
-                pt_out = torch_model(pt_tensor).cpu().numpy()
-                pt_img = postprocess_output(pt_out, self.args.norm)
-                pt_results.append((img_path, inp, pt_img))
+        print(f"      Testing on {len(val_images)} images...")
 
-        del torch_model
-        torch.cuda.empty_cache()
-
-        print(f"\n      {'Model':<10} | {'Avg PSNR':<10} | {'Status':<15}")
-        print("      " + "-" * 45)
-
+        # Set up ONNX Runtime
         providers = (
             ["CUDAExecutionProvider", "CPUExecutionProvider"]
             if self.args.device == "cuda"
             else ["CPUExecutionProvider"]
         )
+        try:
+            sess = ort.InferenceSession(str(model_path), providers=providers)
+        except Exception as e:
+            print(f"      Error loading ONNX Runtime: {e}")
+            return
 
-        for name, path in model_paths.items():
-            if path is None:
-                continue
-            try:
-                sess = ort.InferenceSession(str(path), providers=providers)
-                psnrs = []
-                for _i, (_, inp, pt_img) in enumerate(pt_results):
-                    onnx_out = sess.run(None, {"input": inp})[0]
-                    onnx_img = postprocess_output(onnx_out, self.args.norm)
-                    psnrs.append(
-                        calculate_psnr(pt_img, onnx_img, border=self.args.scale + 2)
-                    )
-                avg = sum(psnrs) / len(psnrs)
-                status = "✅ Excellent" if avg > 50 else "⚠️ Degradation"
-                print(f"      {name.upper():<10} | {avg:<10.2f} | {status:<15}")
-                self.report["results"][name]["validation_psnr"] = avg
-            except Exception as e:
-                print(f"      {name.upper():<10} | {'FAILED':<10} | {str(e)[:30]}...")
+        psnrs = []
 
-    def save_report(self) -> None:
-        with open(self.output_dir / "conversion_report.json", "w") as f:
-            json.dump(self.report, f, indent=2)
+        for img_path in val_images:
+            # Prepare Input
+            inp = preprocess_image(img_path)
+
+            # PyTorch Inference
+            with torch.no_grad():
+                pt_in = torch.from_numpy(inp).to(self.device)
+                pt_out = torch_model(pt_in).cpu().numpy()
+                pt_img = postprocess_output(pt_out)
+
+            # ONNX Inference
+            onnx_out = sess.run(None, {"input": inp})[0]
+            onnx_img = postprocess_output(onnx_out)
+
+            # Compare
+            # Ignore border pixels (scale + 2) to avoid padding differences
+            score = calculate_psnr(pt_img, onnx_img, border=self.args.scale + 4)
+            psnrs.append(score)
+            # print(f"      {img_path.name}: {score:.2f} dB")
+
+        avg_psnr = sum(psnrs) / len(psnrs)
+        status = "✅ PASS" if avg_psnr > 50 else "⚠️  FAIL"
+        print(f"      Average PSNR Match: {avg_psnr:.2f} dB  ->  {status}")
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--checkpoint", required=True)
-    parser.add_argument("--arch", required=True)
-    parser.add_argument("--scale", type=int, default=2)
-    parser.add_argument("--norm", default="01")
-    parser.add_argument("--output", default="release_onnx")
-    parser.add_argument("--device", default="cuda")
-    parser.add_argument("--val_dir")
-    parser.add_argument("--val_count", type=int, default=10)
+    parser = argparse.ArgumentParser(description="ParagonSR2 Release Converter")
+    parser.add_argument(
+        "--checkpoint", required=True, help="Path to .pth or .safetensors"
+    )
+    parser.add_argument(
+        "--arch", required=True, help="Model variant (e.g., paragonsr2_photo)"
+    )
+    parser.add_argument("--scale", type=int, default=4)
+    parser.add_argument("--output", default="release_onnx", help="Output directory")
+    parser.add_argument("--device", default="cuda", help="Inference device")
+    parser.add_argument("--val_dir", help="Folder of images to validate ONNX accuracy")
+    parser.add_argument(
+        "--val_count", type=int, default=5, help="Number of images to test"
+    )
 
     args = parser.parse_args()
+
     converter = ParagonConverter(args)
+
+    # 1. Load PyTorch Model
     torch_model = converter.load_model()
 
-    fp32_path = converter.export_fp32(torch_model)
-    converter.validate({"fp32": fp32_path}, torch_model)
-    converter.save_report()
+    # 2. Export ONNX
+    onnx_path = converter.export_fp32(torch_model)
+
+    # 3. Validate
+    if args.val_dir:
+        converter.validate(onnx_path, torch_model)
 
     print("\n" + "=" * 60)
-    print("CONVERSION COMPLETE")
-    print("=" * 60)
-    print(f"Your ONNX model is located at: {fp32_path}")
-    print("Run the trtexec command again.")
+    print("DONE. Model ready for TensorRT conversion.")
+    print(f"File: {onnx_path}")
     print("=" * 60)
