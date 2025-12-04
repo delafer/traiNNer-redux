@@ -369,6 +369,11 @@ class DynamicBatchSizeOptimizer(TrainingAutomationBase):
                 )
                 return None, None
 
+            # CRITICAL: Don't evaluate until actual training iterations have occurred
+            # Prevent premature adjustments based on initialization VRAM (0%)
+            if self.iteration < self.adjustment_frequency:
+                return None, None  # Skip evaluation during initial training phase
+
             # Calculate suggested adjustments using PEAK VRAM from current monitoring period
             batch_adjustment, lq_adjustment = self._calculate_dual_adjustment(
                 self.peak_vram_usage  # Use PEAK VRAM, not current
@@ -816,6 +821,9 @@ class AdaptiveGradientClipping(TrainingAutomationBase):
 
     def get_clipping_threshold(self) -> float:
         """Get current gradient clipping threshold."""
+        # Return safe default during autonomous calibration phase
+        if self.current_threshold is None:
+            return 1.0  # Safe default threshold
         return self.current_threshold
 
 

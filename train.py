@@ -505,10 +505,17 @@ def train_pipeline(root_path: str) -> None:
             initial_adjustments = model.update_automation_vram_monitoring()
             if initial_adjustments:
                 batch_adj, lq_adj = initial_adjustments
-                logger.info(
-                    f"🚀 Early VRAM monitoring - Initial adjustments suggested: "
-                    f"Batch: {batch_adj:+d}, LQ: {lq_adj:+d}"
-                )
+                # Handle None values during initialization phase (before training starts)
+                if batch_adj is not None and lq_adj is not None:
+                    logger.info(
+                        f"🚀 Early VRAM monitoring - Initial adjustments suggested: "
+                        f"Batch: {batch_adj:+d}, LQ: {lq_adj:+d}"
+                    )
+                else:
+                    logger.info(
+                        f"🚀 Early VRAM monitoring - Initialization phase (iterations 0-99): "
+                        f"Monitoring VRAM without adjustments, batch: {automation.current_batch_size}, LQ: {automation.current_lq_size}"
+                    )
 
     logger.info("Start training from epoch: %d, iter: %d.", start_epoch, current_iter)
     data_timer, iter_timer = AvgTimer(), AvgTimer()
