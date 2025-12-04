@@ -31,6 +31,8 @@ datasets:
     batch_size_per_gpu: 64         # Large batch for training stability and convergence
     num_worker_per_gpu: 8          # Workers for efficient data loading
     accum_iter: 1                  # No gradient accumulation needed for realtime
+    prefetch_mode: cpu             # Use CPU prefetch to avoid CUDA pin_memory issues
+    pin_memory: false              # Disable pin_memory to completely avoid CUDA allocation issues
 
     use_hflip: true
     use_rot: true

@@ -336,19 +336,25 @@ class DynamicBatchSizeOptimizer(TrainingAutomationBase):
             return None, None
 
         if torch.cuda.is_available():
-            # Get current VRAM usage
+            # Use PEAK VRAM measurement to match main logger (critical fix for accurate optimization)
             current_memory = torch.cuda.memory_allocated()
+            peak_memory = torch.cuda.max_memory_allocated()
             total_memory = torch.cuda.get_device_properties(0).total_memory
+
+            # Calculate usage ratios - use PEAK VRAM for optimization decisions
             current_usage_ratio = current_memory / total_memory
+            peak_usage_ratio = peak_memory / total_memory
 
             # Update peak VRAM tracking for current monitoring period
-            self.peak_vram_usage = max(self.peak_vram_usage, current_usage_ratio)
-            self.vram_history.append(current_usage_ratio)
+            self.peak_vram_usage = max(self.peak_vram_usage, peak_usage_ratio)
+            self.vram_history.append(peak_usage_ratio)
 
             # Always log VRAM status for debugging (but not too frequently)
             if self.iteration % 50 == 0:
                 logger.info(
-                    f"Automation {self.name}: VRAM usage {current_usage_ratio:.4f} ({current_memory / 1e9:.2f}GB/{total_memory / 1e9:.2f}GB), target: {self.target_vram_usage:.2f}"
+                    f"Automation {self.name}: VRAM usage {current_usage_ratio:.4f} ({current_memory / 1e9:.2f}GB), "
+                    f"peak: {peak_usage_ratio:.4f} ({peak_memory / 1e9:.2f}GB/{total_memory / 1e9:.2f}GB), "
+                    f"target: {self.target_vram_usage:.2f}"
                 )
 
             # Check for OOM detection (usually handled by exception, but monitor anyway)
@@ -381,7 +387,8 @@ class DynamicBatchSizeOptimizer(TrainingAutomationBase):
 
             if batch_adjustment != 0 or lq_adjustment != 0:
                 # Reset peak VRAM tracking for next monitoring period
-                self.peak_vram_usage = current_usage_ratio
+                # Start fresh tracking from current peak
+                self.peak_vram_usage = peak_usage_ratio
                 self.adjustment_cooldown = self.adjustment_frequency
                 logger.info(
                     f"Automation {self.name}: Monitoring period complete. "
@@ -563,7 +570,11 @@ class DynamicBatchSizeOptimizer(TrainingAutomationBase):
     def start_monitoring_period(self) -> None:
         """Initialize peak VRAM tracking for a new monitoring period."""
         if torch.cuda.is_available():
-            initial_memory = torch.cuda.memory_allocated()
+            # Reset peak memory stats for accurate tracking in new period
+            torch.cuda.reset_peak_memory_stats()
+
+            # Initialize with PEAK VRAM to match main logger measurement
+            initial_memory = torch.cuda.max_memory_allocated()
             total_memory = torch.cuda.get_device_properties(0).total_memory
             initial_usage_ratio = initial_memory / total_memory
             self.peak_vram_usage = initial_usage_ratio
@@ -571,7 +582,7 @@ class DynamicBatchSizeOptimizer(TrainingAutomationBase):
             logger.info(
                 f"Automation {self.name}: Starting VRAM monitoring period "
                 f"(adjustment_frequency: {self.adjustment_frequency} iterations). "
-                f"Initial VRAM: {initial_usage_ratio:.3f} ({initial_usage_ratio * 100:.1f}%)"
+                f"Initial Peak VRAM: {initial_usage_ratio:.3f} ({initial_usage_ratio * 100:.1f}%)"
             )
 
     def get_peak_vram_usage(self) -> float:
