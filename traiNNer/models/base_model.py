@@ -1000,6 +1000,19 @@ class BaseModel:
         if automation and automation.enabled:
             automation.set_current_parameters(batch_size, lq_size)
 
+    def set_automation_lq_size(self, lq_size: int) -> None:
+        """Set current lq_size for automation monitoring (keeps batch_size unchanged)."""
+        if not self.training_automation_manager:
+            return
+
+        automation = self.training_automation_manager.automations.get(
+            "DynamicBatchSizeOptimizer"
+        )
+        if automation and automation.enabled:
+            # Keep current batch_size, only update lq_size
+            current_batch_size = automation.current_batch_size or 8
+            automation.set_current_parameters(current_batch_size, lq_size)
+
     def set_dynamic_wrappers(
         self, dynamic_dataloader=None, dynamic_dataset=None
     ) -> None:
@@ -1017,6 +1030,7 @@ class BaseModel:
         )
         if automation and automation.enabled:
             automation.set_dynamic_wrappers(dynamic_dataloader, dynamic_dataset)
+            automation.start_monitoring_period()  # Initialize peak VRAM tracking
             logger.info(
                 f"BaseModel: Dynamic wrappers set for VRAM management - "
                 f"Dataloader: {dynamic_dataloader is not None}, "

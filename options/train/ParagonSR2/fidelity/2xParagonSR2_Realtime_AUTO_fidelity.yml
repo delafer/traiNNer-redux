@@ -28,7 +28,7 @@ datasets:
     # METRIC-OPTIMIZED PARAMETERS for RTX 3060 12GB (Auto-VRAM managed)
     # Aggressive settings for maximum PSNR/SSIM with lightweight realtime architecture
     lq_size: 256                   # Large patches = better global context = higher metrics
-    batch_size_per_gpu: 32         # Large batch for training stability and convergence
+    batch_size_per_gpu: 64         # Large batch for training stability and convergence
     num_worker_per_gpu: 8          # Workers for efficient data loading
     accum_iter: 1                  # No gradient accumulation needed for realtime
 
@@ -78,27 +78,27 @@ train:
   # TRAINING AUTOMATIONS
   training_automations:
     enabled: true                    # Master enable for all automations
-    intelligent_learning_rate_scheduler:
+    IntelligentLearningRateScheduler:
       enabled: true
 
     DynamicBatchSizeOptimizer:
       enabled: true
       target_vram_usage: 0.85
       safety_margin: 0.05
-      adjustment_frequency: 25        # More responsive adjustments
-      min_batch_size: 4               # Slightly higher minimum for stability
-      max_batch_size: 64
-      min_lq_size: 64                 # Slightly higher minimum for quality
+      adjustment_frequency: 100
+      min_batch_size: 4
+      max_batch_size: 256
+      min_lq_size: 64
       max_lq_size: 256
       vram_history_size: 50
 
-    early_stopping:
+    IntelligentEarlyStopping:
       enabled: true
       patience: 3000
       min_improvement: 0.0005
-      metric: "val/psnr"
+      monitor_metric: "val/psnr"
 
-    adaptive_gradient_clipping:
+    AdaptiveGradientClipping:
       enabled: true
 
   # OPTIMAL FIDELITY LOSS COMBINATION

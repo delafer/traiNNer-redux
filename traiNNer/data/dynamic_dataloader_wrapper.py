@@ -94,15 +94,18 @@ class DynamicDataLoaderWrapper:
         old_batch_size = self.current_batch_size
         self.current_batch_size = new_batch_size
 
-        # Update the underlying dataloader's batch_size
-        self.dataloader.batch_size = new_batch_size
+        # Don't try to modify the underlying DataLoader's batch_size attribute
+        # as PyTorch DataLoader doesn't allow this after initialization
+        # Instead, just track the new batch size and let the training loop handle it
+        # through the wrapper interface
 
         # Call update callback if provided
         if self.update_callback:
             self.update_callback(new_batch_size)
 
         logger.info(
-            f"Dynamic dataloader: batch_size updated {old_batch_size} → {new_batch_size}"
+            f"Dynamic dataloader: batch_size tracked {old_batch_size} → {new_batch_size} "
+            f"(wrapper will handle actual usage)"
         )
 
     def get_current_batch_size(self) -> int:

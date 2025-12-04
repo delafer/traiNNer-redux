@@ -83,13 +83,13 @@ train:
       enabled: true
 
     DynamicBatchSizeOptimizer:
-      enabled: true
+      enabled: true                   # Enable VRAM-based optimization
       target_vram_usage: 0.85
       safety_margin: 0.05
-      adjustment_frequency: 25        # More responsive adjustments
-      min_batch_size: 4               # Conservative minimum for larger model
+      adjustment_frequency: 25
+      min_batch_size: 4
       max_batch_size: 32
-      min_lq_size: 64                 # Conservative minimum for quality
+      min_lq_size: 64
       max_lq_size: 160
       vram_history_size: 50
 

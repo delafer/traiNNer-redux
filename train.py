@@ -627,22 +627,29 @@ def train_pipeline(root_path: str) -> None:
                                         f"Automation suggests adjustments - Batch size: {batch_adjustment:+d}, LQ size: {lq_adjustment:+d}"
                                     )
                                 try:
-                                    # Update batch size in options and apply to dynamic wrapper
+                                    # Update batch size tracking and apply to dynamic wrapper
                                     if batch_adjustment != 0:
-                                        current_batch = opt.datasets[
-                                            "train"
-                                        ].batch_size_per_gpu
+                                        current_batch = (
+                                            automation.current_batch_size
+                                            or opt.datasets["train"].batch_size_per_gpu
+                                        )
                                         new_batch = max(
                                             1, current_batch + batch_adjustment
                                         )
-                                        opt.datasets[
-                                            "train"
-                                        ].batch_size_per_gpu = new_batch
+
+                                        # Update automation tracking
                                         model.set_automation_batch_size(new_batch)
 
-                                        # Apply to dynamic wrapper if available
+                                        # Apply to dynamic wrapper if available (this is the key fix!)
                                         if dynamic_dataloader_wrapper:
                                             dynamic_dataloader_wrapper.set_batch_size(
+                                                new_batch
+                                            )
+                                        elif (
+                                            hasattr(automation, "dynamic_dataloader")
+                                            and automation.dynamic_dataloader
+                                        ):
+                                            automation.dynamic_dataloader.set_batch_size(
                                                 new_batch
                                             )
 
@@ -650,17 +657,18 @@ def train_pipeline(root_path: str) -> None:
                                             f"Batch size adjusted: {current_batch} → {new_batch}"
                                         )
 
-                                    # Update lq_size in options and apply to dynamic wrapper
+                                    # Update lq_size tracking and apply to dynamic wrapper
                                     if lq_adjustment != 0:
-                                        current_lq = opt.datasets["train"].lq_size
-                                        new_lq = max(32, current_lq + lq_adjustment)
-                                        # Update corresponding gt_size
-                                        opt.datasets["train"].lq_size = new_lq
-                                        opt.datasets["train"].gt_size = (
-                                            new_lq * opt.scale
+                                        current_lq = (
+                                            automation.current_lq_size
+                                            or opt.datasets["train"].lq_size
                                         )
+                                        new_lq = max(32, current_lq + lq_adjustment)
 
-                                        # Apply to dynamic wrapper if available
+                                        # Update automation tracking
+                                        model.set_automation_lq_size(new_lq)
+
+                                        # Apply to dynamic wrapper if available (this is the key fix!)
                                         if dynamic_dataset_wrapper and hasattr(
                                             dynamic_dataset_wrapper,
                                             "set_dynamic_gt_size",
@@ -668,6 +676,17 @@ def train_pipeline(root_path: str) -> None:
                                             dynamic_dataset_wrapper.set_dynamic_gt_size(
                                                 new_lq * opt.scale
                                             )
+                                        elif (
+                                            hasattr(automation, "dynamic_dataset")
+                                            and automation.dynamic_dataset
+                                        ):
+                                            if hasattr(
+                                                automation.dynamic_dataset,
+                                                "set_dynamic_gt_size",
+                                            ):
+                                                automation.dynamic_dataset.set_dynamic_gt_size(
+                                                    new_lq * opt.scale
+                                                )
 
                                         logger.info(
                                             f"LQ size adjusted: {current_lq} → {new_lq} (GT: {new_lq * opt.scale})"
@@ -700,21 +719,60 @@ def train_pipeline(root_path: str) -> None:
                                 suggested_batch_size, suggested_lq_size
                             )
 
-                            # Apply OOM recovery to dynamic wrappers
+                            # Apply OOM recovery to dynamic wrappers (this is the key fix!)
                             if dynamic_dataloader_wrapper:
                                 dynamic_dataloader_wrapper.set_batch_size(
                                     suggested_batch_size
                                 )
+                            elif (
+                                hasattr(
+                                    model.training_automation_manager.automations.get(
+                                        "DynamicBatchSizeOptimizer"
+                                    ),
+                                    "dynamic_dataloader",
+                                )
+                                and model.training_automation_manager.automations.get(
+                                    "DynamicBatchSizeOptimizer"
+                                ).dynamic_dataloader
+                            ):
+                                model.training_automation_manager.automations.get(
+                                    "DynamicBatchSizeOptimizer"
+                                ).dynamic_dataloader.set_batch_size(
+                                    suggested_batch_size
+                                )
+
                             if dynamic_dataset_wrapper and hasattr(
                                 dynamic_dataset_wrapper, "set_dynamic_gt_size"
                             ):
                                 dynamic_dataset_wrapper.set_dynamic_gt_size(
                                     suggested_lq_size * opt.scale
                                 )
+                            elif (
+                                hasattr(
+                                    model.training_automation_manager.automations.get(
+                                        "DynamicBatchSizeOptimizer"
+                                    ),
+                                    "dynamic_dataset",
+                                )
+                                and model.training_automation_manager.automations.get(
+                                    "DynamicBatchSizeOptimizer"
+                                ).dynamic_dataset
+                            ):
+                                if hasattr(
+                                    model.training_automation_manager.automations.get(
+                                        "DynamicBatchSizeOptimizer"
+                                    ).dynamic_dataset,
+                                    "set_dynamic_gt_size",
+                                ):
+                                    model.training_automation_manager.automations.get(
+                                        "DynamicBatchSizeOptimizer"
+                                    ).dynamic_dataset.set_dynamic_gt_size(
+                                        suggested_lq_size * opt.scale
+                                    )
 
                         # Collect garbage (clear VRAM)
                         raise RuntimeError(
-                            "Ran out of VRAM during training. Please reduce lq_size or batch_size_per_gpu and try again."
+                            "Ran out of VRAM during training. The automation system attempted recovery, but please reduce lq_size or batch_size_per_gpu in your config and try again."
                         ) from None
                     else:
                         # Re-raise the exception if not an OOM error

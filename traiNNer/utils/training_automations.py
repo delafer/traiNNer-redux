@@ -341,7 +341,7 @@ class DynamicBatchSizeOptimizer(TrainingAutomationBase):
             total_memory = torch.cuda.get_device_properties(0).total_memory
             current_usage_ratio = current_memory / total_memory
 
-            # Update peak VRAM tracking
+            # Update peak VRAM tracking for current monitoring period
             self.peak_vram_usage = max(self.peak_vram_usage, current_usage_ratio)
             self.vram_history.append(current_usage_ratio)
 
@@ -357,7 +357,7 @@ class DynamicBatchSizeOptimizer(TrainingAutomationBase):
                     f"Automation {self.name}: High VRAM usage detected ({current_usage_ratio:.2%})"
                 )
 
-            # Only adjust every adjustment_frequency iterations to avoid thrashing
+            # Only evaluate adjustments at the end of each monitoring period
             if self.adjustment_cooldown > 0:
                 self.adjustment_cooldown -= 1
                 return None, None
@@ -369,22 +369,26 @@ class DynamicBatchSizeOptimizer(TrainingAutomationBase):
                 )
                 return None, None
 
-            # Calculate suggested adjustments using priority system
+            # Calculate suggested adjustments using PEAK VRAM from current monitoring period
             batch_adjustment, lq_adjustment = self._calculate_dual_adjustment(
-                current_usage_ratio
+                self.peak_vram_usage  # Use PEAK VRAM, not current
             )
 
             if batch_adjustment != 0 or lq_adjustment != 0:
+                # Reset peak VRAM tracking for next monitoring period
+                self.peak_vram_usage = current_usage_ratio
                 self.adjustment_cooldown = self.adjustment_frequency
                 logger.info(
-                    f"Automation {self.name}: Suggested adjustments - Batch: {batch_adjustment:+d}, LQ: {lq_adjustment:+d}"
+                    f"Automation {self.name}: Monitoring period complete. "
+                    f"Peak VRAM: {self.peak_vram_usage:.3f} ({self.peak_vram_usage * 100:.1f}%). "
+                    f"Suggested adjustments - Batch: {batch_adjustment:+d}, LQ: {lq_adjustment:+d}"
                 )
                 return batch_adjustment, lq_adjustment
 
         return None, None
 
-    def _calculate_dual_adjustment(self, current_usage_ratio: float) -> tuple[int, int]:
-        """Calculate suggested adjustments with lq_size priority, then batch_size."""
+    def _calculate_dual_adjustment(self, peak_usage_ratio: float) -> tuple[int, int]:
+        """Calculate suggested adjustments using PEAK VRAM from monitoring period with lq_size priority, then batch_size."""
         if self.current_batch_size is None or self.current_lq_size is None:
             return 0, 0
 
@@ -392,10 +396,10 @@ class DynamicBatchSizeOptimizer(TrainingAutomationBase):
         batch_adjustment = 0
         lq_adjustment = 0
 
-        # Enhanced logging for debugging (reduced frequency to avoid spam)
+        # Enhanced logging for debugging with peak VRAM focus
         if self.iteration % 50 == 0:
             logger.info(
-                f"VRAM DEBUG: Current usage: {current_usage_ratio:.3f}, "
+                f"VRAM DEBUG: Peak usage: {peak_usage_ratio:.3f}, "
                 f"Target: {target_usage:.3f}, "
                 f"Safety margin: {self.safety_margin:.3f}, "
                 f"Current batch: {self.current_batch_size}, "
@@ -403,8 +407,8 @@ class DynamicBatchSizeOptimizer(TrainingAutomationBase):
             )
 
         # If significantly under target, try to increase parameters (MORE AGGRESSIVE)
-        if current_usage_ratio < target_usage - self.safety_margin:
-            available_memory_ratio = target_usage - current_usage_ratio
+        if peak_usage_ratio < target_usage - self.safety_margin:
+            available_memory_ratio = target_usage - peak_usage_ratio
 
             # PRIORITY 1: Increase lq_size first (better final metrics) - MORE AGGRESSIVE
             if self.current_lq_size < self.max_lq_size:
@@ -424,14 +428,14 @@ class DynamicBatchSizeOptimizer(TrainingAutomationBase):
                     if suggested_lq_increase > 0:
                         lq_adjustment = suggested_lq_increase
                         logger.info(
-                            f"🔄 VRAM OPTIMIZATION: Available memory {available_memory_ratio:.3f} ({available_memory_ratio * 100:.1f}%), "
+                            f"🔄 VRAM OPTIMIZATION (PEAK-BASED): Available memory {available_memory_ratio:.3f} ({available_memory_ratio * 100:.1f}%), "
                             f"suggesting lq_size increase of +{suggested_lq_increase} "
                             f"({self.current_lq_size} → {self.current_lq_size + suggested_lq_increase})"
                         )
 
             # PRIORITY 2: Then increase batch size if lq_size is already at maximum
             elif self.current_batch_size < self.max_batch_size:
-                remaining_memory = target_usage - current_usage_ratio
+                remaining_memory = target_usage - peak_usage_ratio
                 if remaining_memory > 0.01:  # Even 1% memory available (was 2%)
                     suggested_batch_increase = min(
                         8, max(2, int(remaining_memory / 0.03))
@@ -445,16 +449,16 @@ class DynamicBatchSizeOptimizer(TrainingAutomationBase):
                     if suggested_batch_increase > 0:
                         batch_adjustment = suggested_batch_increase
                         logger.info(
-                            f"🔄 VRAM OPTIMIZATION: Remaining memory {remaining_memory:.3f} ({remaining_memory * 100:.1f}%), "
+                            f"🔄 VRAM OPTIMIZATION (PEAK-BASED): Remaining memory {remaining_memory:.3f} ({remaining_memory * 100:.1f}%), "
                             f"suggesting batch_size increase of +{suggested_batch_increase} "
                             f"({self.current_batch_size} → {self.current_batch_size + suggested_batch_increase})"
                         )
 
         # If significantly over target, decrease parameters (reverse priority)
-        elif current_usage_ratio > target_usage + self.safety_margin:
+        elif peak_usage_ratio > target_usage + self.safety_margin:
             # PRIORITY 1: First decrease batch size (less impact on final metrics)
             if self.current_batch_size > self.min_batch_size:
-                if current_usage_ratio > target_usage + 0.1:
+                if peak_usage_ratio > target_usage + 0.1:
                     batch_adjustment = -4  # More aggressive decrease (was -2)
                 else:
                     batch_adjustment = (
@@ -462,20 +466,20 @@ class DynamicBatchSizeOptimizer(TrainingAutomationBase):
                     )  # More conservative but still significant (was -1)
 
                 logger.info(
-                    f"🔄 VRAM OPTIMIZATION: High usage {current_usage_ratio:.3f}, "
+                    f"🔄 VRAM OPTIMIZATION (PEAK-BASED): High peak usage {peak_usage_ratio:.3f}, "
                     f"suggesting batch_size decrease of {batch_adjustment} "
                     f"({self.current_batch_size} → {self.current_batch_size + batch_adjustment})"
                 )
 
             # PRIORITY 2: Then decrease lq_size if batch is already at minimum
             elif self.current_lq_size > self.min_lq_size:
-                if current_usage_ratio > target_usage + 0.15:
+                if peak_usage_ratio > target_usage + 0.15:
                     lq_adjustment = -4  # More aggressive lq decrease
                 else:
                     lq_adjustment = -2  # Conservative lq decrease (was -1)
 
                 logger.info(
-                    f"🔄 VRAM OPTIMIZATION: High usage {current_usage_ratio:.3f}, "
+                    f"🔄 VRAM OPTIMIZATION (PEAK-BASED): High peak usage {peak_usage_ratio:.3f}, "
                     f"suggesting lq_size decrease of {lq_adjustment} "
                     f"({self.current_lq_size} → {self.current_lq_size + lq_adjustment})"
                 )
@@ -483,11 +487,11 @@ class DynamicBatchSizeOptimizer(TrainingAutomationBase):
         # Log final decision (only log adjustments, not "no adjustments" to reduce spam)
         if batch_adjustment != 0 or lq_adjustment != 0:
             logger.info(
-                f"🎯 VRAM OPTIMIZATION DECISION: "
+                f"🎯 VRAM OPTIMIZATION DECISION (PEAK-BASED): "
+                f"Peak VRAM: {peak_usage_ratio:.3f} ({peak_usage_ratio * 100:.1f}%), "
                 f"Batch adjustment: {batch_adjustment:+d}, "
                 f"LQ adjustment: {lq_adjustment:+d}"
             )
-        # Removed the "No adjustments needed" log to reduce spam
 
         return batch_adjustment, lq_adjustment
 
@@ -550,6 +554,20 @@ class DynamicBatchSizeOptimizer(TrainingAutomationBase):
             f"Dataloader: {dynamic_dataloader is not None}, "
             f"Dataset: {dynamic_dataset is not None}"
         )
+
+    def start_monitoring_period(self) -> None:
+        """Initialize peak VRAM tracking for a new monitoring period."""
+        if torch.cuda.is_available():
+            initial_memory = torch.cuda.memory_allocated()
+            total_memory = torch.cuda.get_device_properties(0).total_memory
+            initial_usage_ratio = initial_memory / total_memory
+            self.peak_vram_usage = initial_usage_ratio
+
+            logger.info(
+                f"Automation {self.name}: Starting VRAM monitoring period "
+                f"(adjustment_frequency: {self.adjustment_frequency} iterations). "
+                f"Initial VRAM: {initial_usage_ratio:.3f} ({initial_usage_ratio * 100:.1f}%)"
+            )
 
     def get_peak_vram_usage(self) -> float:
         """Get the peak VRAM usage during training."""

@@ -836,10 +836,10 @@ def get_root_logger(
     is_new_logger = logger_name not in initialized_logger
 
     rank, _ = get_dist_info()
-    logger.info(f"🔍 Logger initialization: rank={rank}, log_file={log_file}")
 
     # Always set up basic console logging for new loggers
     if is_new_logger:
+        logger.info(f"🔍 Logger initialization: rank={rank}, log_file={log_file}")
         format_str = "%(asctime)s %(levelname)s: %(message)s"
         rich_handler = RichHandler(
             markup=True, rich_tracebacks=True, omit_repeated_times=False
