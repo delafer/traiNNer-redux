@@ -60,7 +60,7 @@ def generate_fidelity_optimized_config(
                     "improvement_threshold": 0.0005,  # More sensitive
                     "min_lr_factor": 0.6,  # Keep LR higher
                 },
-                "DynamicBatchSizeOptimizer": {
+                "DynamicBatchAndPatchSizeOptimizer": {
                     "target_vram_usage": 0.80,  # More conservative
                     "safety_margin": 0.08,  # Larger safety buffer
                     "max_batch_size": 16,  # Lower max for stability

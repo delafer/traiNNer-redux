@@ -21,7 +21,7 @@ from traiNNer.data.dynamic_dataloader_wrapper import (
     DynamicDataLoaderWrapper,
     DynamicDatasetWrapper,
 )
-from traiNNer.utils.training_automations import DynamicBatchSizeOptimizer
+from traiNNer.utils.training_automations import DynamicBatchAndPatchSizeOptimizer
 
 
 def test_vram_management() -> None:
@@ -43,7 +43,7 @@ def test_vram_management() -> None:
         "max_lq_size": 256,
     }
 
-    optimizer = DynamicBatchSizeOptimizer(config)
+    optimizer = DynamicBatchAndPatchSizeOptimizer(config)
 
     # Test 1: Initialize parameters
     print("\n=== Test 1: Parameter Initialization ===")

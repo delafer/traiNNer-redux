@@ -54,7 +54,7 @@ class MockTrain:
         self.total_iter = 60000
         self.warmup_iter = 1000
         self.training_automations = {
-            "DynamicBatchSizeOptimizer": {
+            "DynamicBatchAndPatchSizeOptimizer": {
                 "enabled": True,
                 "target_vram_usage": 0.85,
                 "safety_margin": 0.05,
@@ -106,7 +106,7 @@ def test_vram_monitoring() -> bool:
 
     automation = automation_manager.automations.get("DynamicBatchSizeOptimizer")
     if not automation or not automation.enabled:
-        logger.error("❌ DynamicBatchSizeOptimizer not found or disabled")
+        logger.error("❌ DynamicBatchAndPatchSizeOptimizer not found or disabled")
         return False
 
     # Initialize parameters

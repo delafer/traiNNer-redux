@@ -370,7 +370,7 @@ def train_pipeline(root_path: str) -> None:
     ):
         # Create dynamic dataloader wrapper if VRAM management is enabled
         automation = model.training_automation_manager.automations.get(
-            "DynamicBatchSizeOptimizer"
+            "DynamicBatchAndPatchSizeOptimizer"
         )
         if automation and automation.enabled:
             from traiNNer.data.dynamic_dataloader_wrapper import (
@@ -403,7 +403,7 @@ def train_pipeline(root_path: str) -> None:
 
             # Verify automation parameters are correctly set
             automation = model.training_automation_manager.automations.get(
-                "DynamicBatchSizeOptimizer"
+                "DynamicBatchAndPatchSizeOptimizer"
             )
             if automation and automation.enabled:
                 logger.info(
@@ -498,7 +498,7 @@ def train_pipeline(root_path: str) -> None:
         and model.training_automation_manager
     ):
         automation = model.training_automation_manager.automations.get(
-            "DynamicBatchSizeOptimizer"
+            "DynamicBatchAndPatchSizeOptimizer"
         )
         if automation and automation.enabled:
             # Trigger initial VRAM monitoring to establish baseline
@@ -586,7 +586,7 @@ def train_pipeline(root_path: str) -> None:
                             ):
                                 automation = (
                                     model.training_automation_manager.automations.get(
-                                        "DynamicBatchSizeOptimizer"
+                                        "DynamicBatchAndPatchSizeOptimizer"
                                     )
                                 )
                                 if automation and automation.enabled:
@@ -616,7 +616,7 @@ def train_pipeline(root_path: str) -> None:
                                         )
                                 else:
                                     logger.info(
-                                        f"🔍 VRAM DEBUG (iter {current_iter}): DynamicBatchSizeOptimizer not found or disabled"
+                                        f"🔍 VRAM DEBUG (iter {current_iter}): DynamicBatchAndPatchSizeOptimizer not found or disabled"
                                     )
                             else:
                                 logger.info(
@@ -734,16 +734,16 @@ def train_pipeline(root_path: str) -> None:
                             elif (
                                 hasattr(
                                     model.training_automation_manager.automations.get(
-                                        "DynamicBatchSizeOptimizer"
+                                        "DynamicBatchAndPatchSizeOptimizer"
                                     ),
                                     "dynamic_dataloader",
                                 )
                                 and model.training_automation_manager.automations.get(
-                                    "DynamicBatchSizeOptimizer"
+                                    "DynamicBatchAndPatchSizeOptimizer"
                                 ).dynamic_dataloader
                             ):
                                 model.training_automation_manager.automations.get(
-                                    "DynamicBatchSizeOptimizer"
+                                    "DynamicBatchAndPatchSizeOptimizer"
                                 ).dynamic_dataloader.set_batch_size(
                                     suggested_batch_size
                                 )
@@ -757,22 +757,22 @@ def train_pipeline(root_path: str) -> None:
                             elif (
                                 hasattr(
                                     model.training_automation_manager.automations.get(
-                                        "DynamicBatchSizeOptimizer"
+                                        "DynamicBatchAndPatchSizeOptimizer"
                                     ),
                                     "dynamic_dataset",
                                 )
                                 and model.training_automation_manager.automations.get(
-                                    "DynamicBatchSizeOptimizer"
+                                    "DynamicBatchAndPatchSizeOptimizer"
                                 ).dynamic_dataset
                             ):
                                 if hasattr(
                                     model.training_automation_manager.automations.get(
-                                        "DynamicBatchSizeOptimizer"
+                                        "DynamicBatchAndPatchSizeOptimizer"
                                     ).dynamic_dataset,
                                     "set_dynamic_gt_size",
                                 ):
                                     model.training_automation_manager.automations.get(
-                                        "DynamicBatchSizeOptimizer"
+                                        "DynamicBatchAndPatchSizeOptimizer"
                                     ).dynamic_dataset.set_dynamic_gt_size(
                                         suggested_lq_size * opt.scale
                                     )

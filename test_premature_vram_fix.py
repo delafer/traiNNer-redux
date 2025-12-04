@@ -9,7 +9,7 @@ This test ensures that:
 """
 
 import torch
-from traiNNer.utils.training_automations import DynamicBatchSizeOptimizer
+from traiNNer.utils.training_automations import DynamicBatchAndPatchSizeOptimizer
 
 
 def test_premature_adjustment_fix() -> bool | None:
@@ -30,7 +30,7 @@ def test_premature_adjustment_fix() -> bool | None:
         "vram_history_size": 50,
     }
 
-    optimizer = DynamicBatchSizeOptimizer(config)
+    optimizer = DynamicBatchAndPatchSizeOptimizer(config)
     optimizer.set_current_parameters(32, 128)
     optimizer.start_monitoring_period()
 

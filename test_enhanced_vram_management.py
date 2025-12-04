@@ -14,7 +14,7 @@ Key Features:
 """
 
 import torch
-from traiNNer.utils.training_automations import DynamicBatchSizeOptimizer
+from traiNNer.utils.training_automations import DynamicBatchAndPatchSizeOptimizer
 
 
 def test_enhanced_vram_optimizer() -> bool:
@@ -35,7 +35,7 @@ def test_enhanced_vram_optimizer() -> bool:
         "vram_history_size": 50,
     }
 
-    optimizer = DynamicBatchSizeOptimizer(config)
+    optimizer = DynamicBatchAndPatchSizeOptimizer(config)
 
     # Set initial parameters
     optimizer.set_current_parameters(batch_size=4, lq_size=64)
@@ -126,7 +126,7 @@ def demonstrate_priority_system() -> None:
         "min_lq_size": 32,
         "max_lq_size": 256,
     }
-    optimizer = DynamicBatchSizeOptimizer(config)
+    optimizer = DynamicBatchAndPatchSizeOptimizer(config)
     optimizer.set_current_parameters(4, 64)
 
     scenarios = [
