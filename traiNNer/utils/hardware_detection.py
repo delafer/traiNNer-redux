@@ -358,7 +358,7 @@ class HardwareDetector:
                 },
                 "max_adjustments": 50,
             },
-            "DynamicBatchSizeOptimizer": {
+            "DynamicBatchAndPatchSizeOptimizer": {
                 "enabled": True,
                 "target_vram_usage": base_config["target_vram_usage"],
                 "safety_margin": base_config["safety_margin"],

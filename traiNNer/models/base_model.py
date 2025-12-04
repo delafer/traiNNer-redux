@@ -920,7 +920,7 @@ class BaseModel:
             return None
 
         automation = self.training_automation_manager.automations.get(
-            "DynamicBatchSizeOptimizer"
+            "DynamicBatchAndPatchSizeOptimizer"
         )
         if automation and automation.enabled:
             return automation.update_vram_monitoring()
@@ -969,7 +969,7 @@ class BaseModel:
             return
 
         automation = self.training_automation_manager.automations.get(
-            "DynamicBatchSizeOptimizer"
+            "DynamicBatchAndPatchSizeOptimizer"
         )
         if automation and automation.enabled:
             automation.handle_oom_recovery(new_batch_size, new_lq_size)
@@ -980,7 +980,7 @@ class BaseModel:
             return
 
         automation = self.training_automation_manager.automations.get(
-            "DynamicBatchSizeOptimizer"
+            "DynamicBatchAndPatchSizeOptimizer"
         )
         if automation and automation.enabled:
             # Set both batch size and lq_size (use current lq_size if available)
@@ -995,7 +995,7 @@ class BaseModel:
             return
 
         automation = self.training_automation_manager.automations.get(
-            "DynamicBatchSizeOptimizer"
+            "DynamicBatchAndPatchSizeOptimizer"
         )
         if automation and automation.enabled:
             automation.set_current_parameters(batch_size, lq_size)
@@ -1006,7 +1006,7 @@ class BaseModel:
             return
 
         automation = self.training_automation_manager.automations.get(
-            "DynamicBatchSizeOptimizer"
+            "DynamicBatchAndPatchSizeOptimizer"
         )
         if automation and automation.enabled:
             # Keep current batch_size, only update lq_size
@@ -1026,7 +1026,7 @@ class BaseModel:
         logger = get_root_logger()
 
         automation = self.training_automation_manager.automations.get(
-            "DynamicBatchSizeOptimizer"
+            "DynamicBatchAndPatchSizeOptimizer"
         )
         if automation and automation.enabled:
             automation.set_dynamic_wrappers(dynamic_dataloader, dynamic_dataset)

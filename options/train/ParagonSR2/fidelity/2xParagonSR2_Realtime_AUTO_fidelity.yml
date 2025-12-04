@@ -83,12 +83,12 @@ train:
     IntelligentLearningRateScheduler:
       enabled: true
 
-    DynamicBatchSizeOptimizer:
+    DynamicBatchAndPatchSizeOptimizer:
       enabled: true
       target_vram_usage: 0.85
       safety_margin: 0.05
       adjustment_frequency: 100
-      min_batch_size: 4
+      min_batch_size: 2
       max_batch_size: 256
       min_lq_size: 64
       max_lq_size: 256

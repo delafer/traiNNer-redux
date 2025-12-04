@@ -334,7 +334,7 @@ class TrainOptions(StrictStruct):
     training_automations: Annotated[
         dict[str, Any] | None,
         Meta(
-            description="Configuration for intelligent training automations including: IntelligentLearningRateScheduler, DynamicBatchSizeOptimizer, AdaptiveGradientClipping, and IntelligentEarlyStopping. Enable with {'enabled': true} and configure individual automations as needed."
+            description="Configuration for intelligent training automations including: IntelligentLearningRateScheduler, DynamicBatchAndPatchSizeOptimizer, AdaptiveGradientClipping, and IntelligentEarlyStopping. Enable with {'enabled': true} and configure individual automations as needed."
         ),
     ] = None
 

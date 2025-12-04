@@ -282,7 +282,7 @@ class IntelligentLearningRateScheduler(TrainingAutomationBase):
 
 
 @AUTOMATION_REGISTRY.register()
-class DynamicBatchSizeOptimizer(TrainingAutomationBase):
+class DynamicBatchAndPatchSizeOptimizer(TrainingAutomationBase):
     """
     Enhanced Dynamic VRAM Optimizer
 
@@ -1087,8 +1087,8 @@ class TrainingAutomationManager:
                 "adjustments": automation.adjustment_count,
             }
 
-            # Add VRAM-specific stats for DynamicBatchSizeOptimizer
-            if name == "DynamicBatchSizeOptimizer" and hasattr(
+            # Add VRAM-specific stats for DynamicBatchAndPatchSizeOptimizer
+            if name == "DynamicBatchAndPatchSizeOptimizer" and hasattr(
                 automation, "get_vram_stats"
             ):
                 automation_stats["vram"] = automation.get_vram_stats()
