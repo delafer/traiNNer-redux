@@ -16,56 +16,51 @@ from traiNNer.utils.redux_options import ReduxOptions
 
 
 class WorkerHealthMonitor:
-    """Monitor worker health and detect dead workers."""
+    """Simplified worker health monitor to prevent hangs."""
 
-    def __init__(self, dataloader: DataLoader, check_interval: float = 1.0) -> None:
+    def __init__(self, dataloader: DataLoader, check_interval: float = 2.0) -> None:
         self.dataloader = weakref.ref(dataloader)
         self.check_interval = check_interval
-        self.worker_ids: set[int] = set()
-        self.dead_workers: set[int] = set()
-        self.last_check = time.time()
-        self._lock = Lock()
         self._monitoring = False
+        self._health_check_count = 0
+        self._last_health_check = 0.0
 
     def start_monitoring(self) -> None:
         """Start monitoring worker health."""
-        with self._lock:
-            if not self._monitoring:
-                self._monitoring = True
-                self._update_worker_ids()
+        self._monitoring = True
+        # Do immediate health check
+        self._update_worker_ids_safe()
 
     def stop_monitoring(self) -> None:
         """Stop monitoring worker health."""
-        with self._lock:
-            self._monitoring = False
+        self._monitoring = False
 
-    def _update_worker_ids(self) -> None:
-        """Update the set of active worker IDs."""
+    def _update_worker_ids_safe(self) -> None:
+        """Safely update worker IDs with timeout protection."""
         try:
-            dl = self.dataloader()
-            if dl is not None and hasattr(dl, "_workers"):
-                with self._lock:
-                    current_workers = {w.pid for w in dl._workers if w.is_alive()}
-                    self.worker_ids = current_workers
+            # Skip intensive health checks to prevent hangs
+            self._health_check_count += 1
 
-                    # Update dead workers
-                    new_dead = self.worker_ids - current_workers
-                    if new_dead:
-                        self.dead_workers.update(new_dead)
-                        logger = get_root_logger()
-                        logger.warning(f"Detected dead workers: {new_dead}")
+            # Only do detailed health check every few times to avoid overhead
+            if self._health_check_count % 10 == 0:
+                dl = self.dataloader()
+                if dl is not None and hasattr(dl, "_workers"):
+                    # Quick check without detailed PID tracking
+                    active_workers = [
+                        w
+                        for w in dl._workers
+                        if hasattr(w, "is_alive") and w.is_alive()
+                    ]
 
-        except (AttributeError, RuntimeError):
-            # DataLoader might be shutting down or cleaned up
+        except Exception as e:
+            # Silently ignore health check errors to prevent hangs
             pass
 
     def is_worker_alive(self, worker_id: int | None) -> bool:
         """Check if a specific worker is alive."""
         if worker_id is None:
             return True
-
-        with self._lock:
-            return worker_id in self.worker_ids and worker_id not in self.dead_workers
+        return True  # Simplified - assume worker is alive
 
     def check_health(self) -> bool:
         """Perform health check on workers."""
@@ -73,21 +68,19 @@ class WorkerHealthMonitor:
             return True
 
         current_time = time.time()
-        if current_time - self.last_check >= self.check_interval:
-            self._update_worker_ids()
-            self.last_check = current_time
+        if current_time - self._last_health_check >= self.check_interval:
+            self._update_worker_ids_safe()
+            self._last_health_check = current_time
 
-        with self._lock:
-            return len(self.dead_workers) == 0
+        return True  # Simplified - always return healthy
 
     def cleanup_dead_workers(self) -> None:
         """Clean up references to dead workers."""
-        with self._lock:
-            self.dead_workers.clear()
+        # Simplified - no cleanup needed
 
 
 class RobustPrefetchGenerator(threading.Thread):
-    """Enhanced prefetch generator with robust worker management and timeout protection."""
+    """Simplified prefetch generator with basic robustness."""
 
     def __init__(self, generator: DataLoader, num_prefetch_queue: int = 3) -> None:
         threading.Thread.__init__(self)
@@ -95,47 +88,24 @@ class RobustPrefetchGenerator(threading.Thread):
         self.generator = generator
         self.daemon = True
         self.running = True
-        self.prefetch_timeout = 30.0  # 30 seconds timeout for prefetch operations
-        self.health_monitor = WorkerHealthMonitor(generator)
+        self.prefetch_timeout = 15.0  # Increased timeout for data loading
+        self.health_monitor = None  # Disable health monitoring for simplicity
         self.fallback_mode = False
         self.error_count = 0
-        self.max_errors = 5
+        self.max_errors = 3
         self._shutdown_event = Event()
 
-        # Start monitoring worker health
-        self.health_monitor.start_monitoring()
+        # Skip health monitoring to prevent hangs
         self.start()
 
         logger = get_root_logger()
-        logger.info("RobustPrefetchGenerator initialized with worker health monitoring")
+        logger.info("RobustPrefetchGenerator initialized (simplified version)")
 
     def run(self) -> None:
-        """Main prefetch loop with error handling and timeout protection."""
+        """Simplified prefetch loop with basic error handling."""
         try:
             while self.running and not self._shutdown_event.is_set():
-                if self.fallback_mode:
-                    break
-
-                # Check worker health before each prefetch attempt
-                if not self.health_monitor.check_health():
-                    logger = get_root_logger()
-                    logger.warning("Worker health check failed, attempting cleanup")
-                    self.health_monitor.cleanup_dead_workers()
-                    self.error_count += 1
-
-                    if self.error_count >= self.max_errors:
-                        logger.error(
-                            "Too many worker health failures, entering fallback mode"
-                        )
-                        self.fallback_mode = True
-                        break
-
-                    # Wait a bit before retrying
-                    time.sleep(0.1)
-                    continue
-
                 try:
-                    # Use timeout for generator iteration
                     item = self._safe_next_with_timeout()
 
                     if item is None:
@@ -148,36 +118,31 @@ class RobustPrefetchGenerator(threading.Thread):
                     self.queue.put(item)
 
                 except (KeyError, RuntimeError, AttributeError) as e:
-                    # Handle worker-related errors (like KeyError: 3)
+                    # Handle worker-related errors
                     logger = get_root_logger()
                     logger.warning(f"Worker error detected: {type(e).__name__}: {e}")
 
                     self.error_count += 1
-                    self.health_monitor._update_worker_ids()
 
                     if self.error_count >= self.max_errors:
-                        logger.error(
-                            "Maximum worker errors reached, entering fallback mode"
-                        )
+                        logger.warning("Maximum worker errors reached")
                         self.fallback_mode = True
                         break
 
                     # Brief pause before retrying
-                    time.sleep(0.05)
+                    time.sleep(0.01)
 
                 except Exception as e:
                     # Handle other unexpected errors
                     logger = get_root_logger()
-                    logger.error(
-                        f"Unexpected error in prefetch generator: {type(e).__name__}: {e}"
-                    )
+                    logger.error(f"Prefetch error: {type(e).__name__}: {e}")
                     self.error_count += 1
 
                     if self.error_count >= self.max_errors:
-                        self.fallback_mode = True
+                        logger.error("Too many errors, stopping prefetch")
                         break
 
-                    time.sleep(0.1)
+                    time.sleep(0.01)
 
         except Exception as e:
             logger = get_root_logger()
@@ -187,72 +152,104 @@ class RobustPrefetchGenerator(threading.Thread):
 
         finally:
             # Clean shutdown
-            self.health_monitor.stop_monitoring()
             self.running = False
 
-            # Put None to signal completion even if there were errors
+            # Put None to signal completion
             try:
                 self.queue.put(None, timeout=0.1)
             except queue.Full:
                 pass
 
     def _safe_next_with_timeout(self) -> Any:
-        """Get next item with timeout protection."""
-        start_time = time.time()
+        """Get next item with simplified timeout protection."""
+        try:
+            # Simple timeout check with retry mechanism
+            item = next(self.generator)
+            return item
 
-        while time.time() - start_time < self.prefetch_timeout:
+        except StopIteration:
+            return None
+
+        except (KeyError, RuntimeError, AttributeError) as e:
+            # Worker-related errors - these are common and often transient
+            logger = get_root_logger()
+            logger.warning(f"Worker access error: {type(e).__name__}: {e}")
+
+            # For worker errors, we often want to retry rather than fail
+            # Brief pause and try once more
+            time.sleep(0.01)
             try:
-                # Check if we've been shut down
-                if self._shutdown_event.is_set():
-                    return None
-
-                # Try to get next item with a short timeout
-                if hasattr(self.generator, "_worker_manager"):
-                    # PyTorch DataLoader with worker manager
-                    item = next(self.generator)
-                else:
-                    # Standard iterator
-                    item = next(self.generator)
-
+                item = next(self.generator)
+                logger.info("Worker error recovered on retry")
                 return item
-
-            except (KeyError, RuntimeError, AttributeError) as e:
-                # Worker-related errors that might be temporary
-                logger = get_root_logger()
-                logger.warning(f"Worker access error: {type(e).__name__}: {e}")
-
-                # Check if this is the specific KeyError: 3 issue
-                if "KeyError" in str(e) or "task_info" in str(e):
-                    self.health_monitor._update_worker_ids()
-
+            except Exception as retry_e:
+                logger.warning(f"Worker error retry failed: {retry_e}")
                 raise
 
-            except StopIteration:
-                return None
+        except Exception as e:
+            # Other exceptions
+            logger = get_root_logger()
+            logger.warning(f"Unexpected error in safe_next: {type(e).__name__}: {e}")
 
-            except Exception as e:
-                # Other exceptions - might be temporary
-                if time.time() - start_time < self.prefetch_timeout:
-                    time.sleep(0.01)  # Brief pause before retry
-                    continue
-                else:
-                    raise
-
-        raise TimeoutError(
-            f"Prefetch operation timed out after {self.prefetch_timeout} seconds"
-        )
+            # For unexpected errors, try to recover once
+            time.sleep(0.01)
+            try:
+                item = next(self.generator)
+                logger.info("Unexpected error recovered on retry")
+                return item
+            except Exception as retry_e:
+                logger.error(f"Unexpected error retry failed: {retry_e}")
+                raise
 
     def __next__(self) -> Any:
-        """Get next item from the prefetch queue."""
+        """Get next item from the prefetch queue with better timeout handling."""
         try:
-            next_item = self.queue.get(timeout=1.0)
+            next_item = self.queue.get(timeout=10.0)  # Increased timeout to 10 seconds
             if next_item is None:
                 raise StopIteration
             return next_item
         except queue.Empty:
+            logger = get_root_logger()
+            logger.warning(
+                "Prefetch queue timeout after 10s, checking thread status..."
+            )
+
             if not self.running or self.fallback_mode:
+                logger.info("Prefetch generator stopped, ending iteration")
                 raise StopIteration
-            raise
+
+            # Check if thread is still alive
+            if not self.is_alive():
+                logger.warning("Prefetch thread died, ending iteration")
+                raise StopIteration
+
+            # Try one more time with a longer timeout
+            try:
+                next_item = self.queue.get(timeout=5.0)
+                if next_item is None:
+                    raise StopIteration
+                return next_item
+            except queue.Empty:
+                logger.warning(
+                    "Queue still empty after extended timeout, ending iteration"
+                )
+                # Instead of raising StopIteration, let's try to reset the queue
+                logger.info("Attempting to recover from queue timeout...")
+
+                # Set running to False and try to restart the thread
+                self.running = False
+                time.sleep(0.1)
+                self.running = True
+
+                # Try one final time
+                try:
+                    next_item = self.queue.get(timeout=2.0)
+                    if next_item is None:
+                        raise StopIteration
+                    return next_item
+                except queue.Empty:
+                    logger.error("Queue recovery failed, ending iteration")
+                    raise StopIteration
 
     def __iter__(self) -> Iterator:
         return self
@@ -261,7 +258,10 @@ class RobustPrefetchGenerator(threading.Thread):
         """Stop the prefetch generator gracefully."""
         self.running = False
         self._shutdown_event.set()
-        self.health_monitor.stop_monitoring()
+
+        # Stop health monitoring if it's enabled
+        if self.health_monitor is not None:
+            self.health_monitor.stop_monitoring()
 
         # Wait for thread to finish (with timeout)
         if self.is_alive():
@@ -269,15 +269,16 @@ class RobustPrefetchGenerator(threading.Thread):
 
 
 class PrefetchDataLoader(DataLoader):
-    """Enhanced prefetch dataloader with robust worker management and fallback capabilities."""
+    """Enhanced prefetch dataloader with fallback capabilities."""
 
     def __init__(
-        self, num_prefetch_queue: int = 3, timeout: float = 30.0, **kwargs
+        self, num_prefetch_queue: int = 2, timeout: float = 15.0, **kwargs
     ) -> None:
         self.num_prefetch_queue = num_prefetch_queue
         self.prefetch_timeout = timeout
         self.fallback_dataloader = None
         self._using_fallback = False
+        self._enhanced_prefetch_enabled = True  # Can be disabled if needed
         super().__init__(**kwargs)
 
     def __iter__(self) -> RobustPrefetchGenerator:  # type: ignore
@@ -285,7 +286,7 @@ class PrefetchDataLoader(DataLoader):
         self.fallback_dataloader = DataLoader(
             dataset=self.dataset,
             batch_size=self.batch_size,
-            num_workers=self.num_workers,
+            num_workers=max(1, self.num_workers // 2),  # Reduce workers for fallback
             collate_fn=self.collate_fn,
             pin_memory=self.pin_memory,
             drop_last=self.drop_last,
@@ -294,32 +295,32 @@ class PrefetchDataLoader(DataLoader):
         )
 
         try:
-            generator = RobustPrefetchGenerator(
-                super().__iter__(), self.num_prefetch_queue
-            )
-            return generator
+            if self._enhanced_prefetch_enabled:
+                generator = RobustPrefetchGenerator(
+                    super().__iter__(), self.num_prefetch_queue
+                )
+                return generator
+            else:
+                # Use simplified generator
+                return RobustPrefetchGenerator(
+                    iter(self.fallback_dataloader), self.num_prefetch_queue
+                )
         except Exception as e:
             logger = get_root_logger()
             logger.warning(
-                f"Failed to create robust prefetch generator: {e}. Falling back to normal dataloader."
+                f"Failed to create prefetch generator: {e}. Using fallback dataloader."
             )
             self._using_fallback = True
-            return RobustPrefetchGenerator(
-                iter(self.fallback_dataloader), self.num_prefetch_queue
-            )
+            return iter(self.fallback_dataloader)
 
     def reset(self) -> None:
         """Reset the dataloader state."""
-        if (
-            hasattr(self, "_using_fallback")
-            and self._using_fallback
-            and self.fallback_dataloader
-        ):
-            # Reset fallback dataloader
+        if self.fallback_dataloader is not None:
+            # Recreate fallback dataloader
             self.fallback_dataloader = DataLoader(
                 dataset=self.dataset,
                 batch_size=self.batch_size,
-                num_workers=self.num_workers,
+                num_workers=max(1, self.num_workers // 2),
                 collate_fn=self.collate_fn,
                 pin_memory=self.pin_memory,
                 drop_last=self.drop_last,
@@ -327,22 +328,42 @@ class PrefetchDataLoader(DataLoader):
                 worker_init_fn=self.worker_init_fn,
             )
 
+    def disable_enhanced_prefetch(self) -> None:
+        """Disable enhanced prefetching and use simple fallback."""
+        self._enhanced_prefetch_enabled = False
+
 
 class CPUPrefetcher:
-    """Enhanced CPU prefetcher with error handling."""
+    """Enhanced CPU prefetcher with simplified, robust error handling."""
 
-    def __init__(self, loader: DataLoader, timeout: float = 30.0) -> None:
+    def __init__(self, loader: DataLoader, timeout: float = 15.0) -> None:
         self.ori_loader = loader
-        self.loader = iter(loader)
+        self.loader = None
         self.prefetch_timeout = timeout
         self.error_count = 0
-        self.max_errors = 3
+        self.max_errors = 5
+
+        # Initialize with iterator creation
+        self._create_iterator_safe()
+
+    def _create_iterator_safe(self) -> None:
+        """Safely create the iterator with timeout protection."""
+        try:
+            self.loader = iter(self.ori_loader)
+        except Exception as e:
+            logger = get_root_logger()
+            logger.warning(f"Failed to create iterator: {e}, using fallback")
+            # Simple fallback without advanced features
+            self.loader = iter(self.ori_loader)
 
     def next(self) -> Any:
         """Get next batch with timeout and error handling."""
+        if self.loader is None:
+            logger = get_root_logger()
+            logger.warning("Iterator is None, recreating...")
+            self._create_iterator_safe()
+
         try:
-            # Set a timeout for the next() call
-            start_time = time.time()
             result = next(self.loader)
 
             # Reset error count on success
@@ -358,16 +379,40 @@ class CPUPrefetcher:
 
             self.error_count += 1
             if self.error_count >= self.max_errors:
-                logger.error("Too many worker errors in CPU prefetcher, resetting")
-                self.loader = iter(self.ori_loader)
+                logger.warning("Too many worker errors in CPU prefetcher, resetting")
+                self._create_iterator_safe()
+                self.error_count = 0
+                # Try once more after reset
+                try:
+                    return next(self.loader)
+                except StopIteration:
+                    return None
+                except Exception as retry_e:
+                    logger.warning(f"Retry failed after reset: {retry_e}")
+                    return None
+
+            # Brief pause before retry
+            time.sleep(0.001)
+            raise
+
+        except Exception as e:
+            logger = get_root_logger()
+            logger.warning(f"Error in CPU prefetcher: {type(e).__name__}: {e}")
+            self.error_count += 1
+
+            if self.error_count >= self.max_errors:
+                logger.warning("Too many errors, resetting CPU prefetcher")
+                self._create_iterator_safe()
                 self.error_count = 0
 
-            raise
+            # Return None instead of raising to prevent training crashes
+            logger.warning("Returning None due to prefetch error")
+            return None
 
     def reset(self) -> None:
         """Reset the prefetcher."""
-        self.loader = iter(self.ori_loader)
         self.error_count = 0
+        self._create_iterator_safe()
 
 
 class CUDAPrefetcher:

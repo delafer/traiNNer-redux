@@ -34,6 +34,8 @@ datasets:
     prefetch_mode: cpu             # Use CPU prefetch to avoid CUDA pin_memory issues
     pin_memory: false              # Disable pin_memory to completely avoid CUDA allocation issues
 
+
+
     use_hflip: true
     use_rot: true
 
@@ -99,6 +101,8 @@ train:
       patience: 3000
       min_improvement: 0.0005
       monitor_metric: "val/psnr"
+      convergence_threshold: 0.0001     # More conservative threshold for convergence detection
+      convergence_log_frequency: 500    # Only log convergence messages every 500 iterations
 
     AdaptiveGradientClipping:
       enabled: true

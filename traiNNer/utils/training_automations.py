@@ -136,6 +136,12 @@ class IntelligentLearningRateScheduler(TrainingAutomationBase):
         self.min_lr_factor = config.get("min_lr_factor", 0.1)
         self.max_lr_factor = config.get("max_lr_factor", 2.0)
 
+        # LR adjustment logging control
+        self.lr_log_frequency = config.get(
+            "lr_log_frequency", 100
+        )  # How often to log LR adjustments
+        self.lr_log_cooldown = 0
+
         # State tracking
         self.loss_history = deque(maxlen=200)
         self.val_metric_history = deque(maxlen=50)
@@ -145,6 +151,11 @@ class IntelligentLearningRateScheduler(TrainingAutomationBase):
         self.best_loss_iteration = 0
         self.plateau_counter = 0
         self.lr_multipliers = {}  # Per parameter group
+
+        # State tracking for LR adjustment logging
+        self._last_lr_adjustment_reason = None
+        self._last_lr_multiplier_value = None
+        self._lr_adjustment_log_count = 0
 
         # Architecture-specific optimizations
         self.architecture_hints = config.get("architecture_hints", {})
@@ -200,10 +211,16 @@ class IntelligentLearningRateScheduler(TrainingAutomationBase):
             if len(self.val_metric_history) >= 10:
                 recent_metrics = list(self.val_metric_history)[-10:]
                 if self._detect_validation_plateau(recent_metrics):
+                    # Don't use the enhanced _apply_lr_multiplier for validation-based adjustments
+                    # as they are more urgent and should be logged immediately
                     logger.info(
                         f"Automation {self.name}: Validation plateau detected, reducing learning rate"
                     )
-                    self._apply_lr_multiplier(0.8)  # Conservative reduction
+                    # Apply the reduction directly without enhanced logging for validation triggers
+                    self.lr_adjustment_history.append(0.8)
+                    self._lr_adjustment_log_count += 1
+                    self._last_lr_adjustment_reason = "validation plateau"
+                    self._last_lr_multiplier_value = 0.8
 
     def _should_adjust_learning_rate(self) -> bool:
         """Determine if learning rate should be adjusted."""
@@ -253,11 +270,42 @@ class IntelligentLearningRateScheduler(TrainingAutomationBase):
             if self.plateau_counter >= self.plateau_patience
             else "loss divergence"
         )
-        self.lr_adjustment_history.append(multiplier)
 
-        logger.info(
-            f"Automation {self.name}: Suggested LR multiplier {multiplier:.2f} for reason: {reason}"
-        )
+        # Enhanced logging control to prevent message spam
+        if self.lr_log_cooldown > 0:
+            self.lr_log_cooldown -= 1
+            # Still record the adjustment in history for tracking
+            self.lr_adjustment_history.append(multiplier)
+            return
+
+        # Check if this is a new adjustment type or if enough time has passed
+        should_log = False
+
+        if self._last_lr_adjustment_reason != reason:
+            # New type of adjustment (plateau -> divergence or vice versa)
+            should_log = True
+        elif self._last_lr_multiplier_value != multiplier:
+            # Different multiplier value than last time
+            should_log = True
+        elif self._lr_adjustment_log_count == 0:
+            # First adjustment ever
+            should_log = True
+
+        if should_log:
+            self.lr_adjustment_history.append(multiplier)
+            self._lr_adjustment_log_count += 1
+            self._last_lr_adjustment_reason = reason
+            self._last_lr_multiplier_value = multiplier
+
+            logger.info(
+                f"Automation {self.name}: Suggested LR multiplier {multiplier:.2f} for reason: {reason}"
+            )
+
+            # Set cooldown to prevent frequent logging of similar adjustments
+            self.lr_log_cooldown = self.lr_log_frequency
+        else:
+            # Still record in history but don't log
+            self.lr_adjustment_history.append(multiplier)
 
     def _detect_validation_plateau(self, recent_metrics: list[float]) -> bool:
         """Detect if validation metrics have plateaued."""
@@ -872,6 +920,23 @@ class IntelligentEarlyStopping(TrainingAutomationBase):
         self.warmup_iterations = config.get("warmup_iterations", 1000)
         self.convergence_detected = False
 
+        # Enhanced convergence logging control
+        self.convergence_log_cooldown = 0
+        self.convergence_log_frequency = config.get(
+            "convergence_log_frequency", 100
+        )  # Log convergence messages every N iterations when starting convergence
+        self.convergence_threshold = config.get(
+            "convergence_threshold", 0.0005
+        )  # More conservative threshold
+
+        # State tracking for convergence transitions
+        self._was_converged_last_check = False
+        self._convergence_log_count = 0
+        self._sustained_convergence_iterations = 0
+        self._min_sustained_for_log = config.get(
+            "min_sustained_convergence_for_log", 10
+        )  # Must be sustained for at least 10 iterations before logging
+
     def update_training_monitoring(self, loss_value: float, iteration: int) -> None:
         """Update training loss monitoring."""
         if not self.enabled:
@@ -887,11 +952,49 @@ class IntelligentEarlyStopping(TrainingAutomationBase):
             recent_losses = list(self.training_loss_history)[-50:]
             loss_trend = self._calculate_loss_trend(recent_losses)
 
-            if abs(loss_trend) < 0.001:  # Very small improvement
-                logger.info(
-                    f"Automation {self.name}: Training loss convergence detected"
-                )
-                self.convergence_detected = True
+            # Check if we are currently in a convergence state
+            is_currently_converged = abs(loss_trend) < self.convergence_threshold
+
+            # Track sustained convergence
+            if is_currently_converged:
+                self._sustained_convergence_iterations += 1
+            else:
+                self._sustained_convergence_iterations = 0
+
+            # Enhanced convergence detection with proper state tracking
+            if is_currently_converged:
+                # We are in convergence state
+                if not self._was_converged_last_check:
+                    # We just ENTERED convergence - potential logging opportunity
+                    if (
+                        self._sustained_convergence_iterations
+                        >= self._min_sustained_for_log
+                    ):
+                        if self.convergence_log_cooldown == 0:
+                            logger.info(
+                                f"Automation {self.name}: Training loss convergence detected "
+                                f"(sustained for {self._sustained_convergence_iterations} iterations, "
+                                f"loss trend: {loss_trend:.6f})"
+                            )
+                            self.convergence_detected = True
+                            self._convergence_log_count += 1
+                            # Set cooldown to prevent frequent logging during sustained convergence
+                            self.convergence_log_cooldown = (
+                                self.convergence_log_frequency
+                            )
+                        else:
+                            self.convergence_log_cooldown -= 1
+                # We are continuing in convergence state - just decrement cooldown
+                elif self.convergence_log_cooldown > 0:
+                    self.convergence_log_cooldown -= 1
+            else:
+                # We are NOT in convergence state - reset state tracking
+                self._was_converged_last_check = False
+                self._sustained_convergence_iterations = 0
+                self.convergence_detected = False
+
+            # Update convergence state for next iteration
+            self._was_converged_last_check = is_currently_converged
 
     def update_validation_monitoring(
         self, metrics: dict[str, float], iteration: int
