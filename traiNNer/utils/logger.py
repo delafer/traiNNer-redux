@@ -120,7 +120,7 @@ class MessageLogger:
             config["grad_clip"] = getattr(opt.train, "grad_clip", False)
         if opt.datasets and "train" in opt.datasets:
             train_dataset = opt.datasets["train"]
-            config["patch_size"] = getattr(train_dataset, "gt_size", "unknown")
+            config["patch_size"] = getattr(train_dataset, "lq_size", "unknown")
             config["batch_size"] = getattr(train_dataset, "batch_size", "unknown")
             config["accum_iter"] = getattr(train_dataset, "accum_iter", 1)
         return config

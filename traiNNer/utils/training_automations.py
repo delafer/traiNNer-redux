@@ -1062,11 +1062,43 @@ class IntelligentEarlyStopping(TrainingAutomationBase):
         if self.convergence_detected and self.patience_counter >= self.patience // 2:
             return True, "training convergence detected with plateau"
 
-        # Validation metric degradation check
-        if len(self.metric_history) >= 10:
-            recent_metrics = list(self.metric_history)[-10:]
-            if all(m <= current_metric + self.min_improvement for m in recent_metrics):
-                return True, f"{self.monitor_metric} consistently plateauing"
+        # FIXED: Improved validation metric plateau detection
+        # Check for real plateaus by looking at improvements relative to the best achieved
+        if len(self.metric_history) >= 15:  # Increased window for more robust detection
+            recent_metrics = list(self.metric_history)[-15:]
+
+            # Check if we've had meaningful recent improvements
+            best_recent = max(
+                recent_metrics[:5]
+            )  # Best metric in the last 5 checkpoints
+            best_ever = max(self.metric_history)  # Best metric overall
+            recent_improvement = best_recent - (
+                max(recent_metrics[:5])
+                if len(recent_metrics) > 5
+                else recent_metrics[0]
+            )
+
+            # Also check the trend of recent metrics
+            if len(recent_metrics) >= 10:
+                recent_trend = self._calculate_metric_trend(recent_metrics)
+
+                # Real plateau detection: if the recent trend is flat AND
+                # we haven't improved significantly from our recent best
+                flat_trend_threshold = (
+                    self.min_improvement * 0.5
+                )  # Even more conservative
+                meaningful_improvement_threshold = (
+                    self.min_improvement * 2
+                )  # Allow larger improvements
+
+                if (
+                    abs(recent_trend) < flat_trend_threshold
+                    and best_ever - best_recent < meaningful_improvement_threshold
+                ):
+                    return (
+                        True,
+                        f"{self.monitor_metric} genuinely plateauing (flat trend, no recent gains)",
+                    )
 
         # Loss-accuracy divergence check (overfitting detection)
         if len(self.training_loss_history) >= 50 and len(self.metric_history) >= 10:

@@ -98,8 +98,8 @@ train:
 
     IntelligentEarlyStopping:
       enabled: true
-      patience: 3000
-      min_improvement: 0.0005
+      patience: 10000
+      min_improvement: 0.01
       monitor_metric: "val/psnr"
       convergence_threshold: 0.0001     # More conservative threshold for convergence detection
       convergence_log_frequency: 500    # Only log convergence messages every 500 iterations

@@ -82,22 +82,24 @@ train:
     intelligent_learning_rate_scheduler:
       enabled: true
 
-    DynamicBatchSizeOptimizer:
+    DynamicBatchAndPatchSizeOptimizer:
       enabled: true                   # Enable VRAM-based optimization
       target_vram_usage: 0.85
       safety_margin: 0.05
-      adjustment_frequency: 25
+      adjustment_frequency: 100
       min_batch_size: 2
-      max_batch_size: 24
+      max_batch_size: 256
       min_lq_size: 64
-      max_lq_size: 128
+      max_lq_size: 256
       vram_history_size: 50
 
-    early_stopping:
+    IntelligentEarlyStopping:
       enabled: true
-      patience: 3000
-      min_improvement: 0.0005
-      metric: "val/psnr"
+      patience: 10000
+      min_improvement: 0.01
+      monitor_metric: "val/psnr"
+      convergence_threshold: 0.0001     # More conservative threshold for convergence detection
+      convergence_log_frequency: 500    # Only log convergence messages every 500 iterations
 
     adaptive_gradient_clipping:
       enabled: true
