@@ -1249,3 +1249,15 @@ def setup_training_automations(opt: ReduxOptions) -> TrainingAutomationManager |
         return None
 
     return TrainingAutomationManager(automation_config)
+
+
+# Register snake_case aliases for compatibility with config files
+# This allows using "adaptive_gradient_clipping" in config instead of "AdaptiveGradientClipping"
+AUTOMATION_REGISTRY.register(AdaptiveGradientClipping, "adaptive_gradient_clipping")
+AUTOMATION_REGISTRY.register(
+    IntelligentLearningRateScheduler, "intelligent_learning_rate_scheduler"
+)
+AUTOMATION_REGISTRY.register(
+    DynamicBatchAndPatchSizeOptimizer, "dynamic_batch_and_patch_size_optimizer"
+)
+AUTOMATION_REGISTRY.register(IntelligentEarlyStopping, "intelligent_early_stopping")

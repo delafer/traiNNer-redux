@@ -381,22 +381,64 @@ def train_pipeline(root_path: str) -> None:
             current_batch_size = opt.datasets["train"].batch_size_per_gpu or 8
             current_lq_size = opt.datasets["train"].lq_size or 128
 
-            # Create dynamic dataloader wrapper
-            dynamic_dataloader_wrapper = create_dynamic_dataloader(
-                train_loader,
-                current_batch_size,
-                update_callback=lambda bs: logger.debug(f"Batch size updated to: {bs}"),
-            )
-
             # Create dynamic dataset wrapper
             dynamic_dataset_wrapper = patch_dataset_for_dynamic_updates(
                 train_loader.dataset
+            )
+
+            # CRITICAL FIX: Recreate the DataLoader with the dynamic dataset
+            # We cannot modify .dataset of an existing DataLoader, so we must recreate it
+            from torch.utils.data import DataLoader
+
+            # Extract parameters from existing loader
+            loader_kwargs = {
+                "batch_size": train_loader.batch_size,
+                "num_workers": train_loader.num_workers,
+                "sampler": train_loader.sampler,
+                "batch_sampler": train_loader.batch_sampler,
+                # 'collate_fn': train_loader.collate_fn, # MOVED: Passed to wrapper instead
+                "pin_memory": train_loader.pin_memory,
+                "drop_last": train_loader.drop_last,
+                "timeout": train_loader.timeout,
+                "worker_init_fn": train_loader.worker_init_fn,
+                "multiprocessing_context": train_loader.multiprocessing_context,
+                "generator": train_loader.generator,
+                "prefetch_factor": train_loader.prefetch_factor,
+                "persistent_workers": train_loader.persistent_workers,
+            }
+
+            # Save original collate_fn to pass to wrapper
+            original_collate_fn = train_loader.collate_fn
+
+            # Disable collation in the internal loader to prevent worker crashes on mixed sizes
+            # This returns a list of raw samples to the wrapper
+            loader_kwargs["collate_fn"] = lambda x: x
+
+            # Remove arguments that are mutually exclusive or problematic
+            if loader_kwargs["batch_sampler"] is not None:
+                del loader_kwargs["batch_size"]
+                del loader_kwargs["sampler"]
+                del loader_kwargs["drop_last"]
+
+            # Create new loader with dynamic dataset
+            new_train_loader = DataLoader(dynamic_dataset_wrapper, **loader_kwargs)
+
+            # Create dynamic dataloader wrapper around the NEW loader
+            dynamic_dataloader_wrapper = create_dynamic_dataloader(
+                new_train_loader,
+                current_batch_size,
+                update_callback=lambda bs: logger.debug(f"Batch size updated to: {bs}"),
+                collate_fn=original_collate_fn,
             )
 
             # Set dynamic wrappers in the model for VRAM management
             model.set_dynamic_wrappers(
                 dynamic_dataloader_wrapper, dynamic_dataset_wrapper
             )
+
+            # CRITICAL FIX: Replace the train_loader with the dynamic wrapper
+            # This ensures that the prefetcher uses the dynamic dataloader
+            train_loader = dynamic_dataloader_wrapper
 
             # Initialize automation parameters with explicit validation
             model.set_automation_parameters(current_batch_size, current_lq_size)
