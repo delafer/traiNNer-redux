@@ -6,6 +6,12 @@ os.environ["TF_CPP_MIN_LOG_LEVEL"] = "1"
 from traiNNer.check.check_dependencies import check_dependencies
 
 if __name__ == "__main__":
+    import torch.multiprocessing
+
+    try:
+        torch.multiprocessing.set_sharing_strategy("file_system")
+    except RuntimeError:
+        pass  # In case it's already set
     check_dependencies()
 
 

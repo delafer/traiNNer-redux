@@ -598,7 +598,11 @@ class DynamicBatchAndPatchSizeOptimizer(TrainingAutomationBase):
         if hasattr(self, "dynamic_dataloader") and self.dynamic_dataloader:
             self.dynamic_dataloader.set_batch_size(safe_batch_size)
         if hasattr(self, "dynamic_dataset") and self.dynamic_dataset:
-            self.dynamic_dataset.set_gt_size(safe_lq_size * 2)  # Assuming 2x scale
+            # Check for the correct method name (Mixin uses set_dynamic_gt_size, Wrapper uses set_gt_size)
+            if hasattr(self.dynamic_dataset, "set_dynamic_gt_size"):
+                self.dynamic_dataset.set_dynamic_gt_size(safe_lq_size * 2)
+            else:
+                self.dynamic_dataset.set_gt_size(safe_lq_size * 2)  # Assuming 2x scale
 
         # Record the adjustments
         self.record_adjustment(
