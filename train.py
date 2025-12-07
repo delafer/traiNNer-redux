@@ -620,8 +620,8 @@ def train_pipeline(root_path: str) -> None:
 
                         # Enhanced VRAM automation debugging - more frequent and detailed
                         if (
-                            current_iter % 25 == 0
-                        ):  # Log every 25 iterations for better monitoring
+                            current_iter % 500 == 0
+                        ):  # Log every 500 iterations for better monitoring
                             if (
                                 hasattr(model, "training_automation_manager")
                                 and model.training_automation_manager
