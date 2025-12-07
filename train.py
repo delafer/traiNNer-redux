@@ -719,10 +719,6 @@ def train_pipeline(root_path: str) -> None:
 
                                         # Safely get scale factor
                                         scale_factor = opt.scale or 1
-                                        logger.info(
-                                            f"DEBUG: new_lq={new_lq} ({type(new_lq)}), opt.scale={opt.scale} ({type(opt.scale)}), scale_factor={scale_factor} ({type(scale_factor)})"
-                                        )
-
                                         # Apply to dynamic wrapper if available (this is the key fix!)
                                         if dynamic_dataset_wrapper and hasattr(
                                             dynamic_dataset_wrapper,
@@ -798,10 +794,6 @@ def train_pipeline(root_path: str) -> None:
 
                             # Safely get scale factor for OOM recovery
                             scale_factor = opt.scale or 1
-                            logger.info(
-                                f"DEBUG OOM: suggested_lq_size={suggested_lq_size} ({type(suggested_lq_size)}), opt.scale={opt.scale} ({type(opt.scale)}), scale_factor={scale_factor} ({type(scale_factor)})"
-                            )
-
                             if dynamic_dataset_wrapper and hasattr(
                                 dynamic_dataset_wrapper, "set_dynamic_gt_size"
                             ):

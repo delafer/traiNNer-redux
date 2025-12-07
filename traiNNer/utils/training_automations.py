@@ -439,10 +439,14 @@ class DynamicBatchAndPatchSizeOptimizer(TrainingAutomationBase):
                 self.peak_vram_usage = peak_usage_ratio
                 self.adjustment_cooldown = self.adjustment_frequency
                 logger.info(
-                    f"Automation {self.name}: Monitoring period complete. "
-                    f"Peak VRAM: {self.peak_vram_usage:.3f} ({self.peak_vram_usage * 100:.1f}%). "
                     f"Suggested adjustments - Batch: {batch_adjustment:+d}, LQ: {lq_adjustment:+d}"
                 )
+
+                # Reset CUDA peak memory stats immediately so we can see the effect of the adjustment
+                # This is CRITICAL: otherwise max_memory_allocated() keeps returning the old high value
+                if torch.cuda.is_available():
+                    torch.cuda.reset_peak_memory_stats()
+
                 return batch_adjustment, lq_adjustment
 
         return None, None
