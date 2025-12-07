@@ -50,31 +50,38 @@ class Registry:
         self._obj_map[name] = obj
 
     @overload
-    def register(self, obj: None = None, suffix: str | None = None) -> Callable: ...
+    def register(
+        self, obj: None = None, suffix: str | None = None, name: str | None = None
+    ) -> Callable: ...
 
     @overload
-    def register(self, obj: Callable, suffix: str | None = None) -> None: ...
+    def register(
+        self, obj: Callable, suffix: str | None = None, name: str | None = None
+    ) -> None: ...
 
     def register(
-        self, obj: Callable | None = None, suffix: str | None = None
+        self,
+        obj: Callable | None = None,
+        suffix: str | None = None,
+        name: str | None = None,
     ) -> Callable | None:
         """
-        Register the given object under the the name `obj.__name__`.
+        Register the given object under the the name `obj.__name__` or explicit `name`.
         Can be used as either a decorator or not.
         See docstring of this class for usage.
         """
         if obj is None:
             # used as a decorator
             def deco(func_or_class: Callable) -> Callable:
-                name = func_or_class.__name__.lower()
-                self._do_register(name, func_or_class, suffix)
+                actual_name = name if name else func_or_class.__name__.lower()
+                self._do_register(actual_name, func_or_class, suffix)
                 return func_or_class
 
             return deco
 
         # used as a function call
-        name = obj.__name__.lower()
-        self._do_register(name, obj, suffix)
+        actual_name = name if name else obj.__name__.lower()
+        self._do_register(actual_name, obj, suffix)
 
     def get(self, name: str, suffix: str = "traiNNer") -> Callable:
         name = name.lower()

@@ -10,9 +10,9 @@ scale: 2
 
 # VRAM MANAGEMENT SYSTEM
 auto_vram_management:
-  enabled: true                    # Enable automatic VRAM management
-  target_vram_usage: 0.85         # Target 85% VRAM usage (prevents OOM)
-  safety_margin: 0.05             # Additional 5% safety margin
+  enabled: true # Enable automatic VRAM management
+  target_vram_usage: 0.85 # Target 85% VRAM usage (prevents OOM)
+  safety_margin: 0.05 # Additional 5% safety margin
 
 use_amp: true
 amp_bf16: true
@@ -28,10 +28,10 @@ datasets:
 
     # METRIC-OPTIMIZED PARAMETERS for RTX 3060 12GB (Auto-VRAM managed)
     # Conservative base parameters so VRAM optimizer has room to increase
-    lq_size: 128                   # Starting patch size - VRAM optimizer will increase
-    batch_size_per_gpu: 12         # Starting batch size - VRAM optimizer will increase
-    num_worker_per_gpu: 8          # Workers for efficient data loading
-    accum_iter: 1                  # No gradient accumulation needed
+    lq_size: 256 # Starting patch size - VRAM optimizer will increase
+    batch_size_per_gpu: 24 # Starting batch size - VRAM optimizer will increase
+    num_worker_per_gpu: 8 # Workers for efficient data loading
+    accum_iter: 1 # No gradient accumulation needed
 
     use_hflip: true
     use_rot: true
@@ -45,9 +45,9 @@ datasets:
 network_g:
   type: paragonsr2_stream
   # FIDELITY OPTIMIZATION: Pure reconstruction for highest PSNR/SSIM
-  upsampler_alpha: 0.0          # No sharpening - pure reconstruction for metrics
-  detail_gain: 0.08             # Conservative detail enhancement for de-blocking
-  use_content_aware: false      # Zero overhead for maximum training speed
+  upsampler_alpha: 0.0 # No sharpening - pure reconstruction for metrics
+  detail_gain: 0.08 # Conservative detail enhancement for de-blocking
+  use_content_aware: false # Zero overhead for maximum training speed
 
 path:
   pretrain_network_g: ~
@@ -78,12 +78,12 @@ train:
 
   # TRAINING AUTOMATIONS
   training_automations:
-    enabled: true                    # Master enable for all automations
+    enabled: true # Master enable for all automations
     intelligent_learning_rate_scheduler:
       enabled: true
 
     DynamicBatchAndPatchSizeOptimizer:
-      enabled: true                   # Enable VRAM-based optimization
+      enabled: true # Enable VRAM-based optimization
       target_vram_usage: 0.85
       safety_margin: 0.05
       adjustment_frequency: 100
@@ -98,8 +98,8 @@ train:
       patience: 10000
       min_improvement: 0.01
       monitor_metric: "val/psnr"
-      convergence_threshold: 0.0001     # More conservative threshold for convergence detection
-      convergence_log_frequency: 500    # Only log convergence messages every 500 iterations
+      convergence_threshold: 0.0001 # More conservative threshold for convergence detection
+      convergence_log_frequency: 500 # Only log convergence messages every 500 iterations
 
     adaptive_gradient_clipping:
       enabled: true

@@ -1192,6 +1192,26 @@ class TrainingAutomationManager:
         self.automations: dict[str, TrainingAutomationBase] = {}
         self.enabled_automations = []
 
+        # Fail-safe: Register snake_case aliases here to ensure they exist
+        # regardless of how the manager was instantiated
+        # Fail-safe: Register snake_case aliases here to ensure they exist
+        # regardless of how the manager was instantiated
+        aliases = {
+            "adaptive_gradient_clipping": AdaptiveGradientClipping,
+            "intelligent_learning_rate_scheduler": IntelligentLearningRateScheduler,
+            "dynamic_batch_and_patch_size_optimizer": DynamicBatchAndPatchSizeOptimizer,
+            "intelligent_early_stopping": IntelligentEarlyStopping,
+        }
+
+        for alias, cls in aliases.items():
+            if alias not in AUTOMATION_REGISTRY:
+                try:
+                    AUTOMATION_REGISTRY.register(cls, name=alias)
+                except Exception as e:
+                    logger.warning(
+                        f"Could not register alias '{alias}' in manager init: {e}"
+                    )
+
         # Initialize automations
         for automation_type, automation_config in config.items():
             if isinstance(automation_config, dict) and automation_config.get(
@@ -1243,21 +1263,33 @@ def setup_training_automations(opt: ReduxOptions) -> TrainingAutomationManager |
     Returns:
         TrainingAutomationManager instance or None if no automations enabled
     """
+    # Register snake_case aliases for compatibility with config files
+    # This allows using "adaptive_gradient_clipping" in config instead of "AdaptiveGradientClipping"
+    # Register snake_case aliases for compatibility with config files
+    # This allows using "adaptive_gradient_clipping" in config instead of "AdaptiveGradientClipping"
+
+    aliases = {
+        "adaptive_gradient_clipping": AdaptiveGradientClipping,
+        "intelligent_learning_rate_scheduler": IntelligentLearningRateScheduler,
+        "dynamic_batch_and_patch_size_optimizer": DynamicBatchAndPatchSizeOptimizer,
+        "intelligent_early_stopping": IntelligentEarlyStopping,
+    }
+
+    for alias, cls in aliases.items():
+        if alias not in AUTOMATION_REGISTRY:
+            AUTOMATION_REGISTRY.register(cls, name=alias)
+
+    # DEBUG: Print registry keys
+    import logging
+
+    logger = logging.getLogger(__name__)
+    logger.info(
+        f"DEBUG: Registry keys after registration: {list(AUTOMATION_REGISTRY._obj_map.keys())}"
+    )
+
     automation_config = getattr(opt.train, "training_automations", None)
 
     if not automation_config or not automation_config.get("enabled", False):
         return None
 
     return TrainingAutomationManager(automation_config)
-
-
-# Register snake_case aliases for compatibility with config files
-# This allows using "adaptive_gradient_clipping" in config instead of "AdaptiveGradientClipping"
-AUTOMATION_REGISTRY.register(AdaptiveGradientClipping, "adaptive_gradient_clipping")
-AUTOMATION_REGISTRY.register(
-    IntelligentLearningRateScheduler, "intelligent_learning_rate_scheduler"
-)
-AUTOMATION_REGISTRY.register(
-    DynamicBatchAndPatchSizeOptimizer, "dynamic_batch_and_patch_size_optimizer"
-)
-AUTOMATION_REGISTRY.register(IntelligentEarlyStopping, "intelligent_early_stopping")
