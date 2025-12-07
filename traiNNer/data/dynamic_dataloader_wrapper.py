@@ -241,7 +241,8 @@ class DynamicDataLoaderWrapper:
     def __len__(self) -> int:
         """Calculate length based on dynamic batch size."""
         original_length = len(self.dataloader)
-        original_batch_size = self._original_batch_size
+        # Use initial_batch_size as fallback if original is None (e.g. when using batch_sampler)
+        original_batch_size = self._original_batch_size or self.initial_batch_size
         current_batch_size = self.current_batch_size
 
         # Approximate total samples

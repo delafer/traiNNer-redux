@@ -717,13 +717,19 @@ def train_pipeline(root_path: str) -> None:
                                         # Update automation tracking
                                         model.set_automation_lq_size(new_lq)
 
+                                        # Safely get scale factor
+                                        scale_factor = opt.scale or 1
+                                        logger.info(
+                                            f"DEBUG: new_lq={new_lq} ({type(new_lq)}), opt.scale={opt.scale} ({type(opt.scale)}), scale_factor={scale_factor} ({type(scale_factor)})"
+                                        )
+
                                         # Apply to dynamic wrapper if available (this is the key fix!)
                                         if dynamic_dataset_wrapper and hasattr(
                                             dynamic_dataset_wrapper,
                                             "set_dynamic_gt_size",
                                         ):
                                             dynamic_dataset_wrapper.set_dynamic_gt_size(
-                                                new_lq * opt.scale
+                                                new_lq * scale_factor
                                             )
                                         elif (
                                             hasattr(automation, "dynamic_dataset")
@@ -734,11 +740,11 @@ def train_pipeline(root_path: str) -> None:
                                                 "set_dynamic_gt_size",
                                             ):
                                                 automation.dynamic_dataset.set_dynamic_gt_size(
-                                                    new_lq * opt.scale
+                                                    new_lq * scale_factor
                                                 )
 
                                         logger.info(
-                                            f"LQ size adjusted: {current_lq} → {new_lq} (GT: {new_lq * opt.scale})"
+                                            f"LQ size adjusted: {current_lq} → {new_lq} (GT: {new_lq * scale_factor})"
                                         )
 
                                 except Exception as e:
@@ -790,11 +796,17 @@ def train_pipeline(root_path: str) -> None:
                                     suggested_batch_size
                                 )
 
+                            # Safely get scale factor for OOM recovery
+                            scale_factor = opt.scale or 1
+                            logger.info(
+                                f"DEBUG OOM: suggested_lq_size={suggested_lq_size} ({type(suggested_lq_size)}), opt.scale={opt.scale} ({type(opt.scale)}), scale_factor={scale_factor} ({type(scale_factor)})"
+                            )
+
                             if dynamic_dataset_wrapper and hasattr(
                                 dynamic_dataset_wrapper, "set_dynamic_gt_size"
                             ):
                                 dynamic_dataset_wrapper.set_dynamic_gt_size(
-                                    suggested_lq_size * opt.scale
+                                    suggested_lq_size * scale_factor
                                 )
                             elif (
                                 hasattr(
@@ -816,7 +828,7 @@ def train_pipeline(root_path: str) -> None:
                                     model.training_automation_manager.automations.get(
                                         "DynamicBatchAndPatchSizeOptimizer"
                                     ).dynamic_dataset.set_dynamic_gt_size(
-                                        suggested_lq_size * opt.scale
+                                        suggested_lq_size * scale_factor
                                     )
 
                         # Collect garbage (clear VRAM)
