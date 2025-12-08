@@ -1005,7 +1005,28 @@ class SRModel(BaseModel):
         for val_data in dataloader:
             img_name = osp.splitext(osp.basename(val_data["lq_path"][0]))[0]
             self.feed_data(val_data)
-            self.test()
+
+            try:
+                self.test()
+            except torch.cuda.OutOfMemoryError:
+                torch.cuda.empty_cache()
+                logger.warning(
+                    f"OOM during validation of {img_name}. Switching to tiled inference (tile_size=256)."
+                )
+                original_tile_size = self.opt.val.tile_size
+                # Force tile size for this image
+                self.opt.val.tile_size = 256
+                try:
+                    self.test()
+                except Exception as e:
+                    logger.error(f"Failed to validate {img_name} even with tiling: {e}")
+                finally:
+                    # Restore original setting (or keep it if we want to be safe for subsequent images)
+                    # Keeping it might be safer for the rest of validation
+                    pass
+            except Exception as e:
+                logger.error(f"Error during validation of {img_name}: {e}")
+                continue
 
             visuals = self.get_current_visuals()
             sr_img = tensor2img(
