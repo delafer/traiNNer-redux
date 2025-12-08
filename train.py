@@ -829,10 +829,18 @@ def train_pipeline(root_path: str) -> None:
                                         suggested_lq_size * scale_factor
                                     )
 
+                        # Reset prefetcher to discard queued batches with old (large) size
+                        prefetcher.reset()
+                        # Fetch the first batch with the new settings to ensure we can proceed
+                        train_data = prefetcher.next()
+
                         # Collect garbage (clear VRAM)
-                        raise RuntimeError(
-                            "Ran out of VRAM during training. The automation system attempted recovery, but please reduce lq_size or batch_size_per_gpu in your config and try again."
-                        ) from None
+                        torch.cuda.empty_cache()
+                        # Retry the iteration (continue the loop)
+                        logger.info(
+                            "OOM Recovery successful. Retrying iteration with reduced parameters."
+                        )
+                        continue
                     else:
                         # Re-raise the exception if not an OOM error
                         raise
