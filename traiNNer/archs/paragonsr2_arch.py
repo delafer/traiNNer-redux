@@ -38,6 +38,7 @@ from typing import Dict, Optional, Type
 
 import torch
 import torch.nn.functional as F
+import torch.onnx
 from torch import nn
 
 from traiNNer.utils.registry import ARCH_REGISTRY
@@ -239,6 +240,10 @@ class LocalWindowAttention(nn.Module):
         self.dim = dim
         self.window_size = window_size
         self.num_heads = num_heads
+        # Static flag to print attention mode once
+        if not hasattr(LocalWindowAttention, "_printed_mode"):
+            LocalWindowAttention._printed_mode = False
+
         head_dim = dim // num_heads
         self.scale = head_dim**-0.5
 
@@ -306,6 +311,10 @@ class LocalWindowAttention(nn.Module):
         # SDPA is often not supported or exports to complex plugins in older opsets.
         # We manually implement Attention so it fuses into TRT's native kernels.
         if torch.onnx.is_in_onnx_export():
+            if not LocalWindowAttention._printed_mode:
+                print("[ParagonSR2] Export Mode Detected: Using Manual Attention.")
+                LocalWindowAttention._printed_mode = True
+
             # Prepare for BMM: (B * Heads, HeadDim, Pixels)
             q = q.reshape(B * self.num_heads, -1, H * W)
             k = k.reshape(B * self.num_heads, -1, H * W)
@@ -331,6 +340,9 @@ class LocalWindowAttention(nn.Module):
         # ---------------------------------------------------------------------
         # Training/Inference Path: Use FlashAttention (SDPA)
         # ---------------------------------------------------------------------
+        if not LocalWindowAttention._printed_mode:
+            print("[ParagonSR2] Training Mode: Using FlashAttention (SDPA).")
+            LocalWindowAttention._printed_mode = True
 
         # Permute for SDPA: (B, Heads, Pixels, HeadDim)
         q = q.transpose(-2, -1)

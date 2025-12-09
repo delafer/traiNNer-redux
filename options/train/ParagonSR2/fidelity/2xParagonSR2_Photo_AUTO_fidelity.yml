@@ -27,9 +27,9 @@ datasets:
     dataroot_lq: /home/phips/Documents/dataset/cc0/filtered_versions/cc0_c5_lr_x2
 
     # METRIC-OPTIMIZED PARAMETERS for RTX 3060 12GB (Auto-VRAM managed)
-    # Conservative base parameters so VRAM optimizer has room to increase
-    lq_size: 256 # full patch size from my dataset, VRAM optimizer will decrease if not enough vram is available
-    batch_size_per_gpu: 8 # Starting batch size - VRAM optimizer will decrease if not enough vram is available, or increase if a lot is still available
+    # Conservative base parameters so VRAM optimizer has room to increase without initial OOM
+    lq_size: 128 # Starting small (64-128) safer for 'Photo' model
+    batch_size_per_gpu: 4 # Starting conservative
     num_worker_per_gpu: 8 # Workers for efficient data loading
     accum_iter: 1 # No gradient accumulation needed
 
@@ -47,7 +47,7 @@ network_g:
   # FIDELITY OPTIMIZATION: Pure reconstruction for highest PSNR/SSIM
   upsampler_alpha: 0.0 # No sharpening - pure reconstruction for metrics
   detail_gain: 0.1 # Moderate detail enhancement for photography
-  use_content_aware: false # Zero overhead for maximum training speed
+  use_content_aware: true # Enabled for better texture handling in Photo variant
 
 path:
   pretrain_network_g: ~
