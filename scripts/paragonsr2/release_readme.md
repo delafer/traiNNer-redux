@@ -37,7 +37,50 @@ ParagonSR2 is released in four distinct tiers, each optimized for a specific har
 | **Realtime** | `paragonsr2_realtime` | 16 | 3 | MBConv (Nano) | No | **Video / Anime**. Optimized for iGPUs and Mobile. |
 | **Stream** | `paragonsr2_stream` | 32 | 3 | Gated FFN | No | **Compressed Video**. Features a wide receptive field to handle compression blocking. |
 | **Photo** | `paragonsr2_photo` | 64 | 4 | Paragon | Yes | **General Photography**. The balanced standard for image upscaling. |
-| **Pro** | `paragonsr2_pro` | 96 | 6 | Paragon | Yes | **Archival / Restoration**. Maximum fidelity with deep context for complex textures. |
+
+### Disclaimer: The 'Pro' Variant
+> [!IMPORTANT]
+> **ParagonSR2_Pro** (96ch, 36 blocks) is an "Enthusiast Class" model designed for future hardware and archival restoration.
+> *   **Training**: Requires 24GB+ VRAM (RTX 3090/4090 or A100).
+> *   **Inference**: Heavy. Recommended only for offline rendering.
+> *   **Note**: This variant is provided for completeness and future-proofing. We do not provide official pre-trained checks for Pro due to hardware constraints.
+
+---
+
+## 💻 Tested Hardware Specs (Benchmarks)
+
+All models were trained and benchmarked on the following consumer-grade system to ensure real-world viability:
+
+*   **GPU**: NVIDIA GeForce RTX 3060 (12GB VRAM, LHR)
+*   **CPU**: AMD Ryzen™ 5 3600 (6 Core / 12 Thread)
+*   **RAM**: 16GB DDR4
+*   **OS**: Ubuntu 24.10 (Linux 6.11, X11)
+*   **Drivers**: PyTorch 2.5+, CUDA 12.x
+
+---
+
+## 📦 Pre-Trained Models (2x Fidelity)
+
+We provide "Fidelity" (PSNR-optimized) pre-weights for the consumption variants. These are trained on the **CC0-147k** dataset.
+
+| Model | Checkpoint | Scale | PSNR (Set5) | PSNR (Urban100) |
+| :--- | :--- | :--- | :--- | :--- |
+| **Realtime** | `ParagonSR2_Realtime_x2.pth` | 2x | *TBD* | *TBD* |
+| **Stream** | `ParagonSR2_Stream_x2.pth` | 2x | *TBD* | *TBD* |
+| **Photo** | `ParagonSR2_Photo_x2.pth` | 2x | *TBD* | *TBD* |
+
+> *Note: Detailed metrics for `Urban100`, `B100`, and `Manga109` will be added upon release.*
+
+---
+
+## 📊 Performance Benchmarks
+
+Inference speed measured on the **RTX 3060** using the included `benchmark_release.py` script.
+
+| Variant | Resolution | PyTorch (fp16) | TensorRT (fp16) | Speedup | VRAM |
+| :--- | :--- | :--- | :--- | :--- | :--- |
+| **Realtime** | 1080p -> 4K | *... FPS* | *... FPS* | **...x** | *... GB* |
+| **Photo** | 720p -> 1440p | *... FPS* | *... FPS* | **...x** | *... GB* |
 
 ---
 
