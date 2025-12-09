@@ -231,6 +231,7 @@ class LocalWindowAttention(nn.Module):
     """
     Efficient Window-based Self-Attention for 'Pro' and 'Photo' variants.
     Captures global consistency within patches (e.g. 32x32).
+    Uses F.scaled_dot_product_attention (FlashAttention) for maximum efficiency.
     """
 
     def __init__(self, dim: int, window_size: int = 32, num_heads: int = 4) -> None:

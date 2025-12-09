@@ -21,7 +21,7 @@ Most SR architectures force a compromise: choose *speed* (FSRCNN, ESPCN) or choo
     *   **Path B (Detail):** A deep neural network predicts *only* high-frequency residuals (textures, fine edges) in efficient LR space.
 2.  **Deployment Focus**:
     *   Engineered for **ONNX/TensorRT** export (static graphs, memory-aligned channels).
-    *   Uses **Window Attention** with fixed sizes (linear complexity) rather than global attention.
+    *   Uses **Window Attention** via PyTorch's `scaled_dot_product_attention` (FlashAttention) for maximum training efficiency.
     *   Includes a dedicated export pipeline to generate Dynamic FP32 ONNX models optimized for TensorRT FP16 execution.
 3.  **Specialized Variants**:
     *   Instead of simply scaling depth, each variant uses specific blocks (MBConv, Gated FFN, or Transformer) tailored to its specific use case (Video vs. Photo vs. Restoration).
@@ -32,12 +32,12 @@ Most SR architectures force a compromise: choose *speed* (FSRCNN, ESPCN) or choo
 
 ParagonSR2 is released in four distinct tiers, each optimized for a specific hardware class and use case.
 
-| Variant | Name in Code | Channels | Block Type | Attention | Target Use Case |
-| :--- | :--- | :--- | :--- | :--- | :--- |
-| **Realtime** | `paragonsr2_realtime` | 16 | MBConv (Nano) | No | **Video / Anime**. Optimized for iGPUs and Mobile. |
-| **Stream** | `paragonsr2_stream` | 32 | Gated FFN | No | **Compressed Video**. Features a wide receptive field to handle compression blocking. |
-| **Photo** | `paragonsr2_photo` | 64 | Paragon | Yes | **General Photography**. The balanced standard for image upscaling. |
-| **Pro** | `paragonsr2_pro` | 96 | Paragon | Yes | **Archival / Restoration**. Maximum fidelity with deep context for complex textures. |
+| Variant | Name in Code | Channels | Blocks/Group | Block Type | Attention | Target Use Case |
+| :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+| **Realtime** | `paragonsr2_realtime` | 16 | 3 | MBConv (Nano) | No | **Video / Anime**. Optimized for iGPUs and Mobile. |
+| **Stream** | `paragonsr2_stream` | 32 | 3 | Gated FFN | No | **Compressed Video**. Features a wide receptive field to handle compression blocking. |
+| **Photo** | `paragonsr2_photo` | 64 | 4 | Paragon | Yes | **General Photography**. The balanced standard for image upscaling. |
+| **Pro** | `paragonsr2_pro` | 96 | 6 | Paragon | Yes | **Archival / Restoration**. Maximum fidelity with deep context for complex textures. |
 
 ---
 

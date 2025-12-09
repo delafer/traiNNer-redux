@@ -194,18 +194,23 @@ class LocalWindowAttention(nn.Module):
         B, C, H, W = x.shape
         flat_hw = H * W
 
-        # Project
-        q = self.query(x).view(B, -1, flat_hw).permute(0, 2, 1)  # (B, HW, C')
-        k = self.key(x).view(B, -1, flat_hw)  # (B, C', HW)
-        v = self.value(x).view(B, -1, flat_hw)  # (B, C, HW)
+        # Project & Shape for SDPA: (B, Head, SeqLen, Dim)
+        # Head=1, SeqLen=flat_hw
+        q = self.query(x).view(B, 1, -1, flat_hw).permute(0, 1, 3, 2)  # (B, 1, HW, C')
+        k = self.key(x).view(B, 1, -1, flat_hw).permute(0, 1, 3, 2)  # (B, 1, HW, C')
+        v = self.value(x).view(B, 1, -1, flat_hw).permute(0, 1, 3, 2)  # (B, 1, HW, C)
 
-        # Attn map
-        attn = torch.bmm(q, k) * self.scale
-        attn = F.softmax(attn, dim=-1)
+        # Efficient SDPA (FlashAttention)
+        # Note: self.scale matches 1/sqrt(dim) usually, but we let SDPA handle it implicitly
+        # or we could pass scale=self.scale.
+        # SDPA default scale is 1/sqrt(K.size(-1)).
+        # self.scale = reduced**-0.5. reduced = K.size(-1).
+        # So explicit scale is NOT needed, default behavior matches.
+        out = F.scaled_dot_product_attention(q, k, v)
 
-        # Weighted sum
-        out = torch.bmm(v, attn.transpose(1, 2))
-        out = out.view(B, C, H, W)
+        # Restore shape
+        # (B, 1, HW, C) -> (B, C, HW) -> (B, C, H, W)
+        out = out.permute(0, 3, 1, 2).view(B, C, H, W)
 
         return x + self.gamma * out
 
