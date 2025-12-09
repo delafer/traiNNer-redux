@@ -300,6 +300,38 @@ class LocalWindowAttention(nn.Module):
         # q, k, v shapes: (B, Heads, HeadDim, Pixels)
         q, k, v = qkv.unbind(1)
 
+        # ---------------------------------------------------------------------
+        # ONNX Export Path: Use Standard Math (MatMul + Softmax)
+        # ---------------------------------------------------------------------
+        # SDPA is often not supported or exports to complex plugins in older opsets.
+        # We manually implement Attention so it fuses into TRT's native kernels.
+        if torch.onnx.is_in_onnx_export():
+            # Prepare for BMM: (B * Heads, HeadDim, Pixels)
+            q = q.reshape(B * self.num_heads, -1, H * W)
+            k = k.reshape(B * self.num_heads, -1, H * W)
+            v = v.reshape(B * self.num_heads, -1, H * W)
+
+            # Attention Map: (B*Heads, Pixels, Pixels)
+            # q.transpose(-2, -1) -> (..., Pixels, HeadDim)
+            # k -> (..., HeadDim, Pixels)
+            dots = torch.bmm(q.transpose(-2, -1), k) * self.scale
+            attn = F.softmax(dots, dim=-1)
+
+            # Weighted Sum: (B*Heads, HeadDim, Pixels)
+            # v -> (..., HeadDim, Pixels)
+            # attn.transpose(-2, -1) -> (..., Pixels, Pixels) (Simulates V @ Attn_T)
+            out = torch.bmm(v, attn.transpose(-2, -1))
+
+            # Reshape back to (B, C, H, W)
+            # (B*Heads, HeadDim, Pixels) -> (B, Heads, HeadDim, Pixels)
+            out = out.reshape(B, self.num_heads, -1, H * W)
+            out = out.reshape(B, C, H, W)
+            return self.proj(out)
+
+        # ---------------------------------------------------------------------
+        # Training/Inference Path: Use FlashAttention (SDPA)
+        # ---------------------------------------------------------------------
+
         # Permute for SDPA: (B, Heads, Pixels, HeadDim)
         q = q.transpose(-2, -1)
         k = k.transpose(-2, -1)
