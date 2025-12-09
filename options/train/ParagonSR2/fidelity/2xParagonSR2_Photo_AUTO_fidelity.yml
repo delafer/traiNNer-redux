@@ -28,8 +28,8 @@ datasets:
 
     # METRIC-OPTIMIZED PARAMETERS for RTX 3060 12GB (Auto-VRAM managed)
     # Conservative base parameters so VRAM optimizer has room to increase
-    lq_size: 64 # Starting patch size - VRAM optimizer will increase
-    batch_size_per_gpu: 2 # Starting batch size - VRAM optimizer will increase
+    lq_size: 256 # full patch size from my dataset, VRAM optimizer will decrease if not enough vram is available
+    batch_size_per_gpu: 8 # Starting batch size - VRAM optimizer will decrease if not enough vram is available, or increase if a lot is still available
     num_worker_per_gpu: 8 # Workers for efficient data loading
     accum_iter: 1 # No gradient accumulation needed
 

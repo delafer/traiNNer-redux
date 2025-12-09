@@ -293,26 +293,26 @@ class LocalWindowAttention(nn.Module):
     def _attn(self, x: torch.Tensor) -> torch.Tensor:
         B, C, H, W = x.shape
         # Reshape to (B, 3, Heads, HeadDim, Pixels)
+        # Note: Pixels is sequence length
         qkv = self.qkv(x).reshape(B, 3, self.num_heads, C // self.num_heads, -1)
 
-        # CRITICAL FIX: Unbind dim 1 to preserve Batch dim.
         # q, k, v shapes: (B, Heads, HeadDim, Pixels)
         q, k, v = qkv.unbind(1)
 
-        # Scale query for stability
-        q = q * self.scale
+        # Permute for SDPA: (B, Heads, Pixels, HeadDim)
+        q = q.transpose(-2, -1)
+        k = k.transpose(-2, -1)
+        v = v.transpose(-2, -1)
 
-        # Attention Map: (B, Heads, Pixels, Pixels)
-        # Transpose q: (B, Heads, Pixels, HeadDim)
-        attn = q.transpose(-2, -1) @ k
-        attn = attn.softmax(dim=-1)
+        # Use efficient SDPA (FlashAttention/MemEfficient)
+        # Automatically handles scaling (1/sqrt(head_dim)) if scale is None, matches our self.scale
+        out = F.scaled_dot_product_attention(q, k, v)
 
-        # Apply to Value: (B, Heads, Pixels, HeadDim)
-        # v Transpose: (B, Heads, Pixels, HeadDim)
-        out = attn @ v.transpose(-2, -1)
+        # Reshape back: (B, Heads, Pixels, HeadDim) -> (B, Heads, HeadDim, Pixels)
+        out = out.transpose(-2, -1)
 
-        # Restore shape: (B, Heads, Dim, Pixels) -> (B, C, H, W)
-        out = out.transpose(-2, -1).reshape(B, C, H, W)
+        # Restore shape: (B, Heads, HeadDim, Pixels) -> (B, C, H, W)
+        out = out.reshape(B, C, H, W)
         return self.proj(out)
 
 
@@ -714,7 +714,7 @@ def paragonsr2_photo(
         scale=scale,
         num_feat=64,
         num_groups=4,
-        num_blocks=6,
+        num_blocks=4,
         upsampler_alpha=upsampler_alpha,
         detail_gain=kwargs.pop("detail_gain", 0.1),
         use_content_aware=kwargs.pop("use_content_aware", True),
@@ -746,7 +746,7 @@ def paragonsr2_pro(
         scale=scale,
         num_feat=96,
         num_groups=6,
-        num_blocks=8,
+        num_blocks=6,
         upsampler_alpha=upsampler_alpha,
         detail_gain=kwargs.pop("detail_gain", 0.15),
         use_content_aware=kwargs.pop("use_content_aware", True),

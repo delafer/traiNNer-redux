@@ -90,25 +90,6 @@ datasets:
     # Focus: Realistic internet photo workflows (download/upload/edit/re-upload)
     # Goal: Great quality upscale for photos downloaded from the internet
 
-    # === Sequence Controller (OPTIONAL - Not Currently Used) ===
-    # The sequence controller orchestrates degradations into realistic workflows
-    # like "professional camera → editing → upload → download → re-edit"
-    # Currently DISABLED - we use individual degradation probabilities instead
-    #
-    # To enable orchestrated workflows (requires code integration):
-    # enable_sequences: true
-    #
-    # Available sequences when enabled:
-    # - professional_to_internet: DSLR → post-processing → web upload
-    # - phone_to_social: Phone camera → filters → social media
-    # - social_processing: Multi-platform upload cycles (Instagram → screenshot → Twitter)
-    # - legacy_internet: Old photo editors → multiple JPEG saves
-    # - youtube_video: H.264 encoding → platform processing (if video enabled)
-    # - tiktok_shortform: Aggressive compression → beauty filters
-    #
-    # Note: Currently sequences are created but NOT applied in training pipeline
-    # Individual degradation probabilities below are what actually runs
-
     # === REALISTIC COMPRESSION PIPELINE ===
     # Replaces old sequential WebP/AVIF/HEIF compression with unified approach
     # Each compression round chooses ONE format (mutually exclusive)
