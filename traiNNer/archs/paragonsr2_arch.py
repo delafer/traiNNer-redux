@@ -260,39 +260,50 @@ class LocalWindowAttention(nn.Module):
         # Pad to multiple of window size
         pad_h = (self.window_size - H % self.window_size) % self.window_size
         pad_w = (self.window_size - W % self.window_size) % self.window_size
-        if pad_h > 0 or pad_w > 0:
-            x = F.pad(x, (0, pad_w, 0, pad_h))
 
-        # Window Partition
+        # Always pad to ensure graph continuity in ONNX (even if 0)
+        x = F.pad(x, (0, pad_w, 0, pad_h))
+
+        # Window Partition (Reshape/Permute - TRT Friendly)
         _, _, Hp, Wp = x.shape
-        x_windows = F.unfold(x, kernel_size=self.window_size, stride=self.window_size)
-
-        # Reshape for Attention: (B, C, N_windows, Window_pixels)
-        x_windows = x_windows.view(B, C, self.window_size * self.window_size, -1)
-        x_windows = x_windows.permute(0, 3, 1, 2)  # (B, N_win, C, Pixels)
-
-        # Attention computation per window (Batched)
-        B_win = B * x_windows.shape[1]
-        x_attn = self._attn(
-            x_windows.reshape(B_win, C, self.window_size, self.window_size)
+        # (B, C, H, W) -> (B, C, H//Ws, Ws, W//Ws, Ws)
+        x = x.view(
+            B,
+            C,
+            Hp // self.window_size,
+            self.window_size,
+            Wp // self.window_size,
+            self.window_size,
         )
+
+        # (B, C, grid_H, eps_H, grid_W, eps_W) -> (B, grid_H, grid_W, C, eps_H, eps_W)
+        x = x.permute(0, 2, 4, 1, 3, 5).contiguous()
+
+        # (B * grid_H * grid_W, C, eps_H, eps_W)
+        x = x.view(-1, C, self.window_size, self.window_size)
+
+        # Attention
+        x = self._attn(x)
 
         # Window Reverse
-        x_attn = x_attn.view(
-            B, -1, C, self.window_size * self.window_size
-        )  # (B, N_win, C, Pixels)
-        x_attn = x_attn.permute(0, 2, 3, 1)  # (B, C, Pixels, N_win)
-        x_attn = x_attn.reshape(B, C * self.window_size * self.window_size, -1)
-
-        x = F.fold(
-            x_attn,
-            output_size=(Hp, Wp),
-            kernel_size=self.window_size,
-            stride=self.window_size,
+        # (B * grid_H * grid_W, C, eps_H, eps_W) -> (B, grid_H, grid_W, C, eps_H, eps_W)
+        x = x.view(
+            B,
+            Hp // self.window_size,
+            Wp // self.window_size,
+            C,
+            self.window_size,
+            self.window_size,
         )
 
-        if pad_h > 0 or pad_w > 0:
-            x = x[:, :, :H, :W]
+        # (B, grid_H, grid_W, C, eps_H, eps_W) -> (B, C, grid_H, eps_H, grid_W, eps_W)
+        x = x.permute(0, 3, 1, 4, 2, 5).contiguous()
+
+        # (B, C, H, W)
+        x = x.view(B, C, Hp, Wp)
+
+        # Always slice to restore original size (handling the pad=0 case automatically)
+        x = x[:, :, :H, :W]
 
         return x
 

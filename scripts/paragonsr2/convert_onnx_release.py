@@ -61,11 +61,13 @@ try:
         "paragonsr2_photo": paragonsr2_arch.paragonsr2_photo,
         "paragonsr2_pro": paragonsr2_arch.paragonsr2_pro,
     }
+
 except ImportError:
     # Fallback to traiNNer repo structure
     try:
         repo_root = Path(__file__).parents[2]
         sys.path.insert(0, str(repo_root))
+        import traiNNer.archs.paragonsr2_arch  # Import to register architectures
         from traiNNer.utils.registry import ARCH_REGISTRY
 
         ARCH_MAP = ARCH_REGISTRY
@@ -170,16 +172,11 @@ class ParagonConverter:
 
     def load_model(self) -> torch.nn.Module:
         print(f"\n[1/4] Loading architecture: {self.args.arch}")
-        if self.args.arch not in ARCH_MAP:
-            # Fallback: try to get from registry if using string name
-            try:
-                arch_fn = ARCH_MAP.get(self.args.arch)
-            except:
-                raise ValueError(
-                    f"Architecture '{self.args.arch}' not found in registry."
-                )
-        else:
-            arch_fn = ARCH_MAP[self.args.arch]
+        # Try to get from registry or map
+        arch_fn = ARCH_MAP.get(self.args.arch)
+
+        if arch_fn is None:
+            raise ValueError(f"Architecture '{self.args.arch}' not found in registry.")
 
         model = arch_fn(scale=self.args.scale)
 
@@ -233,7 +230,7 @@ class ParagonConverter:
                 "input": {0: "batch", 2: "height", 3: "width"},
                 "output": {0: "batch", 2: "height", 3: "width"},
             },
-            opset_version=17,  # Stable version for TRT 8.6+
+            opset_version=18,  # Updated for PyTorch 2.5+ / TRT 8.6+
             do_constant_folding=True,
         )
 
