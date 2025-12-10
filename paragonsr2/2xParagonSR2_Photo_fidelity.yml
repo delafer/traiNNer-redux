@@ -1,0 +1,136 @@
+# GENERATE TIME: Tue Dec  9 12:00:35 2025
+# CMD:
+# train.py -opt options/train/ParagonSR2/fidelity/2xParagonSR2_Photo_AUTO_fidelity.yml
+
+#########################################################################################
+# ParagonSR2 Photo Auto-Optimized VRAM Management Config - FIDELITY OPTIMIZED
+# Optimized for highest PSNR/SSIM metrics with pure reconstruction (no sharpening)
+# Balanced general purpose variant with attention for photography
+# For RTX 3060 12GB: lq_size=128, batch=16, workers=8
+# For RTX 4090 24GB: lq_size=256, batch=32, workers=8
+#########################################################################################
+name: 2xParagonSR2_Photo_AUTO_fidelity
+scale: 2
+
+# VRAM MANAGEMENT SYSTEM
+auto_vram_management:
+  enabled: true # Enable automatic VRAM management
+  target_vram_usage: 0.85 # Target 85% VRAM usage (prevents OOM)
+  safety_margin: 0.05 # Additional 5% safety margin
+
+use_amp: true
+amp_bf16: true
+use_channels_last: true
+num_gpu: auto
+
+datasets:
+  train:
+    name: CC0_147k_Train
+    type: pairedimagedataset
+    dataroot_gt: /home/phips/Documents/dataset/cc0/filtered_versions/cc0_c5_hr
+    dataroot_lq: /home/phips/Documents/dataset/cc0/filtered_versions/cc0_c5_lr_x2
+
+    # METRIC-OPTIMIZED PARAMETERS for RTX 3060 12GB (Auto-VRAM managed)
+    # Conservative base parameters so VRAM optimizer has room to increase without initial OOM
+    lq_size: 128 # Starting small (64-128) safer for 'Photo' model
+    batch_size_per_gpu: 4 # Starting conservative
+    num_worker_per_gpu: 8 # Workers for efficient data loading
+    accum_iter: 1 # No gradient accumulation needed
+
+    use_hflip: true
+    use_rot: true
+
+  val:
+    name: CC0_147k_Val
+    type: pairedimagedataset
+    dataroot_gt: /home/phips/Documents/dataset/cc0/val_hr
+    dataroot_lq: /home/phips/Documents/dataset/cc0/val_lr_x2_bicubic_aa
+
+network_g:
+  type: paragonsr2_photo
+  # FIDELITY OPTIMIZATION: Pure reconstruction for highest PSNR/SSIM
+  upsampler_alpha: 0.0 # No sharpening - pure reconstruction for metrics
+  detail_gain: 0.1 # Moderate detail enhancement for photography
+  use_content_aware: true # Enabled for better texture handling in Photo variant
+
+path:
+  pretrain_network_g: ~
+  strict_load_g: true
+
+train:
+  ema_decay: 0.999
+  ema_power: 0.75
+  grad_clip: true
+
+  optim_g:
+    type: AdamW
+    lr: !!float 2e-4
+    weight_decay: !!float 1e-4
+    betas: [0.9, 0.99]
+
+  scheduler:
+    type: MultiStepLR
+    milestones: [40000, 50000, 55000]
+    gamma: 0.5
+
+  total_iter: 200000
+  warmup_iter: 1000
+
+  # DYNAMIC LOSS SCHEDULING WITH AUTO-CALIBRATION
+  dynamic_loss_scheduling:
+    enabled: true
+
+  # TRAINING AUTOMATIONS
+  training_automations:
+    enabled: true # Master enable for all automations
+    intelligent_learning_rate_scheduler:
+      enabled: true
+
+    DynamicBatchAndPatchSizeOptimizer:
+      enabled: true # Enable VRAM-based optimization
+      target_vram_usage: 0.85
+      safety_margin: 0.05
+      adjustment_frequency: 100
+      min_batch_size: 2
+      max_batch_size: 256
+      min_lq_size: 64
+      max_lq_size: 256
+      vram_history_size: 50
+
+    IntelligentEarlyStopping:
+      enabled: true
+      patience: 10000
+      min_improvement: 0.01
+      monitor_metric: "val/psnr"
+      convergence_threshold: 0.0001 # More conservative threshold for convergence detection
+      convergence_log_frequency: 500 # Only log convergence messages every 500 iterations
+
+    adaptive_gradient_clipping:
+      enabled: true
+
+  # OPTIMAL FIDELITY LOSS COMBINATION
+  losses:
+    - type: l1loss
+      loss_weight: 1.0
+    - type: mssimloss
+      loss_weight: 0.08
+
+val:
+  val_enabled: true
+  val_freq: 1000
+  save_img: true
+
+  metrics_enabled: true
+  metrics:
+    psnr:
+      type: calculate_psnr
+      crop_border: 4
+    ssim:
+      type: calculate_ssim
+      crop_border: 4
+
+logger:
+  print_freq: 100
+  save_checkpoint_freq: 10000
+  save_checkpoint_format: safetensors
+  use_tb_logger: true
