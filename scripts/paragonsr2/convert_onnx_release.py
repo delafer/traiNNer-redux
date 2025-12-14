@@ -178,7 +178,22 @@ class ParagonConverter:
         if arch_fn is None:
             raise ValueError(f"Architecture '{self.args.arch}' not found in registry.")
 
-        model = arch_fn(scale=self.args.scale)
+        # Build architecture kwargs from command line overrides
+        arch_kwargs = {"scale": self.args.scale}
+
+        if self.args.use_content_aware is not None:
+            arch_kwargs["use_content_aware"] = self.args.use_content_aware
+            print(f"      Override: use_content_aware={self.args.use_content_aware}")
+
+        if self.args.upsampler_alpha is not None:
+            arch_kwargs["upsampler_alpha"] = self.args.upsampler_alpha
+            print(f"      Override: upsampler_alpha={self.args.upsampler_alpha}")
+
+        if self.args.detail_gain is not None:
+            arch_kwargs["detail_gain"] = self.args.detail_gain
+            print(f"      Override: detail_gain={self.args.detail_gain}")
+
+        model = arch_fn(**arch_kwargs)
 
         print(f"      Loading weights: {self.args.checkpoint}")
         if str(self.args.checkpoint).endswith(".safetensors"):
@@ -333,6 +348,26 @@ if __name__ == "__main__":
     parser.add_argument("--val_dir", help="Folder of images to validate ONNX accuracy")
     parser.add_argument(
         "--val_count", type=int, default=5, help="Number of images to test"
+    )
+
+    # Architecture override arguments (for checkpoints trained with non-default settings)
+    parser.add_argument(
+        "--use_content_aware",
+        type=lambda x: x.lower() in ("true", "1", "yes"),
+        default=None,
+        help="Override use_content_aware setting (true/false)",
+    )
+    parser.add_argument(
+        "--upsampler_alpha",
+        type=float,
+        default=None,
+        help="Override upsampler_alpha setting",
+    )
+    parser.add_argument(
+        "--detail_gain",
+        type=float,
+        default=None,
+        help="Override detail_gain setting",
     )
 
     args = parser.parse_args()
