@@ -77,8 +77,8 @@ trtexec --onnx=release_onnx/paragonsr2_photo_fp32.onnx \
         --saveEngine=paragonsr2_photo_fp16.trt \
         --fp16 \
         --minShapes=input:1x3x64x64 \
-        --optShapes=input:1x3x720x1280 \
-        --maxShapes=input:1x3x1080x1920
+        --optShapes=input:1x3x512x512 \
+        --maxShapes=input:1x3x720x720
 ```
 
 ---
