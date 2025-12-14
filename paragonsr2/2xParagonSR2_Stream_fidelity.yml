@@ -1,4 +1,4 @@
-# GENERATE TIME: Sun Dec  7 14:29:49 2025
+# GENERATE TIME: Fri Dec 12 22:51:58 2025
 # CMD:
 # train.py -opt options/train/ParagonSR2/fidelity/2xParagonSR2_Stream_AUTO_fidelity.yml
 
@@ -73,7 +73,7 @@ train:
     milestones: [40000, 50000, 55000]
     gamma: 0.5
 
-  total_iter: 60000
+  total_iter: 200000
   warmup_iter: 1000
 
   # DYNAMIC LOSS SCHEDULING WITH AUTO-CALIBRATION
