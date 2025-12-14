@@ -134,8 +134,12 @@ class PyTorchRunner:
         print(f"[PyTorch] Loading {arch} from {model_path}...")
 
         try:
-            sys.path.insert(0, str(Path(__file__).parent))
-            import paragonsr2_arch
+            # Add repo root to path for traiNNer imports
+            repo_root = Path(__file__).parent.parent.parent
+            if str(repo_root) not in sys.path:
+                sys.path.insert(0, str(repo_root))
+
+            from traiNNer.archs import paragonsr2_arch
 
             arch_map = {
                 "paragonsr2_realtime": paragonsr2_arch.paragonsr2_realtime,

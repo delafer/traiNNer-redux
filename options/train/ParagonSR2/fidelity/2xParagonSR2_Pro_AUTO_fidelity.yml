@@ -28,8 +28,8 @@ datasets:
 
     # METRIC-OPTIMIZED PARAMETERS for RTX 3080 12GB (Auto-VRAM managed)
     # Conservative base parameters so VRAM optimizer has room to increase
-    lq_size: 32 # Starting patch size - VRAM optimizer will increase
-    batch_size_per_gpu: 2 # Starting batch size - VRAM optimizer will increase
+    lq_size: 128 # Starting patch size - VRAM optimizer will increase
+    batch_size_per_gpu: 4 # Starting batch size - VRAM optimizer will increase
     num_worker_per_gpu: 8 # Workers for efficient data loading
     accum_iter: 1 # No gradient accumulation needed
 

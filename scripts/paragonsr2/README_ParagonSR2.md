@@ -129,7 +129,62 @@ See [README_MUNet.md](README_MUNet.md) for discriminator details.
 
 ---
 
-## 📜 Citation
+## � Benchmarks
+
+> **All development, training, testing, and benchmarking was performed on consumer-grade hardware.**
+
+### System Specs
+
+| Component | Specification |
+|-----------|--------------|
+| **GPU** | NVIDIA GeForce RTX 3060 (12 GB VRAM) |
+| **CPU** | AMD Ryzen 5 3600 (6-core / 12-thread) |
+| **RAM** | 16 GB DDR4 |
+| **OS** | Ubuntu 24.10 (Linux 6.11) |
+| **PyTorch** | 2.9.0 + CUDA 12.8 |
+
+### Inference Speed (2x Upscaling)
+
+**Dataset:** Urban100 x2 LR Set
+
+#### paragonsr2_realtime (16K params)
+| Backend | Avg Latency | FPS | Peak VRAM |
+|---------|-------------|-----|-----------|
+| PyTorch FP32 | 86.7 ms | 11.5 | 0.27 GB |
+| PyTorch FP16 | 86.4 ms | 11.6 | 0.10 GB |
+| TensorRT FP16 | **2.7 ms** | **376.2** | 0.03 GB |
+
+#### paragonsr2_stream (95K params, content_aware=false)
+| Backend | Avg Latency | FPS | Peak VRAM |
+|---------|-------------|-----|-----------|
+| PyTorch FP32 | 183.1 ms | 5.5 | 0.53 GB |
+| PyTorch FP16 | 177.2 ms | 5.6 | 0.21 GB |
+| TensorRT FP16 | **8.5 ms** | **118.0** | 0.03 GB |
+
+#### paragonsr2_photo (1.9M params)
+| Backend | Avg Latency | FPS | Peak VRAM |
+|---------|-------------|-----|-----------|
+| PyTorch FP32 | 1340.8 ms | 0.7 | 1.34 GB |
+| PyTorch FP16 | **436.3 ms** | **2.3** | 0.79 GB |
+| TensorRT FP16 | 626.1 ms | 1.6 | 0.03 GB |
+
+> [!NOTE]
+> **PyTorch FP16 beats TensorRT for Photo** due to FlashAttention (SDPA) being highly optimized for dynamic shapes. TensorRT excels with fixed-size inputs.
+
+> [!NOTE]
+> **Stream fidelity model** was trained with `use_content_aware=false` for maximum training speed. Use `--use_content_aware false` when loading this checkpoint.
+
+### TensorRT Build Limits (RTX 3060 12GB)
+
+| Variant | Max Shapes | Build Command |
+|---------|-----------|---------------|
+| Realtime | 1080x1080 | `--maxShapes=input:1x3x1080x1080` |
+| Stream | 1024x1024 | `--maxShapes=input:1x3x1024x1024` |
+| Photo | 720x720 | `--maxShapes=input:1x3x720x720` |
+
+---
+
+## �📜 Citation
 
 If you use ParagonSR2 in your research, please cite:
 
