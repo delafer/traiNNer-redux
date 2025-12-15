@@ -48,6 +48,7 @@ network_g:
   upsampler_alpha: 0.0 # No sharpening - pure reconstruction for metrics
   detail_gain: 0.1 # Moderate detail enhancement for photography
   use_content_aware: true # Enabled for better texture handling in Photo variant
+  use_checkpointing: true # Gradient Checkpointing for VRAM efficiency
 
 path:
   pretrain_network_g: ~

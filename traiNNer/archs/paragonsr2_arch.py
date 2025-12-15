@@ -40,6 +40,7 @@ import torch
 import torch.nn.functional as F
 import torch.onnx
 from torch import nn
+from torch.utils import checkpoint
 
 from traiNNer.utils.registry import ARCH_REGISTRY
 
@@ -640,9 +641,11 @@ class ResidualGroup(nn.Module):
         num_blocks: int,
         block_type: str = "paragon",
         group_idx: int = 0,  # Used for global block indexing
+        use_checkpointing: bool = False,
         **kwargs,
     ) -> None:
         super().__init__()
+        self.use_checkpointing = use_checkpointing
 
         BlockClass: type[nn.Module]
         if block_type == "nano":
@@ -662,7 +665,13 @@ class ResidualGroup(nn.Module):
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.blocks(x) + x
+        if self.use_checkpointing and x.requires_grad:
+            res = x
+            for block in self.blocks:
+                x = checkpoint.checkpoint(block, x, use_reentrant=False)
+            return x + res
+        else:
+            return self.blocks(x) + x
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -691,6 +700,7 @@ class ParagonSR2(nn.Module):
         block_type: str = "paragon",  # 'nano', 'gate', 'paragon'
         block_kwargs: dict | None = None,
         use_channels_last: bool = True,
+        use_checkpointing: bool = False,
         **kwargs,
     ) -> None:
         super().__init__()
@@ -725,6 +735,7 @@ class ParagonSR2(nn.Module):
                     block_type=block_type,
                     group_idx=i,  # Pass group index for global block indexing
                     ffn_expansion=ffn_expansion,
+                    use_checkpointing=use_checkpointing,
                     **block_kwargs,
                 )
                 for i in range(num_groups)
