@@ -17,6 +17,7 @@ use_amp: true
 amp_bf16: true
 use_channels_last: true
 num_gpu: auto
+use_compile: true
 
 datasets:
   train:

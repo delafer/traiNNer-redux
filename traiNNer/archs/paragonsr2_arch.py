@@ -4,7 +4,7 @@ ParagonSR2 Hybrid - Efficient Super-Resolution with Dual-Path Architecture
 
 Author: Philip Hofmann
 License: MIT
-Repository: https://github.com/Phhofm/traiNNer-redux
+Repository: https://github.com/Phhofm/ParagonSR2
 
 ═══════════════════════════════════════════════════════════════════════════════
 DESIGN PHILOSOPHY
@@ -684,6 +684,26 @@ class ParagonSR2(nn.Module):
     """
     ParagonSR2 Main Class.
     Constructs the dual-path network based on the provided configuration.
+
+    Args:
+        scale (int): Upscaling factor (2, 3, 4, or 8). Default: 4.
+        in_chans (int): Number of input image channels. Default: 3.
+        num_feat (int): Number of internal feature channels. Default: 64.
+        num_groups (int): Number of ResidualGroups in the deep body. Default: 4.
+        num_blocks (int): Number of blocks per ResidualGroup. Default: 6.
+        ffn_expansion (float): Expansion ratio for the FFN/Mixer layers. Default: 2.0.
+        upsampler_alpha (float): Sharpening strength for the MagicKernel base path (0.0=none, 1.0=max).
+                                 0.0 is recommended for Fidelity (PSNR) training.
+                                 0.3-0.6 is recommended for GAN (Perceptual) training. Default: 0.5.
+        detail_gain (float): Initial weight for the detail path. Lower values start training closer to
+                             the stable base path. Default: 0.1.
+        use_content_aware (bool): Enable Content-Aware Gating to modulate detail based on texture/noise.
+                                  Default: True.
+        block_type (str): Type of building block ('nano', 'gate', 'paragon'). Default: 'paragon'.
+        use_channels_last (bool): Optimize memory format for Tensor Cores (NVIDIA APEX). Default: True.
+        use_checkpointing (bool): Enable Gradient Checkpointing (Activation Checkpointing) to save VRAM
+                                  at the cost of slightly slower training. Crucial for training Large/Pro
+                                  models on consumer GPUs. Default: False.
     """
 
     def __init__(
