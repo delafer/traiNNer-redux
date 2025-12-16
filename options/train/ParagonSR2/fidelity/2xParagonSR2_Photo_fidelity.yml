@@ -1,11 +1,9 @@
 #########################################################################################
-# ParagonSR2 Photo Auto-Optimized VRAM Management Config - FIDELITY OPTIMIZED
+# ParagonSR2 Photo Fidelity Config
 # Optimized for highest PSNR/SSIM metrics with pure reconstruction (no sharpening)
 # Balanced general purpose variant with attention for photography
-# For RTX 3060 12GB: lq_size=128, batch=16, workers=8
-# For RTX 4090 24GB: lq_size=256, batch=32, workers=8
 #########################################################################################
-name: 2xParagonSR2_Photo_AUTO_fidelity
+name: 2xParagonSR2_Photo_fidelity
 scale: 2
 
 # VRAM MANAGEMENT SYSTEM
@@ -28,8 +26,7 @@ datasets:
     dataroot_lq: /home/phips/Documents/dataset/cc0/filtered_versions/cc0_c5_lr_x2
 
     # METRIC-OPTIMIZED PARAMETERS for RTX 3060 12GB (Auto-VRAM managed)
-    # Conservative base parameters so VRAM optimizer has room to increase without initial OOM
-    lq_size: 128 # Starting small (64-128) safer for 'Photo' model
+    lq_size: 256
     batch_size_per_gpu: 4 # Starting conservative
     num_worker_per_gpu: 8 # Workers for efficient data loading
     accum_iter: 1 # No gradient accumulation needed

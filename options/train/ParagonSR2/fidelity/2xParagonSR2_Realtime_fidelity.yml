@@ -1,10 +1,8 @@
 #########################################################################################
-# ParagonSR2 Realtime Auto-Optimized VRAM Management Config - FIDELITY OPTIMIZED
+# ParagonSR2 Realtime Fidelity Config
 # Optimized for highest PSNR/SSIM metrics with pure reconstruction (no sharpening)
-# For RTX 3060 12GB: lq_size=128, batch=16, workers=8
-# For RTX 4090 24GB: lq_size=256, batch=32, workers=8
 #########################################################################################
-name: 2xParagonSR2_Realtime_AUTO_fidelity
+name: 2xParagonSR2_Realtime_fidelity
 scale: 2
 
 # VRAM MANAGEMENT SYSTEM

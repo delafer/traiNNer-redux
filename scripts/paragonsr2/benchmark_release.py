@@ -207,6 +207,13 @@ class PyTorchRunner:
             else:
                 return self.model(img_tensor)
 
+    def compile_model(self) -> None:
+        """Apply torch.compile to the model."""
+        print("      Compiling model (mode='max-autotune', dynamic=True)...")
+        # dynamic=True is crucial for benchmarking images of different sizes without recompiling
+        self.model = torch.compile(self.model, mode="max-autotune", dynamic=True)
+
+
 
 # ---------------------------------------------------------------------
 # TENSORRT RUNNER
@@ -253,9 +260,10 @@ def benchmark_pytorch(
     scale: int,
     use_amp: bool = False,
     device: str = "cuda",
+    mode_suffix: str = "",
 ) -> dict:
     """Benchmark PyTorch model."""
-    mode = "PyTorch FP16" if use_amp else "PyTorch FP32"
+    mode = ("PyTorch FP16" if use_amp else "PyTorch FP32") + mode_suffix
     print(f"\n--- Benchmarking {mode} ---")
 
     latencies = []
@@ -473,6 +481,13 @@ def main() -> None:
         # FP16 (AMP) benchmark
         results.append(benchmark_pytorch(pt_runner, images, args.scale, use_amp=True))
         torch.cuda.empty_cache()
+
+        # Compiled Benchmark (Future Proofing Speed Check)
+        # Note: First run will include compilation time, so we need a warmup
+        pt_runner.compile_model()
+        results.append(benchmark_pytorch(pt_runner, images, args.scale, use_amp=True, mode_suffix=" (Compiled)"))
+        torch.cuda.empty_cache()
+
 
         del pt_runner
         torch.cuda.empty_cache()
