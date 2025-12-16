@@ -247,6 +247,8 @@ class ParagonConverter:
             },
             opset_version=18,  # Updated for PyTorch 2.5+ / TRT 8.6+
             do_constant_folding=True,
+            # For future Custom Symbolic / FlexAttention export:
+            # custom_opsets={"com.custom": 1},
         )
 
         # Optimizing / Cleaning

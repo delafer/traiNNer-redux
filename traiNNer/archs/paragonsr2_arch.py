@@ -44,6 +44,14 @@ from torch.utils import checkpoint
 
 from traiNNer.utils.registry import ARCH_REGISTRY
 
+try:
+    from torch.nn.attention.flex_attention import create_block_mask, flex_attention
+
+    HAS_FLEX = True
+except ImportError:
+    HAS_FLEX = False
+
+
 # ═════════════════════════════════════════════════════════════════════════════
 # 1. HELPER UTILS & MAGIC KERNEL
 # ═════════════════════════════════════════════════════════════════════════════
@@ -331,8 +339,40 @@ class LocalWindowAttention(nn.Module):
         head_dim = dim // num_heads
         self.scale = head_dim**-0.5
 
+        # ─── RELATIVE POSITION BIAS (RPB) ───
+        # Define a parameter table of size [(2*Wh-1)*(2*Ww-1), num_heads]
+        self.relative_position_bias_table = nn.Parameter(
+            torch.zeros((2 * window_size - 1) * (2 * window_size - 1), num_heads)
+        )
+        # Get pair-wise relative position index for each token inside the window
+        self.register_buffer(
+            "relative_position_index", self._get_relative_position_index(window_size)
+        )
+        nn.init.trunc_normal_(self.relative_position_bias_table, std=0.02)
+
+        # ─── RATTENTION CONTEXT ───
+        # "Missing context" provider: 3x3 DW Conv to leak neighbor info into K/V
+        self.rattention_context = nn.Conv2d(dim, dim, 3, padding=1, groups=dim)
+
         self.qkv = nn.Conv2d(dim, dim * 3, 1)
         self.proj = nn.Conv2d(dim, dim, 1)
+
+    def _get_relative_position_index(self, window_size: int) -> torch.Tensor:
+        """
+        Calculates the relative position index for a given window size.
+        Returns a (WinSize*WinSize, WinSize*WinSize) matrix of indices.
+        """
+        coords_h = torch.arange(window_size)
+        coords_w = torch.arange(window_size)
+        coords = torch.stack(torch.meshgrid([coords_h, coords_w], indexing="ij"))
+        coords_flatten = torch.flatten(coords, 1)
+        relative_coords = coords_flatten[:, :, None] - coords_flatten[:, None, :]
+        relative_coords = relative_coords.permute(1, 2, 0).contiguous()
+        relative_coords[:, :, 0] += window_size - 1
+        relative_coords[:, :, 1] += window_size - 1
+        relative_coords[:, :, 0] *= 2 * window_size - 1
+        relative_position_index = relative_coords.sum(-1)
+        return relative_position_index
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         B, C, H, W = x.shape
@@ -349,10 +389,17 @@ class LocalWindowAttention(nn.Module):
         x = F.pad(x, (0, pad_w, 0, pad_h))
         _, _, Hp, Wp = x.shape
 
-        # ─── SHIFTED WINDOW (Swin-style) ───
-        # Apply cyclic shift to create cross-window connections
         if self.shift_size > 0:
             x = torch.roll(x, shifts=(-self.shift_size, -self.shift_size), dims=(2, 3))
+
+        # ─── RATTENTION (Region-Aware Context) ───
+        # "Missing context" solution: Allow K and V to see beyond strict window boundaries
+        # We achieve this by applying a 3x3 depthwise conv to K and V before partitioning.
+        # This keeps the window grid identical but leaks information from neighboring windows
+        # into the keys/values of the current window.
+        cx = x
+        if hasattr(self, "rattention_context"):
+            cx = self.rattention_context(x)
 
         # Window Partition (Split into H and W steps to avoid 6D permute - TRT Optimization)
         grid_h = Hp // self.window_size
@@ -360,18 +407,24 @@ class LocalWindowAttention(nn.Module):
 
         # Step 1: Partition Height
         # (B, C, H, W) -> (B, C, grid_h, win, W)
-        x = x.view(B, C, grid_h, self.window_size, Wp)
+        q_win = x.view(B, C, grid_h, self.window_size, Wp)
+        kv_win = cx.view(B, C, grid_h, self.window_size, Wp) # K/V come from Context
+
         # (B, C, grid_h, win, W) -> (B, grid_h, C, win, W)
-        x = x.permute(0, 2, 1, 3, 4).reshape(-1, C, self.window_size, Wp)
+        q_win = q_win.permute(0, 2, 1, 3, 4).reshape(-1, C, self.window_size, Wp)
+        kv_win = kv_win.permute(0, 2, 1, 3, 4).reshape(-1, C, self.window_size, Wp)
 
         # Step 2: Partition Width
         # (B*grid_h, C, win, W) -> (B*grid_h, C, win, grid_w, win)
-        x = x.view(-1, C, self.window_size, grid_w, self.window_size)
+        q_win = q_win.view(-1, C, self.window_size, grid_w, self.window_size)
+        kv_win = kv_win.view(-1, C, self.window_size, grid_w, self.window_size)
+
         # (B*grid_h, C, win, grid_w, win) -> (B*grid_h, grid_w, C, win, win)
-        x = x.permute(0, 3, 1, 2, 4).reshape(-1, C, self.window_size, self.window_size)
+        q_win = q_win.permute(0, 3, 1, 2, 4).reshape(-1, C, self.window_size, self.window_size)
+        kv_win = kv_win.permute(0, 3, 1, 2, 4).reshape(-1, C, self.window_size, self.window_size)
 
         # Attention
-        x = self._attn(x)
+        x = self._attn(q_win, kv_win)
 
         # Window Reverse
         # Step 1: Reverse Width
@@ -395,20 +448,68 @@ class LocalWindowAttention(nn.Module):
 
         return x
 
-    def _attn(self, x: torch.Tensor) -> torch.Tensor:
-        B, C, H, W = x.shape
+    def _attn(self, x_q: torch.Tensor, x_kv: torch.Tensor) -> torch.Tensor:
+        B, C, H, W = x_q.shape
         # Reshape to (B, 3, Heads, HeadDim, Pixels)
-        # Note: Pixels is sequence length
-        qkv = self.qkv(x).reshape(B, 3, self.num_heads, C // self.num_heads, -1)
+        # Q comes from x_q, K/V come from x_kv (RAttention context)
+        q = self.qkv(x_q)[:, :C, :, :].reshape(B, self.num_heads, C // self.num_heads, -1)
+        k = self.qkv(x_kv)[:, C:2*C, :, :].reshape(B, self.num_heads, C // self.num_heads, -1)
+        v = self.qkv(x_kv)[:, 2*C:, :, :].reshape(B, self.num_heads, C // self.num_heads, -1)
 
-        # q, k, v shapes: (B, Heads, HeadDim, Pixels)
-        q, k, v = qkv.unbind(1)
+        # ─── GET RPB ───
+        # Index into table: (WinSize*WinSize, WinSize*WinSize) -> (Win*Win, Win*Win, num_heads)
+        # Then permute to (num_heads, Win*Win, Win*Win)
+        relative_position_bias = self.relative_position_bias_table[
+            self.relative_position_index.view(-1)
+        ].view(
+            self.window_size * self.window_size,
+            self.window_size * self.window_size,
+            -1,
+        )
+        relative_position_bias = relative_position_bias.permute(2, 0, 1).contiguous()
+        # Shape: (1, Heads, Pixels, Pixels) broadcastable
+        relative_position_bias = relative_position_bias.unsqueeze(0)
 
+        # ---------------------------------------------------------------------
+        # PATH A: FlexAttention (Ideal Performance)
+        # ---------------------------------------------------------------------
+        if HAS_FLEX and not torch.onnx.is_in_onnx_export() and x_q.device.type == "cuda":
+             if not LocalWindowAttention._printed_mode:
+                 print("[ParagonSR2] Training Mode: Using FlexAttention (Fused RPB).")
+                 LocalWindowAttention._printed_mode = True
+
+             # Permute to (B, Heads, Pixels, HeadDim) for Flex
+             q = q.transpose(-2, -1)
+             k = k.transpose(-2, -1)
+             v = v.transpose(-2, -1)
+
+             # Define score_mod for RPB
+             # note: score_mod receives (score, b, h, q_idx, kv_idx)
+             # We pre-compute bias on tensor core and use index
+             bias_table = self.relative_position_bias_table # (Win^2, Heads)
+             idx_map = self.relative_position_index # (Win^2, Win^2)
+
+             # Capture external tensors for the closure
+             def rpb_score_mod(score, b, h, q_idx, kv_idx):
+                # RPB lookup logic inside kernel is complex to map 1:1 without
+                # passing the full bias tensor.
+                # Simplification: pass bias as fully materialized mask in block_mask
+                # or standard manual addition if score_mod is too complex to trace.
+                # FlexAttention essentially supports bias addition efficiently.
+                # For now, we will use the standard path if complex logic is needed,
+                # BUT since user requested Flex, we assume standard usage:
+                return score + relative_position_bias[0, h, q_idx, kv_idx]
+
+             out = flex_attention(q, k, v, score_mod=rpb_score_mod)
+
+             # Restore shape
+             out = out.transpose(-2, -1).reshape(B, C, H, W)
+             return self.proj(out)
+
+        # ---------------------------------------------------------------------
+        # PATH B: Standard / ONNX Export
         # ---------------------------------------------------------------------
         # ONNX Export Path: Use Standard Math (MatMul + Softmax)
-        # ---------------------------------------------------------------------
-        # SDPA is often not supported or exports to complex plugins in older opsets.
-        # We manually implement Attention so it fuses into TRT's native kernels.
         if torch.onnx.is_in_onnx_export():
             if not LocalWindowAttention._printed_mode:
                 print("[ParagonSR2] Export Mode Detected: Using Manual Attention.")
@@ -423,6 +524,12 @@ class LocalWindowAttention(nn.Module):
             # q.transpose(-2, -1) -> (..., Pixels, HeadDim)
             # k -> (..., HeadDim, Pixels)
             dots = torch.bmm(q.transpose(-2, -1), k) * self.scale
+            # ONNX-friendly RPB addition (B*Heads, Pixels, Pixels)
+            # We reshape bias to (Heads, Pixels, Pixels) and broadcast to B
+            bias = relative_position_bias.expand(B, -1, -1, -1).reshape(
+                B * self.num_heads, self.window_size**2, self.window_size**2
+            )
+            dots = dots + bias
             attn = F.softmax(dots, dim=-1)
 
             # Weighted Sum: (B*Heads, HeadDim, Pixels)
@@ -450,7 +557,8 @@ class LocalWindowAttention(nn.Module):
 
         # Use efficient SDPA (FlashAttention/MemEfficient)
         # Automatically handles scaling (1/sqrt(head_dim)) if scale is None, matches our self.scale
-        out = F.scaled_dot_product_attention(q, k, v)
+        # RPB is passed as attn_mask. SDPA supports dense float masks which are added to scores.
+        out = F.scaled_dot_product_attention(q, k, v, attn_mask=relative_position_bias)
 
         # Reshape back: (B, Heads, Pixels, HeadDim) -> (B, Heads, HeadDim, Pixels)
         out = out.transpose(-2, -1)
@@ -632,6 +740,38 @@ class ParagonBlock(nn.Module):
         return x
 
 
+class MSCF(nn.Module):
+    """
+    Multi-Scale Cross-Fusion (MSCF).
+    Enhances Deep Feature Interaction by aggregating features different kernel scales.
+    Replaces simple Channel Attention.
+    """
+    def __init__(self, dim):
+        super().__init__()
+        self.p1 = nn.Conv2d(dim, dim, 1)
+        self.p3 = nn.Conv2d(dim, dim, 3, padding=1, groups=dim)
+        self.p5 = nn.Conv2d(dim, dim, 5, padding=2, groups=dim)
+
+        self.attn = nn.Sequential(
+            nn.Conv2d(dim * 3, dim, 1),
+            nn.ReLU(True),
+            nn.Conv2d(dim, dim, 1),
+            nn.Sigmoid()
+        )
+        self.proj = nn.Conv2d(dim, dim, 1)
+
+    def forward(self, x):
+        x1 = self.p1(x)
+        x3 = self.p3(x)
+        x5 = self.p5(x)
+
+        # Cross-Fusion (Attention over concatenated scales)
+        x_all = torch.cat([x1, x3, x5], dim=1)
+        w = self.attn(x_all)
+
+        return self.proj(x * w)
+
+
 class ResidualGroup(nn.Module):
     """Generic Residual Group that selects the correct block type."""
 
@@ -664,14 +804,24 @@ class ResidualGroup(nn.Module):
             ]
         )
 
+        # MSCF Feature Interaction
+        self.mid_conv = nn.Conv2d(dim, dim, 3, 1, 1)
+        self.mscf = MSCF(dim)
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         if self.use_checkpointing and x.requires_grad:
             res = x
+            out = x
             for block in self.blocks:
-                x = checkpoint.checkpoint(block, x, use_reentrant=False)
-            return x + res
+                out = checkpoint.checkpoint(block, out, use_reentrant=False)
+            out = self.mid_conv(out)
+            out = self.mscf(out)
+            return out + res
         else:
-            return self.blocks(x) + x
+            out = self.blocks(x)
+            out = self.mid_conv(out)
+            out = self.mscf(out)
+            return out + x
 
 
 # ═════════════════════════════════════════════════════════════════════════════
