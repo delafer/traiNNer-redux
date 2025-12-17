@@ -93,12 +93,17 @@ class SeparableConv(nn.Module):
             groups=in_channels,
             bias=False,
         )
+
+        # FIX: Ensure weights are properly initialized but kept as parameters
+        # We use a register_buffer trick for the source kernel to keep compile happy regarding device
+        self.register_buffer('source_kernel', kernel)
+
         # Initialize and freeze weights
         with torch.no_grad():
-            reshaped = kernel.view(1, 1, 1, -1).repeat(in_channels, 1, 1, 1)
-            self.conv_h.weight.copy_(reshaped)
-            reshaped = kernel.view(1, 1, -1, 1).repeat(in_channels, 1, 1, 1)
-            self.conv_v.weight.copy_(reshaped)
+            reshaped_h = self.source_kernel.view(1, 1, 1, -1).repeat(in_channels, 1, 1, 1)
+            self.conv_h.weight.copy_(reshaped_h)
+            reshaped_v = self.source_kernel.view(1, 1, -1, 1).repeat(in_channels, 1, 1, 1)
+            self.conv_v.weight.copy_(reshaped_v)
 
         for param in self.parameters():
             param.requires_grad = False
@@ -658,12 +663,15 @@ class SimpleGateBlock(nn.Module):
     Used in 'paragonsr2_stream'.
     """
 
-    def __init__(self, dim: int, expansion: float = 2.0, **kwargs) -> None:
+    def __init__(self, dim: int, expansion: float = 2.0, band_kernel_size: int = 0, **kwargs) -> None:
         super().__init__()
         hidden_dim = int(dim * expansion)
 
-        # Wide-context Inception for de-blocking (optional, or just use larger receptive field separately)
-        self.context = nn.Conv2d(dim, dim, 3, 1, 1, groups=dim)
+        # ARCH FIX: Use Inception for wide context if band_kernel_size is set (Stream variant)
+        if band_kernel_size > 3:
+            self.context = InceptionDWConv2d(dim, band_kernel_size=band_kernel_size)
+        else:
+            self.context = nn.Conv2d(dim, dim, 3, 1, 1, groups=dim)
 
         # Simple Gated FFN
         self.proj_in = nn.Conv2d(dim, hidden_dim * 2, 1)
@@ -679,7 +687,9 @@ class SimpleGateBlock(nn.Module):
         # Gating mechanism
         x = self.proj_in(x)
         x = self.dw_gate(x)
-        x1, x2 = x.chunk(2, dim=1)
+
+        # COMPILE FIX: Use torch.chunk instead of tensor.chunk (helper for tracing)
+        x1, x2 = torch.chunk(x, 2, dim=1)
         x = x1 * x2  # Element-wise self-attention
         x = self.proj_out(x)
 
@@ -895,7 +905,7 @@ class ParagonSR2(nn.Module):
         use_content_aware: bool = True,
         block_type: str = "paragon",  # 'nano', 'gate', 'paragon'
         block_kwargs: dict | None = None,
-        use_channels_last: bool = True,
+        use_channels_last: bool = False, # CHANGED DEFAULT TO FALSE for Compile Safety
         use_checkpointing: bool = False,
         **kwargs,
     ) -> None:
@@ -906,7 +916,10 @@ class ParagonSR2(nn.Module):
             raise ValueError(f"Scale must be 2, 3, 4, or 8. Got {scale}.")
 
         self.scale = scale
-        self.use_channels_last = use_channels_last and torch.cuda.is_available()
+        self.scale = scale
+        # COMPILE FIX: Do not enforce channels_last flag if compiling.
+        # Inductor handles layout optimization automatically.
+        self.use_channels_last = use_channels_last
         self.use_content_aware = use_content_aware
 
         if block_kwargs is None:
@@ -974,10 +987,11 @@ class ParagonSR2(nn.Module):
                         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # Channels Last optimization
-        if self.use_channels_last and x.is_cuda:
-            if not x.is_contiguous(memory_format=torch.channels_last):
-                x = x.contiguous(memory_format=torch.channels_last)
+        # COMPILE FIX: Remove aggressive per-forward contiguous calls.
+        # This causes memory format thrashing which confuses Inductor.
+        if self.use_channels_last and not torch.compiler.is_compiling():
+             if x.device.type == 'cuda' and not x.is_contiguous(memory_format=torch.channels_last):
+                 x = x.contiguous(memory_format=torch.channels_last)
 
         # 1. Base Path (Structural Anchor)
         x_base = self.base_upsampler(x)
