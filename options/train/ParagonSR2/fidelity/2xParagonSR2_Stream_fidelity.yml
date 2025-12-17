@@ -46,8 +46,6 @@ network_g:
   type: paragonsr2_stream # The "Tiny" variant definition
   # FIDELITY OPTIMIZATION: Pure reconstruction for highest PSNR/SSIM
   upsampler_alpha: 0.0 # 0.0 = No sharpening. Crucial for PSNR/SSIM optimization as sharpening distorts pixel values
-  detail_gain: 0.08 # 0.08 provides balanced detail recovery without over-amplifying compression artifacts
-  use_content_aware: true # [ENABLE] Enabled for Stream (Default). Helps distinguish between compression blocks (noise) and real texture.
   use_checkpointing: true # Trade-off: Saves significant VRAM (allowing larger batch/patches) at cost of minor compute time. Worth it for 12GB cards.
 
 path:

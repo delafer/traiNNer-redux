@@ -46,8 +46,6 @@ network_g:
   type: paragonsr2_realtime # The "Nano" variant
   # FIDELITY OPTIMIZATION: Pure reconstruction for highest PSNR/SSIM
   upsampler_alpha: 0.0 # 0.0 disables sharpening, forcing the model to learn pure reconstruction (best for metrics)
-  detail_gain: 0.05 # Low gain (0.05) is appropriate for this lightweight model to prevent noise amplification
-  use_content_aware: false # False is correct for Realtime: minimizes inference latency (Zero overhead)
   use_checkpointing: true # Gradients checkpointing allows fitting this larger batch/patch size in 12GB VRAM
 
 path:

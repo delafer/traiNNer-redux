@@ -46,8 +46,6 @@ network_g:
   type: paragonsr2_photo # The "Base" variant
   # FIDELITY OPTIMIZATION: Pure reconstruction for highest PSNR/SSIM
   upsampler_alpha: 0.0 # 0.0 (No sharpening) - Ensures metric validity (Sharpening lowers PSNR/SSIM)
-  detail_gain: 0.1 # 0.1 Gain. Higher than realtime/stream because this model (Photo) is capable of resolving finer textures.
-  use_content_aware: true # [ENABLE] Enabled for Photo (Default). Essential for high-res photography to manage flat vs textured areas.
   use_checkpointing: true # REQUIRED for Photo variant on 12GB VRAM due to Attention usage.
 
 path:
