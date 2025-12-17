@@ -16,7 +16,7 @@ use_amp: true # Automatic Mixed Precision (BF16) speeds up training and reduces 
 amp_bf16: true # BF16 is more stable than FP16 for training, protecting against NaN
 use_channels_last: true # Always true for NVIDIA GPUs (Tensor Cores), works with compile
 num_gpu: auto # Automatically detect and use all available GPUs
-use_compile: true # Torch.compile enables kernel fusion, further boosting speed on 30-series+
+use_compile: false # Torch.compile enables kernel fusion, further boosting speed on 30-series+
 
 datasets:
   train:

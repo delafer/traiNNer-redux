@@ -16,7 +16,7 @@ use_amp: true # Mixed Precision for efficiency
 amp_bf16: true # BF16 numerical stability
 use_channels_last: true # Always true for NVIDIA GPUs (Tensor Cores), works with compile
 num_gpu: auto
-use_compile: true # Torch compile creates fused kernels for the Attention mechanics
+use_compile: false # Torch compile creates fused kernels for the Attention mechanics
 
 datasets:
   train:

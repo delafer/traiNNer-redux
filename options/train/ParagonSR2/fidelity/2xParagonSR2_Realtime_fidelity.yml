@@ -15,7 +15,7 @@ use_amp: true # Use Automatic Mixed Precision for faster training/lower VRAM
 amp_bf16: true # BF16 (Brain Float 16) prevents overflow better than FP16
 use_channels_last: true # Critical optimization for NVIDIA Tensor Cores
 num_gpu: auto # Use all GPUs
-use_compile: true # Compiles the model graph for faster execution (~20-30% speedup)
+use_compile: false # Compiles the model graph for faster execution (~20-30% speedup)
 
 datasets:
   train:
