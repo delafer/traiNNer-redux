@@ -14,7 +14,7 @@ auto_vram_management:
 
 use_amp: true # Mixed Precision for efficiency
 amp_bf16: true # BF16 numerical stability
-use_channels_last: true # Tensor Core memory format
+use_channels_last: false # I use torch.compile already. I think these should not be used together but alternatively.
 num_gpu: auto
 use_compile: true # Torch compile creates fused kernels for the Attention mechanics
 

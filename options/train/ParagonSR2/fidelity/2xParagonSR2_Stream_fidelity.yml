@@ -14,7 +14,7 @@ auto_vram_management:
 
 use_amp: true # Automatic Mixed Precision (BF16) speeds up training and reduces VRAM
 amp_bf16: true # BF16 is more stable than FP16 for training, protecting against NaN
-use_channels_last: true # Optimizes memory layout for NVIDIA Tensor Cores (significant speedup)
+use_channels_last: false # I am using toch compile already
 num_gpu: auto # Automatically detect and use all available GPUs
 use_compile: true # Torch.compile enables kernel fusion, further boosting speed on 30-series+
 
