@@ -6,31 +6,15 @@ Author: Philip Hofmann
 License: MIT
 Repository: https://github.com/Phhofm/ParagonSR2
 
-═══════════════════════════════════════════════════════════════════════════════
-DESIGN PHILOSOPHY
-═══════════════════════════════════════════════════════════════════════════════
+    Efficient Super-Resolution Architecture
 
-This architecture bridges the gap between lightweight CNNs and heavy Transformers.
-It employs a Dual-Path design to balance structural integrity with high-frequency
-texture restoration.
+    This design balances structural integrity with high-frequency texture restoration using a dual-path approach.
 
-Key Innovation: Dual-Path Architecture
---------------------------------------
-Path A (Detail):  LR → Deep Body (LR Space) → PixelShuffle → Detail Residual
-Path B (Base):    LR → MagicKernelSharp → Base Upscale
-Output = Base + (Detail * ContentGain)
-
-This design provides:
-1. Efficiency: All heavy processing occurs in Low-Resolution (LR) space.
-2. Stability: MagicKernel anchor prevents structural distortion.
-3. Versatility: Specialized block types for Video vs. Photo restoration.
-4. Deployment: ONNX/TensorRT friendly (static graphs preferred).
-
-Variant Strategy:
------------------
-1. Realtime (Nano): Ultra-fast (MBConv), 16ch, for 60fps video/anime.
-2. Stream (Tiny):   De-blocking focused (GateBlock), 32ch, wide receptive field.
-3. Photo (Base):    Balanced (ParagonBlock), 64ch, for general photography.
+    Features:
+    - Dual-Path Design: Combines a stable structural base with a deep detail restoration path.
+    - Specialized Variants: Optimized configurations for Realtime (Nano), Stream (Video), and Photo (General) use cases.
+    - Efficient: Heavy processing occurs in low-resolution space.
+    - Deployable: Designed for easy ONNX/TensorRT export.
 """
 
 from typing import Dict, Optional, Type
@@ -309,26 +293,16 @@ class ContentAwareDetailProcessor(nn.Module):
 
 class LocalWindowAttention(nn.Module):
     """
-    Shifted Window Self-Attention (Swin-style) for 'Pro' and 'Photo' variants.
+    Shifted Window Self-Attention for the 'Photo' variant.
 
     Captures global consistency within patches while using shifted windows
-    to create cross-window connections and prevent visible boundary artifacts.
-
-    Uses F.scaled_dot_product_attention (FlashAttention) for maximum efficiency.
+    to create cross-window connections.
 
     Args:
         dim: Number of input channels
         window_size: Size of attention window (default 32)
         num_heads: Number of attention heads
         shift_size: Shift offset for creating overlapping receptive fields.
-                   Set to window_size//2 for odd blocks, 0 for even blocks.
-
-    ARCHITECTURAL NOTE: RAttention (Region-Aware Context Expansion)
-    --------------------------------------------------------------
-    Instead of a Recurrent RATTENTION unit (complex/slow), we use a CNN-based proxy:
-    A 3x3 Depthwise Convolution is applied to the Keys and Values (K/V) BEFORE windowing.
-    This leaks information across window boundaries, allowing the Query (Q) to attend
-    to a "Context-Aware" environment without computationally expensive recurrent states.
     """
 
     def __init__(
@@ -484,7 +458,7 @@ class LocalWindowAttention(nn.Module):
         relative_position_bias = relative_position_bias.unsqueeze(0)
 
         # ---------------------------------------------------------------------
-        # PATH A: FlexAttention and RPB Fusion (Maximum Training Speed)
+        # PATH A: FlexAttention (Fused RPB)
         # ---------------------------------------------------------------------
         # INTEGRITY VERDICT: "Implemented to perfection."
         # By integrating flex_attention and using the score_mod closure, we achieve
@@ -493,7 +467,7 @@ class LocalWindowAttention(nn.Module):
         # the attention kernel, eliminating memory latency.
         if HAS_FLEX and not torch.onnx.is_in_onnx_export() and x_q.device.type == "cuda":
              if not LocalWindowAttention._printed_mode:
-                 print("[ParagonSR2] Training Mode: Using FlexAttention (Fused RPB).")
+                 print("[ParagonSR2] Using FlexAttention.")
                  LocalWindowAttention._printed_mode = True
 
              # Permute to (B, Heads, Pixels, HeadDim) for Flex
@@ -526,7 +500,7 @@ class LocalWindowAttention(nn.Module):
 
 
         # ---------------------------------------------------------------------
-        # PATH B: "Intelligent Fallback" (ONNX Export)
+        # PATH B: ONNX Export Fallback
         # ---------------------------------------------------------------------
         # VERDICT: "Superior Engineering Choice."
         # This specific block switches the attention core back to fundamental, standard
@@ -535,7 +509,7 @@ class LocalWindowAttention(nn.Module):
         # immediate 100% deployability on TensorRT/ONNX Runtime.
         if torch.onnx.is_in_onnx_export():
             if not LocalWindowAttention._printed_mode:
-                print("[ParagonSR2] Export Mode Detected (Intelligent Fallback): Using Manual Attention.")
+                print("[ParagonSR2] Export Mode: Using Manual Attention.")
                 LocalWindowAttention._printed_mode = True
 
             # Prepare for BMM: (B * Heads, HeadDim, Pixels)
@@ -567,12 +541,10 @@ class LocalWindowAttention(nn.Module):
             return self.proj(out)
 
         # ---------------------------------------------------------------------
-        # PATH C: SDPA Fallback Integrity (General PyTorch)
+        # PATH C: Standard SDPA
         # ---------------------------------------------------------------------
-        # Leverages the high-performance SDPA kernel for general usage where FlexAttention
-        # might not be compiled or available. RPB is passed correctly as attn_mask.
         if not LocalWindowAttention._printed_mode:
-            print("[ParagonSR2] Training Mode: Using FlashAttention (SDPA).")
+            print("[ParagonSR2] Using FlashAttention (SDPA).")
             LocalWindowAttention._printed_mode = True
 
         # Permute for SDPA: (B, Heads, Pixels, HeadDim)
@@ -603,7 +575,7 @@ class InceptionDWConv2d(nn.Module):
         self,
         in_channels: int,
         square_kernel_size: int = 3,
-        band_kernel_size: int = 11,  # 11 for Photo, 21 for Stream, 17 for Pro
+        band_kernel_size: int = 11,
         branch_ratio: float = 0.125,
     ) -> None:
         super().__init__()
@@ -633,9 +605,7 @@ class InceptionDWConv2d(nn.Module):
 
 class NanoBlock(nn.Module):
     """
-    [Optimized for Realtime]
-    MBConv-style block. Pure speed.
-    Used in 'paragonsr2_realtime'.
+    MBConv-style block optimized for the Realtime variant.
     """
 
     def __init__(self, dim: int, expansion: float = 2.0, **kwargs) -> None:
@@ -658,9 +628,8 @@ class NanoBlock(nn.Module):
 
 class SimpleGateBlock(nn.Module):
     """
-    [Optimized for Stream/Video]
-    Static gating block. Replaces Transformer/Attention for robust video handling.
-    Used in 'paragonsr2_stream'.
+    Static gating block optimized for the Stream variant.
+    Replaces Transformer/Attention elements for robust video handling and speed.
     """
 
     def __init__(self, dim: int, expansion: float = 2.0, band_kernel_size: int = 0, **kwargs) -> None:
@@ -698,12 +667,8 @@ class SimpleGateBlock(nn.Module):
 
 class ParagonBlock(nn.Module):
     """
-    [Optimized for Photo/Pro]
-    The full-featured block with Context, Gating, and optional Shifted Window Attention.
-
-    Uses Swin-style alternating shift pattern when attention is enabled:
-    - Even indexed blocks: Regular windows (shift_size=0)
-    - Odd indexed blocks: Shifted windows (shift_size=window_size//2)
+    Full-featured block for 'Photo' variant.
+    Includes Context, Gating, and optional Shifted Window Attention.
     """
 
     def __init__(
@@ -773,14 +738,8 @@ class ParagonBlock(nn.Module):
 class MSCF(nn.Module):
     """
     Multi-Scale Cross-Fusion (MSCF).
-    Enhances Deep Feature Interaction by aggregating features from different kernel scales.
-
-    VERDICT: "Architecturally Robust."
-    1. Multi-Scale Aggregation: Parallel 1x1, 3x3, and 5x5 convolutions gather features
-       across fine, medium, and coarse scales.
-    2. Cross-Fusion Gating: The concatenation followed by channel attention acts as a
-       sophisticated gating mechanism, learning how to optimally combine scales to
-       reconstruct high-fidelity textures while suppressing noise.
+    Aggregates features from different kernel scales (1x1, 3x3, 5x5) to enhance
+    deep feature interaction and texture reconstruction.
     """
     def __init__(self, dim):
         super().__init__()
@@ -1030,10 +989,9 @@ def paragonsr2_realtime(
     scale: int = 4, upsampler_alpha: float = 0.35, **kwargs
 ) -> ParagonSR2:
     """
-    [Realtime Edition] - The 'Nano'
-    Target: 1080p -> 4K Gaming/Anime @ 60fps.
-    Hardware: iGPU, Mobile, Mid-range.
-    Tech: 16ch, MBConv (NanoBlock), No Attention.
+    Realtime Variant (ParagonSR2 Realtime).
+    Target: 1080p -> 4K upscaling for high fps content.
+    Configuration: 16 channels, MBConv blocks, lightweight design.
     """
     return ParagonSR2(
         scale=scale,
@@ -1054,10 +1012,9 @@ def paragonsr2_stream(
     scale: int = 4, upsampler_alpha: float = 0.0, **kwargs
 ) -> ParagonSR2:
     """
-    [Stream Edition] - The 'Tiny'
-    Target: Compressed Video (YouTube/Twitch).
-    Hardware: RTX 3050 / Laptops.
-    Tech: 32ch, GateBlock, Wide Receptive Field (21), Alpha 0.
+    Stream Variant (ParagonSR2 Stream).
+    Target: Compressed video enhancement.
+    Configuration: 32 channels, GateBlocks with wide receptive field for deblocking.
     """
     return ParagonSR2(
         scale=scale,
@@ -1078,10 +1035,9 @@ def paragonsr2_photo(
     scale: int = 4, upsampler_alpha: float = 0.4, **kwargs
 ) -> ParagonSR2:
     """
-    [Photo Edition] - The 'Base'
-    Target: General Photography / Wallpapers.
-    Hardware: RTX 3060 / 4060.
-    Tech: 64ch, ParagonBlock, Shifted Window Attention, Content-Aware.
+    Photo Variant (ParagonSR2 Photo).
+    Target: General photography and high-quality image upscaling.
+    Configuration: 64 channels, ParagonBlocks with Attention and Content-Aware processing.
     """
     return ParagonSR2(
         scale=scale,
