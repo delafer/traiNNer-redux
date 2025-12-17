@@ -17,8 +17,6 @@ Repository: https://github.com/Phhofm/ParagonSR2
     - Deployable: Designed for easy ONNX/TensorRT export.
 """
 
-from typing import Dict, Optional, Type
-
 import torch
 import torch.nn.functional as F
 import torch.onnx
@@ -80,13 +78,17 @@ class SeparableConv(nn.Module):
 
         # FIX: Ensure weights are properly initialized but kept as parameters
         # We use a register_buffer trick for the source kernel to keep compile happy regarding device
-        self.register_buffer('source_kernel', kernel)
+        self.register_buffer("source_kernel", kernel)
 
         # Initialize and freeze weights
         with torch.no_grad():
-            reshaped_h = self.source_kernel.view(1, 1, 1, -1).repeat(in_channels, 1, 1, 1)
+            reshaped_h = self.source_kernel.view(1, 1, 1, -1).repeat(
+                in_channels, 1, 1, 1
+            )
             self.conv_h.weight.copy_(reshaped_h)
-            reshaped_v = self.source_kernel.view(1, 1, -1, 1).repeat(in_channels, 1, 1, 1)
+            reshaped_v = self.source_kernel.view(1, 1, -1, 1).repeat(
+                in_channels, 1, 1, 1
+            )
             self.conv_v.weight.copy_(reshaped_v)
 
         for param in self.parameters():
@@ -395,7 +397,7 @@ class LocalWindowAttention(nn.Module):
         # Step 1: Partition Height
         # (B, C, H, W) -> (B, C, grid_h, win, W)
         q_win = x.view(B, C, grid_h, self.window_size, Wp)
-        kv_win = cx.view(B, C, grid_h, self.window_size, Wp) # K/V come from Context
+        kv_win = cx.view(B, C, grid_h, self.window_size, Wp)  # K/V come from Context
 
         # (B, C, grid_h, win, W) -> (B, grid_h, C, win, W)
         q_win = q_win.permute(0, 2, 1, 3, 4).reshape(-1, C, self.window_size, Wp)
@@ -407,8 +409,12 @@ class LocalWindowAttention(nn.Module):
         kv_win = kv_win.view(-1, C, self.window_size, grid_w, self.window_size)
 
         # (B*grid_h, C, win, grid_w, win) -> (B*grid_h, grid_w, C, win, win)
-        q_win = q_win.permute(0, 3, 1, 2, 4).reshape(-1, C, self.window_size, self.window_size)
-        kv_win = kv_win.permute(0, 3, 1, 2, 4).reshape(-1, C, self.window_size, self.window_size)
+        q_win = q_win.permute(0, 3, 1, 2, 4).reshape(
+            -1, C, self.window_size, self.window_size
+        )
+        kv_win = kv_win.permute(0, 3, 1, 2, 4).reshape(
+            -1, C, self.window_size, self.window_size
+        )
 
         # Attention
         x = self._attn(q_win, kv_win)
@@ -439,9 +445,15 @@ class LocalWindowAttention(nn.Module):
         B, C, H, W = x_q.shape
         # Reshape to (B, 3, Heads, HeadDim, Pixels)
         # Q comes from x_q, K/V come from x_kv (RAttention context)
-        q = self.qkv(x_q)[:, :C, :, :].reshape(B, self.num_heads, C // self.num_heads, -1)
-        k = self.qkv(x_kv)[:, C:2*C, :, :].reshape(B, self.num_heads, C // self.num_heads, -1)
-        v = self.qkv(x_kv)[:, 2*C:, :, :].reshape(B, self.num_heads, C // self.num_heads, -1)
+        q = self.qkv(x_q)[:, :C, :, :].reshape(
+            B, self.num_heads, C // self.num_heads, -1
+        )
+        k = self.qkv(x_kv)[:, C : 2 * C, :, :].reshape(
+            B, self.num_heads, C // self.num_heads, -1
+        )
+        v = self.qkv(x_kv)[:, 2 * C :, :, :].reshape(
+            B, self.num_heads, C // self.num_heads, -1
+        )
 
         # ─── GET RPB ───
         # Index into table: (WinSize*WinSize, WinSize*WinSize) -> (Win*Win, Win*Win, num_heads)
@@ -465,24 +477,28 @@ class LocalWindowAttention(nn.Module):
         # the single fastest attention calculation possible on modern NVIDIA GPUs.
         # The score_mod fuses the Relative Position Bias (RPB) addition directly into
         # the attention kernel, eliminating memory latency.
-        if HAS_FLEX and not torch.onnx.is_in_onnx_export() and x_q.device.type == "cuda":
-             if not LocalWindowAttention._printed_mode:
-                 print("[ParagonSR2] Using FlexAttention.")
-                 LocalWindowAttention._printed_mode = True
+        if (
+            HAS_FLEX
+            and not torch.onnx.is_in_onnx_export()
+            and x_q.device.type == "cuda"
+        ):
+            if not LocalWindowAttention._printed_mode:
+                print("[ParagonSR2] Using FlexAttention.")
+                LocalWindowAttention._printed_mode = True
 
-             # Permute to (B, Heads, Pixels, HeadDim) for Flex
-             q = q.transpose(-2, -1)
-             k = k.transpose(-2, -1)
-             v = v.transpose(-2, -1)
+            # Permute to (B, Heads, Pixels, HeadDim) for Flex
+            q = q.transpose(-2, -1)
+            k = k.transpose(-2, -1)
+            v = v.transpose(-2, -1)
 
-             # Define score_mod for RPB
-             # note: score_mod receives (score, b, h, q_idx, kv_idx)
-             # We pre-compute bias on tensor core and use index
-             bias_table = self.relative_position_bias_table # (Win^2, Heads)
-             idx_map = self.relative_position_index # (Win^2, Win^2)
+            # Define score_mod for RPB
+            # note: score_mod receives (score, b, h, q_idx, kv_idx)
+            # We pre-compute bias on tensor core and use index
+            bias_table = self.relative_position_bias_table  # (Win^2, Heads)
+            idx_map = self.relative_position_index  # (Win^2, Win^2)
 
-             # Capture external tensors for the closure
-             def rpb_score_mod(score, b, h, q_idx, kv_idx):
+            # Capture external tensors for the closure
+            def rpb_score_mod(score, b, h, q_idx, kv_idx):
                 # RPB lookup logic inside kernel is complex to map 1:1 without
                 # passing the full bias tensor.
                 # Simplification: pass bias as fully materialized mask in block_mask
@@ -492,12 +508,11 @@ class LocalWindowAttention(nn.Module):
                 # BUT since user requested Flex, we assume standard usage:
                 return score + relative_position_bias[0, h, q_idx, kv_idx]
 
-             out = flex_attention(q, k, v, score_mod=rpb_score_mod)
+            out = flex_attention(q, k, v, score_mod=rpb_score_mod)
 
-             # Restore shape
-             out = out.transpose(-2, -1).reshape(B, C, H, W)
-             return self.proj(out)
-
+            # Restore shape
+            out = out.transpose(-2, -1).reshape(B, C, H, W)
+            return self.proj(out)
 
         # ---------------------------------------------------------------------
         # PATH B: ONNX Export Fallback
@@ -632,7 +647,9 @@ class SimpleGateBlock(nn.Module):
     Replaces Transformer/Attention elements for robust video handling and speed.
     """
 
-    def __init__(self, dim: int, expansion: float = 2.0, band_kernel_size: int = 0, **kwargs) -> None:
+    def __init__(
+        self, dim: int, expansion: float = 2.0, band_kernel_size: int = 0, **kwargs
+    ) -> None:
         super().__init__()
         hidden_dim = int(dim * expansion)
 
@@ -741,7 +758,8 @@ class MSCF(nn.Module):
     Aggregates features from different kernel scales (1x1, 3x3, 5x5) to enhance
     deep feature interaction and texture reconstruction.
     """
-    def __init__(self, dim):
+
+    def __init__(self, dim) -> None:
         super().__init__()
         self.p1 = nn.Conv2d(dim, dim, 1)
         self.p3 = nn.Conv2d(dim, dim, 3, padding=1, groups=dim)
@@ -751,7 +769,7 @@ class MSCF(nn.Module):
             nn.Conv2d(dim * 3, dim, 1),
             nn.ReLU(True),
             nn.Conv2d(dim, dim, 1),
-            nn.Sigmoid()
+            nn.Sigmoid(),
         )
         self.proj = nn.Conv2d(dim, dim, 1)
 
@@ -864,7 +882,7 @@ class ParagonSR2(nn.Module):
         use_content_aware: bool = True,
         block_type: str = "paragon",  # 'nano', 'gate', 'paragon'
         block_kwargs: dict | None = None,
-        use_channels_last: bool = False, # CHANGED DEFAULT TO FALSE for Compile Safety
+        use_channels_last: bool = False,  # CHANGED DEFAULT TO FALSE for Compile Safety
         use_checkpointing: bool = False,
         **kwargs,
     ) -> None:
@@ -949,8 +967,10 @@ class ParagonSR2(nn.Module):
         # COMPILE FIX: Remove aggressive per-forward contiguous calls.
         # This causes memory format thrashing which confuses Inductor.
         if self.use_channels_last and not torch.compiler.is_compiling():
-             if x.device.type == 'cuda' and not x.is_contiguous(memory_format=torch.channels_last):
-                 x = x.contiguous(memory_format=torch.channels_last)
+            if x.device.type == "cuda" and not x.is_contiguous(
+                memory_format=torch.channels_last
+            ):
+                x = x.contiguous(memory_format=torch.channels_last)
 
         # 1. Base Path (Structural Anchor)
         x_base = self.base_upsampler(x)
@@ -1051,5 +1071,3 @@ def paragonsr2_photo(
         block_kwargs={"band_kernel_size": 11, "use_attention": True},
         **kwargs,
     )
-
-
