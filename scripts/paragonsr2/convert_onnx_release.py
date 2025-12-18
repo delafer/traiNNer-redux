@@ -59,7 +59,6 @@ try:
         "paragonsr2_realtime": paragonsr2_arch.paragonsr2_realtime,
         "paragonsr2_stream": paragonsr2_arch.paragonsr2_stream,
         "paragonsr2_photo": paragonsr2_arch.paragonsr2_photo,
-        "paragonsr2_pro": paragonsr2_arch.paragonsr2_pro,
     }
 
 except ImportError:
