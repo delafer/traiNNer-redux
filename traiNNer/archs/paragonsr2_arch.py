@@ -30,18 +30,19 @@ from traiNNer.utils.registry import ARCH_REGISTRY
 # 1. CLASSICAL BASE UPSAMPLER (MAGIC KERNEL SHARP 2021)
 # ============================================================================
 
+
 def get_magic_kernel_weights():
     """
     Low-pass reconstruction kernel from Costella's Magic Kernel.
     """
-    return torch.tensor([1/16, 4/16, 6/16, 4/16, 1/16])
+    return torch.tensor([1 / 16, 4 / 16, 6 / 16, 4 / 16, 1 / 16])
 
 
 def get_magic_sharp_2021_kernel_weights():
     """
     Sharpening kernel from Magic Kernel Sharp 2021.
     """
-    return torch.tensor([-1/32, 0, 9/32, 16/32, 9/32, 0, -1/32])
+    return torch.tensor([-1 / 32, 0, 9 / 32, 16 / 32, 9 / 32, 0, -1 / 32])
 
 
 class SeparableConv(nn.Module):
@@ -50,33 +51,32 @@ class SeparableConv(nn.Module):
 
     These filters are frozen by design and must never be trained.
     """
-    def __init__(self, channels: int, kernel: torch.Tensor):
+
+    def __init__(self, channels: int, kernel: torch.Tensor) -> None:
         super().__init__()
         k = len(kernel)
         self.register_buffer("kernel", kernel)
 
         self.h = nn.Conv2d(
-            channels, channels,
+            channels,
+            channels,
             kernel_size=(1, k),
             padding=(0, k // 2),
             groups=channels,
-            bias=False
+            bias=False,
         )
         self.v = nn.Conv2d(
-            channels, channels,
+            channels,
+            channels,
             kernel_size=(k, 1),
             padding=(k // 2, 0),
             groups=channels,
-            bias=False
+            bias=False,
         )
 
         with torch.no_grad():
-            self.h.weight.copy_(
-                kernel.view(1, 1, 1, -1).repeat(channels, 1, 1, 1)
-            )
-            self.v.weight.copy_(
-                kernel.view(1, 1, -1, 1).repeat(channels, 1, 1, 1)
-            )
+            self.h.weight.copy_(kernel.view(1, 1, 1, -1).repeat(channels, 1, 1, 1))
+            self.v.weight.copy_(kernel.view(1, 1, -1, 1).repeat(channels, 1, 1, 1))
 
         for p in self.parameters():
             p.requires_grad = False
@@ -92,17 +92,14 @@ class MagicKernelSharp2021Upsample(nn.Module):
     Provides a strong low-frequency base reconstruction that the neural
     network refines with learned high-frequency detail.
     """
-    def __init__(self, in_ch: int, scale: int, alpha: float):
+
+    def __init__(self, in_ch: int, scale: int, alpha: float) -> None:
         super().__init__()
         self.scale = scale
         self.alpha = alpha
 
-        self.sharp = SeparableConv(
-            in_ch, get_magic_sharp_2021_kernel_weights()
-        )
-        self.blur = SeparableConv(
-            in_ch, get_magic_kernel_weights()
-        )
+        self.sharp = SeparableConv(in_ch, get_magic_sharp_2021_kernel_weights())
+        self.blur = SeparableConv(in_ch, get_magic_kernel_weights())
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         # Optional pre-sharpening
@@ -115,9 +112,11 @@ class MagicKernelSharp2021Upsample(nn.Module):
         # Reconstruction blur
         return self.blur(x)
 
+
 # ============================================================================
 # 2. NORMALIZATION & RESIDUAL SCALING
 # ============================================================================
+
 
 class RMSNorm(nn.Module):
     """
@@ -125,7 +124,8 @@ class RMSNorm(nn.Module):
 
     More stable than BatchNorm for SR and safe in FP16.
     """
-    def __init__(self, channels: int, eps: float = 1e-6):
+
+    def __init__(self, channels: int, eps: float = 1e-6) -> None:
         super().__init__()
         self.scale = nn.Parameter(torch.ones(channels, 1, 1))
         self.bias = nn.Parameter(torch.zeros(channels, 1, 1))
@@ -140,18 +140,19 @@ class LayerScale(nn.Module):
     """
     Residual scaling for training stability.
     """
-    def __init__(self, channels: int, init: float = 1e-5):
+
+    def __init__(self, channels: int, init: float = 1e-5) -> None:
         super().__init__()
-        self.gamma = nn.Parameter(
-            torch.full((1, channels, 1, 1), init)
-        )
+        self.gamma = nn.Parameter(torch.full((1, channels, 1, 1), init))
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return x * self.gamma
 
+
 # ============================================================================
 # 3. CORE BLOCKS
 # ============================================================================
+
 
 class WindowAttention(nn.Module):
     """
@@ -160,6 +161,7 @@ class WindowAttention(nn.Module):
     Partitions the input into non-overlapping windows and computes attention
     locally within each window. Supports window shifting for cross-window connections.
     """
+
     def __init__(
         self,
         dim: int,
@@ -167,7 +169,7 @@ class WindowAttention(nn.Module):
         window_size: int = 8,
         shift_size: int = 0,
         attention_mode: str = "sdpa",
-    ):
+    ) -> None:
         super().__init__()
         self.dim = dim
         self.num_heads = num_heads
@@ -194,36 +196,66 @@ class WindowAttention(nn.Module):
 
         # Partition windows
         # (B, Hp, Wp, C) -> (B, h_win, w_win, ws, ws, C)
-        x_windows = x.view(B, Hp // self.window_size, self.window_size, Wp // self.window_size, self.window_size, C)
-        x_windows = x_windows.permute(0, 1, 3, 2, 4, 5).contiguous() # (B, h_win, w_win, ws, ws, C)
-        x_windows = x_windows.view(-1, self.window_size * self.window_size, C) # (num_windows, ws*ws, C)
+        x_windows = x.view(
+            B,
+            Hp // self.window_size,
+            self.window_size,
+            Wp // self.window_size,
+            self.window_size,
+            C,
+        )
+        x_windows = x_windows.permute(
+            0, 1, 3, 2, 4, 5
+        ).contiguous()  # (B, h_win, w_win, ws, ws, C)
+        x_windows = x_windows.view(
+            -1, self.window_size * self.window_size, C
+        )  # (num_windows, ws*ws, C)
 
         # Attention
         qkv = self.qkv(x_windows)
-        q, k, v = qkv.chunk(3, dim=-1) # (num_windows, N, C)
+        q, k, v = qkv.chunk(3, dim=-1)  # (num_windows, N, C)
 
         # Multi-head split
-        q = q.view(-1, self.window_size * self.window_size, self.num_heads, C // self.num_heads).transpose(1, 2)
-        k = k.view(-1, self.window_size * self.window_size, self.num_heads, C // self.num_heads).transpose(1, 2)
-        v = v.view(-1, self.window_size * self.window_size, self.num_heads, C // self.num_heads).transpose(1, 2)
+        q = q.view(
+            -1, self.window_size * self.window_size, self.num_heads, C // self.num_heads
+        ).transpose(1, 2)
+        k = k.view(
+            -1, self.window_size * self.window_size, self.num_heads, C // self.num_heads
+        ).transpose(1, 2)
+        v = v.view(
+            -1, self.window_size * self.window_size, self.num_heads, C // self.num_heads
+        ).transpose(1, 2)
 
         if self.attention_mode == "flex":
-             # We rely on dynamic import or assuming it's available if this mode is picked
-             try:
-                 from torch.nn.attention import flex_attention
-             except ImportError:
-                 raise RuntimeError("FlexAttention requested but not available in this PyTorch build.")
-             x_windows = flex_attention(q, k, v)
+            # We rely on dynamic import or assuming it's available if this mode is picked
+            try:
+                from torch.nn.attention import flex_attention
+            except ImportError:
+                raise RuntimeError(
+                    "FlexAttention requested but not available in this PyTorch build."
+                )
+            x_windows = flex_attention(q, k, v)
         else:
-             # Standard SDPA
-             x_windows = F.scaled_dot_product_attention(q, k, v)
+            # Standard SDPA
+            x_windows = F.scaled_dot_product_attention(q, k, v)
 
-        x_windows = x_windows.transpose(1, 2).contiguous().view(-1, self.window_size * self.window_size, C)
+        x_windows = (
+            x_windows.transpose(1, 2)
+            .contiguous()
+            .view(-1, self.window_size * self.window_size, C)
+        )
         x_windows = self.proj(x_windows)
 
         # Reverse Partition
         x_windows = x_windows.view(-1, self.window_size, self.window_size, C)
-        x = x_windows.view(B, Hp // self.window_size, Wp // self.window_size, self.window_size, self.window_size, C)
+        x = x_windows.view(
+            B,
+            Hp // self.window_size,
+            Wp // self.window_size,
+            self.window_size,
+            self.window_size,
+            C,
+        )
         x = x.permute(0, 1, 3, 2, 4, 5).contiguous().view(B, Hp, Wp, C)
 
         # Reverse Shift
@@ -235,6 +267,7 @@ class WindowAttention(nn.Module):
 
         return x
 
+
 class NanoBlock(nn.Module):
     """
     Ultra-lightweight block for the Realtime variant.
@@ -244,7 +277,8 @@ class NanoBlock(nn.Module):
     - No attention
     - Minimal receptive field
     """
-    def __init__(self, dim: int, expansion: float = 2.0, **kwargs):
+
+    def __init__(self, dim: int, expansion: float = 2.0, **kwargs) -> None:
         super().__init__()
         hidden = int(dim * expansion)
 
@@ -255,6 +289,7 @@ class NanoBlock(nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         res = x
         x = F.gelu(self.dw(self.conv1(x)))
+        x = self.conv2(x)
         return x + res
 
 
@@ -267,7 +302,8 @@ class StreamBlock(nn.Module):
     - Simple gating
     - Fully convolutional operations
     """
-    def __init__(self, dim: int, expansion: float = 2.0, **kwargs):
+
+    def __init__(self, dim: int, expansion: float = 2.0, **kwargs) -> None:
         super().__init__()
         hidden = int(dim * expansion)
 
@@ -277,10 +313,7 @@ class StreamBlock(nn.Module):
         self.fuse = nn.Conv2d(dim * 2, dim, 1)
 
         self.proj = nn.Conv2d(dim, hidden * 2, 1)
-        self.gate = nn.Conv2d(
-            hidden * 2, hidden * 2,
-            3, padding=1, groups=hidden * 2
-        )
+        self.gate = nn.Conv2d(hidden * 2, hidden * 2, 3, padding=1, groups=hidden * 2)
         self.out = nn.Conv2d(hidden, dim, 1)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -310,6 +343,7 @@ class PhotoBlock(nn.Module):
     - SDPA (default)
     - FlexAttention (PyTorch-only inference)
     """
+
     def __init__(
         self,
         dim: int,
@@ -319,7 +353,7 @@ class PhotoBlock(nn.Module):
         window_size: int = 16,
         shift_size: int = 0,
         **kwargs,
-    ):
+    ) -> None:
         super().__init__()
         hidden = int(dim * expansion)
 
@@ -339,7 +373,7 @@ class PhotoBlock(nn.Module):
                 num_heads=4,
                 window_size=window_size,
                 shift_size=shift_size,
-                attention_mode=attention_mode
+                attention_mode=attention_mode,
             )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -356,22 +390,25 @@ class PhotoBlock(nn.Module):
         if self.attention_mode is not None and not self.export_safe:
             # WindowAttention expects (B, H, W, C) for easier manipulation
             res_attn = x
-            x = self.attn_norm(x).permute(0, 2, 3, 1) # (B, C, H, W) -> (B, H, W, C)
+            x = self.attn_norm(x).permute(0, 2, 3, 1)  # (B, C, H, W) -> (B, H, W, C)
             x = self.attn(x)
-            x = x.permute(0, 3, 1, 2) # (B, H, W, C) -> (B, C, H, W)
+            x = x.permute(0, 3, 1, 2)  # (B, H, W, C) -> (B, C, H, W)
             x = res_attn + self.scale(x)
 
         return x
+
 
 # ============================================================================
 # 4. RESIDUAL GROUP
 # ============================================================================
 
+
 class ResidualGroup(nn.Module):
     """
     Group of blocks with optional gradient checkpointing.
     """
-    def __init__(self, blocks: list[nn.Module], checkpointing: bool = False):
+
+    def __init__(self, blocks: list[nn.Module], checkpointing: bool = False) -> None:
         super().__init__()
         self.blocks = nn.Sequential(*blocks)
         self.checkpointing = checkpointing
@@ -383,15 +420,18 @@ class ResidualGroup(nn.Module):
             return x
         return self.blocks(x)
 
+
 # ============================================================================
 # 5. MAIN NETWORK
 # ============================================================================
+
 
 @ARCH_REGISTRY.register()
 class ParagonSR2(nn.Module):
     """
     ParagonSR2 main SISR generator.
     """
+
     def __init__(
         self,
         scale: int = 4,
@@ -407,12 +447,10 @@ class ParagonSR2(nn.Module):
         export_safe: bool = False,
         window_size: int = 8,
         **kwargs,
-    ):
+    ) -> None:
         super().__init__()
 
-        self.base = MagicKernelSharp2021Upsample(
-            in_chans, scale, upsampler_alpha
-        )
+        self.base = MagicKernelSharp2021Upsample(in_chans, scale, upsampler_alpha)
 
         self.conv_in = nn.Conv2d(in_chans, num_feat, 3, padding=1)
 
@@ -431,24 +469,28 @@ class ParagonSR2(nn.Module):
                 elif variant == "stream":
                     blocks.append(StreamBlock(num_feat))
                 elif variant == "photo":
-                    blocks.append(PhotoBlock(
-                        num_feat,
-                        attention_mode=attention_mode,
-                        export_safe=export_safe,
-                        window_size=window_size,
-                        shift_size=shift_size
-                    ))
+                    blocks.append(
+                        PhotoBlock(
+                            num_feat,
+                            attention_mode=attention_mode,
+                            export_safe=export_safe,
+                            window_size=window_size,
+                            shift_size=shift_size,
+                        )
+                    )
                 else:
                     raise ValueError(f"Unknown variant: {variant}")
             return blocks
 
-        self.body = nn.Sequential(*[
-            ResidualGroup(
-                build_blocks(g),
-                checkpointing=use_checkpointing,
-            )
-            for g in range(num_groups)
-        ])
+        self.body = nn.Sequential(
+            *[
+                ResidualGroup(
+                    build_blocks(g),
+                    checkpointing=use_checkpointing,
+                )
+                for g in range(num_groups)
+            ]
+        )
 
         self.conv_mid = nn.Conv2d(num_feat, num_feat, 3, padding=1)
 
@@ -471,9 +513,11 @@ class ParagonSR2(nn.Module):
         detail = self.conv_out(x) * self.detail_gain
         return base + detail
 
+
 # ============================================================================
 # 6. FACTORY FUNCTIONS
 # ============================================================================
+
 
 @ARCH_REGISTRY.register()
 def paragonsr2_realtime(scale=4, **kw):
@@ -483,8 +527,8 @@ def paragonsr2_realtime(scale=4, **kw):
         num_groups=1,
         num_blocks=3,
         variant="realtime",
-        detail_gain=0.05,
-        upsampler_alpha=0.3,
+        detail_gain=kw.pop("detail_gain", 0.05),
+        upsampler_alpha=kw.pop("upsampler_alpha", 0.3),
         **kw,
     )
 
@@ -497,8 +541,9 @@ def paragonsr2_stream(scale=4, **kw):
         num_groups=2,
         num_blocks=3,
         variant="stream",
-        detail_gain=0.1,
-        upsampler_alpha=0.0,
+        detail_gain=kw.pop("detail_gain", 0.1),
+        upsampler_alpha=kw.pop("upsampler_alpha", 0.0),
+        use_content_aware=kw.pop("use_content_aware", True),
         **kw,
     )
 
@@ -511,8 +556,10 @@ def paragonsr2_photo(scale=4, **kw):
         num_groups=4,
         num_blocks=4,
         variant="photo",
-        attention_mode="sdpa",
-        detail_gain=0.1,
-        upsampler_alpha=0.4,
+        detail_gain=kw.pop("detail_gain", 0.1),
+        upsampler_alpha=kw.pop("upsampler_alpha", 0.4),
+        attention_mode=kw.pop("attention_mode", "sdpa"),
+        export_safe=kw.pop("export_safe", False),
+        window_size=kw.pop("window_size", 16),
         **kw,
     )

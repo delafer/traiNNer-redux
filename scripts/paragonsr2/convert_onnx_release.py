@@ -193,6 +193,18 @@ class ParagonConverter:
             arch_kwargs["detail_gain"] = self.args.detail_gain
             print(f"      Override: detail_gain={self.args.detail_gain}")
 
+        if self.args.attention_mode is not None:
+            arch_kwargs["attention_mode"] = self.args.attention_mode
+            print(f"      Override: attention_mode={self.args.attention_mode}")
+
+        if self.args.export_safe is not None:
+            arch_kwargs["export_safe"] = self.args.export_safe
+            print(f"      Override: export_safe={self.args.export_safe}")
+
+        if self.args.window_size is not None:
+            arch_kwargs["window_size"] = self.args.window_size
+            print(f"      Override: window_size={self.args.window_size}")
+
         model = arch_fn(**arch_kwargs)
 
         print(f"      Loading weights: {self.args.checkpoint}")
@@ -370,6 +382,24 @@ if __name__ == "__main__":
         type=float,
         default=None,
         help="Override detail_gain setting",
+    )
+    parser.add_argument(
+        "--attention_mode",
+        type=str,
+        default=None,
+        help="Override attention_mode (sdpa, flex, none)",
+    )
+    parser.add_argument(
+        "--export_safe",
+        type=lambda x: x.lower() in ("true", "1", "yes"),
+        default=None,
+        help="Override export_safe setting (true/false)",
+    )
+    parser.add_argument(
+        "--window_size",
+        type=int,
+        default=None,
+        help="Override window_size",
     )
 
     args = parser.parse_args()
