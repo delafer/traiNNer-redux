@@ -64,6 +64,14 @@ try:
 except ImportError:
     HAS_TRT = False
 
+# Try importing FlexAttention (PyTorch 2.5+)
+try:
+    import torch.nn.attention.flex_attention as _flex_attention
+
+    HAS_FLEX = True
+except (ImportError, AttributeError):
+    HAS_FLEX = False
+
 
 # ---------------------------------------------------------------------
 # SYSTEM INFO
@@ -127,6 +135,7 @@ class PyTorchRunner:
         device: str = "cuda",
         use_content_aware: bool | None = None,
         upsampler_alpha: float | None = None,
+        detail_gain: float | None = None,
         attention_mode: str | None = None,
         export_safe: bool | None = None,
         window_size: int | None = None,
@@ -147,7 +156,6 @@ class PyTorchRunner:
                 "paragonsr2_realtime": paragonsr2_arch.paragonsr2_realtime,
                 "paragonsr2_stream": paragonsr2_arch.paragonsr2_stream,
                 "paragonsr2_photo": paragonsr2_arch.paragonsr2_photo,
-                "paragonsr2_pro": paragonsr2_arch.paragonsr2_pro,
             }
             if arch not in arch_map:
                 raise ValueError(f"Unknown arch: {arch}")
@@ -186,15 +194,46 @@ class PyTorchRunner:
                 elif "params" in state_dict:
                     state_dict = state_dict["params"]
 
-            # Remove module. prefix
+            # ---------------------------------------------------------------------
+            # LEGACY KEY MAPPING (Sync with convert_onnx_release.py)
+            # ---------------------------------------------------------------------
             new_dict = {}
             for k, v in state_dict.items():
-                if k.startswith("module."):
-                    new_dict[k[7:]] = v
-                else:
-                    new_dict[k] = v
+                # Strip 'module.' prefix (DDP)
+                new_k = k[7:] if k.startswith("module.") else k
 
-            model.load_state_dict(new_dict, strict=True)
+                # 1. Base Upsampler rebranding
+                new_k = new_k.replace("base_upsampler.resample_conv.", "base.blur.")
+                new_k = new_k.replace("base_upsampler.sharpen.", "base.sharp.")
+
+                # 2. Resampler sub-key mapping
+                if new_k.startswith("base."):
+                    new_k = new_k.replace(".conv_h.", ".h.")
+                    new_k = new_k.replace(".conv_v.", ".v.")
+
+                # 3. Block Structure
+                if ".blocks." in new_k and ".net." in new_k:
+                    new_k = new_k.replace(".net.0.", ".conv1.")
+                    new_k = new_k.replace(".net.2.", ".dw.")
+                    new_k = new_k.replace(".net.4.", ".conv2.")
+
+                # 4. Global Gain
+                new_k = new_k.replace("global_detail_gain", "detail_gain")
+
+                # 5. Detail Upsampler
+                new_k = new_k.replace("detail_upsampler.up_conv.", "up.0.")
+
+                # 6. Global Fusing
+                new_k = new_k.replace("conv_fuse.", "conv_mid.")
+
+                new_dict[new_k] = v
+
+            missing, _unexpected = model.load_state_dict(new_dict, strict=False)
+            if missing:
+                print(f"      [WARNING] Missing keys: {len(missing)}")
+            if not missing:
+                print("      Weights loaded successfully.")
+
             model.to(device).eval()
 
             # Optimization: channels last
@@ -205,6 +244,8 @@ class PyTorchRunner:
             # Count parameters
             params = sum(p.numel() for p in model.parameters())
             print(f"      Parameters: {params:,}")
+
+            self.is_compiled = False
 
         except Exception as e:
             print(f"[PyTorch] Error loading model: {e}")
@@ -220,9 +261,10 @@ class PyTorchRunner:
 
     def compile_model(self) -> None:
         """Apply torch.compile to the model."""
-        print("      Compiling model (mode='max-autotune', dynamic=True)...")
-        # dynamic=True is crucial for benchmarking images of different sizes without recompiling
-        self.model = torch.compile(self.model, mode="max-autotune", dynamic=True)
+        print("      Compiling model (mode='reduce-overhead', dynamic=True)...")
+        # reduce-overhead is more stable than max-autotune for varying shapes on mid-range GPUs
+        self.model = torch.compile(self.model, mode="reduce-overhead", dynamic=True)
+        self.is_compiled = True
 
 
 # ---------------------------------------------------------------------
@@ -298,7 +340,13 @@ def benchmark_pytorch(
         image_sizes.append((h, w))
 
         img_t = torch.from_numpy(img).to(device).float().permute(2, 0, 1).unsqueeze(0)
-        img_t = img_t.div_(255.0).to(memory_format=torch.channels_last)
+        img_t = img_t.div_(255.0)
+
+        # Compiled models (Inductor) can be unstable with dynamic + channels_last
+        if getattr(runner, "is_compiled", False):
+            img_t = img_t.contiguous()
+        else:
+            img_t = img_t.to(memory_format=torch.channels_last)
 
         start_event = torch.cuda.Event(enable_timing=True)
         end_event = torch.cuda.Event(enable_timing=True)
@@ -539,14 +587,12 @@ def main() -> None:
             )
 
             # 3. FlexAttention
-            try:
-                import torch.nn.attention.flex_attention
-
+            if HAS_FLEX:
                 print("3. Testing: FlexAttention")
                 results.append(
                     run_config(attn_mode="flex", exp_safe=False, label_suffix=" (Flex)")
                 )
-            except ImportError:
+            else:
                 print("3. FlexAttention skipped (not available in this PyTorch build).")
 
         else:
