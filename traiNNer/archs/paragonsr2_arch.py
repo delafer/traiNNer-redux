@@ -229,7 +229,7 @@ class WindowAttention(nn.Module):
         if self.attention_mode == "flex":
             # We rely on dynamic import or assuming it's available if this mode is picked
             try:
-                from torch.nn.attention import flex_attention
+                from torch.nn.attention.flex_attention import flex_attention
             except ImportError:
                 raise RuntimeError(
                     "FlexAttention requested but not available in this PyTorch build."
