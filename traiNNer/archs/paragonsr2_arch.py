@@ -429,7 +429,39 @@ class ResidualGroup(nn.Module):
 @ARCH_REGISTRY.register()
 class ParagonSR2(nn.Module):
     """
-    ParagonSR2 main SISR generator.
+    ParagonSR2: Dual-Path Super-Resolution Network.
+
+    A deployment-first SISR architecture combining classical signal processing
+    with learned neural refinement.
+
+    Architecture:
+        Input -> [Classical Base Upsampler] -> base_output
+              -> [Conv_In] -> [Body (ResidualGroups)] -> [Conv_Mid] -> [PixelShuffle] -> detail_output
+        Output = base_output + (detail_output * detail_gain)
+
+    Args:
+        scale: Upscale factor (2 or 4).
+        in_chans: Input channels (default: 3 for RGB).
+        num_feat: Feature channels in the body.
+        num_groups: Number of residual groups.
+        num_blocks: Blocks per group.
+        variant: Block type - "realtime", "stream", or "photo".
+        detail_gain: Initial gain for learned detail (learnable parameter).
+        upsampler_alpha: Sharpening strength for classical base (0 = none).
+        use_checkpointing: Enable gradient checkpointing for training.
+        attention_mode: Attention backend - "sdpa", "flex", or None.
+        export_safe: If True, disables attention for ONNX export compatibility.
+        window_size: Window size for attention (Photo variant only).
+
+    Forward Args:
+        x: Input tensor (B, C, H, W).
+        feature_tap: If True, also returns intermediate features.
+        prev_feat: Previous frame's features for temporal blending (video mode).
+        alpha: Blending strength for temporal features (0-1).
+
+    Returns:
+        If feature_tap=False: Output tensor (B, C, H*scale, W*scale).
+        If feature_tap=True: Tuple of (output, features) for video processing.
     """
 
     def __init__(
@@ -503,11 +535,32 @@ class ParagonSR2(nn.Module):
         self.detail_gain = nn.Parameter(torch.tensor(detail_gain))
 
     def forward(
-        self, x: torch.Tensor, feature_tap: bool = False
+        self,
+        x: torch.Tensor,
+        feature_tap: bool = False,
+        prev_feat: torch.Tensor | None = None,
+        alpha: float = 0.2,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+        """
+        Forward pass with optional temporal feature blending.
+
+        Args:
+            x: Input image tensor (B, 3, H, W).
+            feature_tap: Return intermediate features for video mode.
+            prev_feat: Previous frame's features for temporal blending.
+            alpha: Blending weight (0=current only, 1=history only).
+
+        Returns:
+            SR output, or (SR output, features) if feature_tap=True.
+        """
         base = self.base(x)
 
         x = self.conv_in(x)
+
+        # Temporal feedback blending (video mode)
+        if prev_feat is not None:
+            x = (1.0 - alpha) * x + alpha * prev_feat
+
         feat = x if feature_tap else None
 
         x = self.body(x)

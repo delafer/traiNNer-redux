@@ -305,25 +305,53 @@ class ParagonConverter:
         print("\n[2/4] Exporting FP32 ONNX...")
         output_path = self.output_dir / f"{self.args.arch}_fp32.onnx"
 
-        # Dummy Input (Standard HD size ensures no weird shape inference issues)
+        # Create dummy input
         dummy_input = torch.randn(1, 3, 64, 64, device=self.device)
 
-        # Export
-        torch.onnx.export(
-            model,
-            (dummy_input,),
-            str(output_path),
-            input_names=["input"],
-            output_names=["output"],
-            dynamic_axes={
-                "input": {0: "batch", 2: "height", 3: "width"},
-                "output": {0: "batch", 2: "height", 3: "width"},
-            },
-            opset_version=18,  # Updated for PyTorch 2.5+ / TRT 8.6+
-            do_constant_folding=True,
-            # For future Custom Symbolic / FlexAttention export:
-            # custom_opsets={"com.custom": 1},
-        )
+        # Export to ONNX
+        print(f"\n[ONNX] Exporting to {output_path}...")
+        output_names = ["output"]
+
+        # Prepare export args
+        export_args = (dummy_input,)
+        if self.args.video:
+            output_names.append("feature_map")
+            # Create dummy prev_feat matching conv_in output shape (B, 64, H, W)
+            # Assuming conv_in preserves H,W (padding=1)
+            dummy_prev = torch.zeros(1, 64, 64, 64, device=self.device)
+            # Args: (x, feature_tap=True, prev_feat=dummy_prev, alpha=0.2)
+            export_args = (dummy_input, True, dummy_prev, 0.2)
+
+            # We need to add 'prev_feat' to input_names for ONNX
+            input_names = ["input", "prev_feat"]
+            dynamic_axes = {
+                "input": {0: "batch_size", 2: "height", 3: "width"},
+                "prev_feat": {0: "batch_size", 2: "height", 3: "width"},
+                "output": {0: "batch_size", 2: "height", 3: "width"},
+                "feature_map": {0: "batch_size", 2: "height", 3: "width"},
+            }
+        else:
+            input_names = ["input"]
+            dynamic_axes = {
+                "input": {0: "batch_size", 2: "height", 3: "width"},
+                "output": {0: "batch_size", 2: "height", 3: "width"},
+            }
+
+        with torch.no_grad():
+            torch.onnx.export(
+                model,
+                export_args,  # Use tuple of args
+                output_path,
+                export_params=True,
+                opset_version=self.args.opset,
+                do_constant_folding=True,
+                input_names=input_names,
+                output_names=output_names,
+                dynamic_axes=dynamic_axes if self.args.dynamic else None,
+            )
+        # Updated for PyTorch 2.5+ / TRT 8.6+
+        # For future Custom Symbolic / FlexAttention export:
+        # custom_opsets={"com.custom": 1},
 
         # Optimizing / Cleaning
         print("      Simplifying ONNX graph...")
@@ -423,7 +451,21 @@ if __name__ == "__main__":
     parser.add_argument("--device", default="cuda", help="Inference device")
     parser.add_argument("--val_dir", help="Folder of images to validate ONNX accuracy")
     parser.add_argument(
-        "--val_count", type=int, default=5, help="Number of images to test"
+        "--video",
+        action="store_true",
+        help="Enable feature_tap output for video temporal stability (output: model_video.onnx)",
+    )
+    parser.add_argument(
+        "--opset", type=int, default=17, help="ONNX opset version (default: 17)"
+    )
+    parser.add_argument(
+        "--val_count", type=int, default=50, help="Number of images to test"
+    )
+    parser.add_argument(
+        "--dynamic",
+        action="store_true",
+        default=True,
+        help="Export with dynamic axes for variable resolution (default: True)",
     )
 
     # Architecture override arguments (for checkpoints trained with non-default settings)

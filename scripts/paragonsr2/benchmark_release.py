@@ -7,7 +7,7 @@ Benchmarks ParagonSR2 models on real images with both PyTorch and TensorRT backe
 Outputs results in markdown table format for easy README integration.
 
 Features:
-- PyTorch FP32 and FP16 (AMP) benchmarks
+- PyTorch FP32, FP16 (AMP), and Compiled benchmarks
 - TensorRT FP16 engine benchmarks
 - Per-image timing to show dynamic shape handling
 - System info collection (GPU, driver, VRAM)
@@ -29,13 +29,8 @@ Usage:
         --arch paragonsr2_photo \\
         --trt_engine paragonsr2_release/paragonsr2_photo_fp16.trt
 
-    # With architecture overrides (for Stream fidelity checkpoint)
-    python benchmark_release.py \\
-        --input /path/to/Urban100_x2 \\
-        --scale 2 \\
-        --pt_model paragonsr2/2xParagonSR2_Stream_fidelity.safetensors \\
-        --arch paragonsr2_stream \\
-        --use_content_aware false
+Author: Philip Hofmann
+License: MIT
 """
 
 import argparse
@@ -44,6 +39,10 @@ import subprocess
 import sys
 from pathlib import Path
 
+import cv2
+import numpy as np
+import torch
+
 try:
     from tqdm import tqdm
 except ImportError:
@@ -51,10 +50,6 @@ except ImportError:
     def tqdm(iterable, desc=""):
         return iterable
 
-
-import cv2
-import numpy as np
-import torch
 
 # Try importing TensorRT
 try:
@@ -66,16 +61,16 @@ except ImportError:
 
 # Try importing FlexAttention (PyTorch 2.5+)
 try:
-    import torch.nn.attention.flex_attention as _flex_attention
+    from torch.nn.attention import flex_attention as _flex_attention
 
     HAS_FLEX = True
 except (ImportError, AttributeError):
     HAS_FLEX = False
 
 
-# ---------------------------------------------------------------------
+# =============================================================================
 # SYSTEM INFO
-# ---------------------------------------------------------------------
+# =============================================================================
 
 
 def get_system_info() -> dict:
@@ -121,12 +116,18 @@ def print_system_info(info: dict) -> None:
     print("=" * 60)
 
 
-# ---------------------------------------------------------------------
+# =============================================================================
 # PYTORCH RUNNER
-# ---------------------------------------------------------------------
+# =============================================================================
 
 
 class PyTorchRunner:
+    """
+    PyTorch model runner for benchmarking.
+
+    Supports FP32, FP16 (AMP), and torch.compile modes.
+    """
+
     def __init__(
         self,
         model_path: str,
@@ -142,168 +143,171 @@ class PyTorchRunner:
     ) -> None:
         self.device = device
         self.scale = scale
+        self.is_compiled = False
         print(f"[PyTorch] Loading {arch} from {model_path}...")
 
-        try:
-            # Add repo root to path for traiNNer imports
-            repo_root = Path(__file__).parent.parent.parent
-            if str(repo_root) not in sys.path:
-                sys.path.insert(0, str(repo_root))
+        # Add repo root to path for traiNNer imports
+        repo_root = Path(__file__).parent.parent.parent
+        if str(repo_root) not in sys.path:
+            sys.path.insert(0, str(repo_root))
 
-            from traiNNer.archs import paragonsr2_arch
+        from traiNNer.archs import paragonsr2_arch
 
-            arch_map = {
-                "paragonsr2_realtime": paragonsr2_arch.paragonsr2_realtime,
-                "paragonsr2_stream": paragonsr2_arch.paragonsr2_stream,
-                "paragonsr2_photo": paragonsr2_arch.paragonsr2_photo,
-            }
-            if arch not in arch_map:
-                raise ValueError(f"Unknown arch: {arch}")
+        arch_map = {
+            "paragonsr2_realtime": paragonsr2_arch.paragonsr2_realtime,
+            "paragonsr2_stream": paragonsr2_arch.paragonsr2_stream,
+            "paragonsr2_photo": paragonsr2_arch.paragonsr2_photo,
+        }
+        if arch not in arch_map:
+            raise ValueError(f"Unknown arch: {arch}")
 
-            # Build kwargs with overrides
-            arch_kwargs = {"scale": scale}
-            if use_content_aware is not None:
-                arch_kwargs["use_content_aware"] = use_content_aware
-                print(f"      Override: use_content_aware={use_content_aware}")
-            if upsampler_alpha is not None:
-                arch_kwargs["upsampler_alpha"] = upsampler_alpha
-                print(f"      Override: upsampler_alpha={upsampler_alpha}")
-            if detail_gain is not None:
-                arch_kwargs["detail_gain"] = detail_gain
-                print(f"      Override: detail_gain={detail_gain}")
-            if attention_mode is not None:
-                arch_kwargs["attention_mode"] = attention_mode
-                print(f"      Override: attention_mode={attention_mode}")
-            if export_safe is not None:
-                arch_kwargs["export_safe"] = export_safe
-                print(f"      Override: export_safe={export_safe}")
-            if window_size is not None:
-                arch_kwargs["window_size"] = window_size
-                print(f"      Override: window_size={window_size}")
+        # Build kwargs with overrides
+        arch_kwargs = {"scale": scale}
+        if use_content_aware is not None:
+            arch_kwargs["use_content_aware"] = use_content_aware
+            print(f"      Override: use_content_aware={use_content_aware}")
+        if upsampler_alpha is not None:
+            arch_kwargs["upsampler_alpha"] = upsampler_alpha
+            print(f"      Override: upsampler_alpha={upsampler_alpha}")
+        if detail_gain is not None:
+            arch_kwargs["detail_gain"] = detail_gain
+            print(f"      Override: detail_gain={detail_gain}")
+        if attention_mode is not None:
+            arch_kwargs["attention_mode"] = attention_mode
+            print(f"      Override: attention_mode={attention_mode}")
+        if export_safe is not None:
+            arch_kwargs["export_safe"] = export_safe
+            print(f"      Override: export_safe={export_safe}")
+        if window_size is not None:
+            arch_kwargs["window_size"] = window_size
+            print(f"      Override: window_size={window_size}")
 
-            model = arch_map[arch](**arch_kwargs)
+        self.model = arch_map[arch](**arch_kwargs)
 
-            if str(model_path).endswith(".safetensors"):
-                from safetensors.torch import load_file
+        # Load weights
+        if str(model_path).endswith(".safetensors"):
+            from safetensors.torch import load_file
 
-                state_dict = load_file(model_path)
-            else:
-                state_dict = torch.load(model_path, map_location="cpu")
-                if "params_ema" in state_dict:
-                    state_dict = state_dict["params_ema"]
-                elif "params" in state_dict:
-                    state_dict = state_dict["params"]
+            state_dict = load_file(model_path)
+        else:
+            state_dict = torch.load(model_path, map_location="cpu")
+            if "params_ema" in state_dict:
+                state_dict = state_dict["params_ema"]
+            elif "params" in state_dict:
+                state_dict = state_dict["params"]
 
-            # ---------------------------------------------------------------------
-            # LEGACY KEY MAPPING (Sync with convert_onnx_release.py)
-            # ---------------------------------------------------------------------
-            new_dict = {}
-            for k, v in state_dict.items():
-                # Strip 'module.' prefix (DDP)
-                new_k = k[7:] if k.startswith("module.") else k
+        # Legacy key mapping (backwards compatibility)
+        new_dict = {}
+        for k, v in state_dict.items():
+            new_k = k[7:] if k.startswith("module.") else k
+            new_k = new_k.replace("base_upsampler.resample_conv.", "base.blur.")
+            new_k = new_k.replace("base_upsampler.sharpen.", "base.sharp.")
+            if new_k.startswith("base."):
+                new_k = new_k.replace(".conv_h.", ".h.")
+                new_k = new_k.replace(".conv_v.", ".v.")
+            if ".blocks." in new_k and ".net." in new_k:
+                new_k = new_k.replace(".net.0.", ".conv1.")
+                new_k = new_k.replace(".net.2.", ".dw.")
+                new_k = new_k.replace(".net.4.", ".conv2.")
+            new_k = new_k.replace("global_detail_gain", "detail_gain")
+            new_k = new_k.replace("detail_upsampler.up_conv.", "up.0.")
+            new_k = new_k.replace("conv_fuse.", "conv_mid.")
+            new_dict[new_k] = v
 
-                # 1. Base Upsampler rebranding
-                new_k = new_k.replace("base_upsampler.resample_conv.", "base.blur.")
-                new_k = new_k.replace("base_upsampler.sharpen.", "base.sharp.")
+        self.model.load_state_dict(new_dict, strict=False)
+        self.model.to(device).eval()
 
-                # 2. Resampler sub-key mapping
-                if new_k.startswith("base."):
-                    new_k = new_k.replace(".conv_h.", ".h.")
-                    new_k = new_k.replace(".conv_v.", ".v.")
+        # Count parameters
+        params = sum(p.numel() for p in self.model.parameters())
+        print(f"      Parameters: {params:,}")
 
-                # 3. Block Structure
-                if ".blocks." in new_k and ".net." in new_k:
-                    new_k = new_k.replace(".net.0.", ".conv1.")
-                    new_k = new_k.replace(".net.2.", ".dw.")
-                    new_k = new_k.replace(".net.4.", ".conv2.")
+    def infer(self, input_tensor: torch.Tensor, use_amp: bool = False) -> torch.Tensor:
+        """Run inference on input tensor."""
+        if self.is_compiled:
+            input_tensor = input_tensor.contiguous()
 
-                # 4. Global Gain
-                new_k = new_k.replace("global_detail_gain", "detail_gain")
-
-                # 5. Detail Upsampler
-                new_k = new_k.replace("detail_upsampler.up_conv.", "up.0.")
-
-                # 6. Global Fusing
-                new_k = new_k.replace("conv_fuse.", "conv_mid.")
-
-                new_dict[new_k] = v
-
-            missing, _unexpected = model.load_state_dict(new_dict, strict=False)
-            if missing:
-                print(f"      [WARNING] Missing keys: {len(missing)}")
-            if not missing:
-                print("      Weights loaded successfully.")
-
-            model.to(device).eval()
-
-            # Optimization: channels last
-            model = model.to(memory_format=torch.channels_last)
-
-            self.model = model
-
-            # Count parameters
-            params = sum(p.numel() for p in model.parameters())
-            print(f"      Parameters: {params:,}")
-
-            self.is_compiled = False
-
-        except Exception as e:
-            print(f"[PyTorch] Error loading model: {e}")
-            raise
-
-    def infer(self, img_tensor: torch.Tensor, use_amp: bool = False) -> torch.Tensor:
-        with torch.inference_mode():
+        with torch.no_grad():
             if use_amp:
                 with torch.autocast(device_type="cuda", dtype=torch.float16):
-                    return self.model(img_tensor)
-            else:
-                return self.model(img_tensor)
+                    return self.model(input_tensor)
+            return self.model(input_tensor)
 
     def compile_model(self) -> None:
-        """Apply torch.compile to the model."""
+        """Compile model with torch.compile for faster inference."""
         print("      Compiling model (mode='reduce-overhead', dynamic=True)...")
-        # reduce-overhead is more stable than max-autotune for varying shapes on mid-range GPUs
         self.model = torch.compile(self.model, mode="reduce-overhead", dynamic=True)
         self.is_compiled = True
 
 
-# ---------------------------------------------------------------------
+# =============================================================================
 # TENSORRT RUNNER
-# ---------------------------------------------------------------------
+# =============================================================================
 
 
 class TRTRunner:
-    def __init__(self, engine_path: str) -> None:
+    """
+    TensorRT engine runner for benchmarking.
+
+    Supports dynamic shapes and optional feature_map output for video mode.
+    """
+
+    def __init__(self, engine_path: str, is_video: bool = False) -> None:
         if not HAS_TRT:
             raise RuntimeError("TensorRT not installed")
-
         self.logger = trt.Logger(trt.Logger.WARNING)
         self.runtime = trt.Runtime(self.logger)
-        self.stream = torch.cuda.Stream()
+        self.is_video = is_video
 
         print(f"[TRT] Loading Engine: {engine_path}")
         with open(engine_path, "rb") as f:
             self.engine = self.runtime.deserialize_cuda_engine(f.read())
-
         self.context = self.engine.create_execution_context()
-        self.input_name = "input"
-        self.output_name = "output"
 
-    def infer_with_buffers(
-        self, input_tensor: torch.Tensor, output_tensor: torch.Tensor
-    ) -> torch.Tensor:
-        self.context.set_input_shape(self.input_name, input_tensor.shape)
-        self.context.set_tensor_address(self.input_name, input_tensor.data_ptr())
-        self.context.set_tensor_address(self.output_name, output_tensor.data_ptr())
+    def run(
+        self, input_tensor: torch.Tensor
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+        """Run TensorRT inference."""
+        input_ptr = input_tensor.data_ptr()
 
-        self.context.execute_async_v3(stream_handle=self.stream.cuda_stream)
-        self.stream.synchronize()
+        # Set input shape for dynamic engines
+        self.context.set_input_shape("input", input_tensor.shape)
+
+        # Get output shape and dtype
+        out_shape = self.context.get_tensor_shape("output")
+        out_dtype = (
+            torch.float16
+            if self.engine.get_tensor_dtype("output") == trt.float16
+            else torch.float32
+        )
+        output_tensor = torch.empty(
+            tuple(out_shape), dtype=out_dtype, device=input_tensor.device
+        )
+
+        bindings = [input_ptr, output_tensor.data_ptr()]
+
+        feat_tensor = None
+        if self.is_video and self.engine.num_io_tensors > 2:
+            feat_shape = self.context.get_tensor_shape("feature_map")
+            feat_dtype = (
+                torch.float16
+                if self.engine.get_tensor_dtype("feature_map") == trt.float16
+                else torch.float32
+            )
+            feat_tensor = torch.empty(
+                tuple(feat_shape), dtype=feat_dtype, device=input_tensor.device
+            )
+            bindings.append(feat_tensor.data_ptr())
+
+        self.context.execute_v2(bindings)
+
+        if self.is_video:
+            return output_tensor, feat_tensor
         return output_tensor
 
 
-# ---------------------------------------------------------------------
+# =============================================================================
 # BENCHMARK FUNCTIONS
-# ---------------------------------------------------------------------
+# =============================================================================
 
 
 def benchmark_pytorch(
@@ -314,7 +318,7 @@ def benchmark_pytorch(
     device: str = "cuda",
     mode_suffix: str = "",
 ) -> dict:
-    """Benchmark PyTorch model."""
+    """Benchmark PyTorch model on a list of images."""
     mode = ("PyTorch FP16" if use_amp else "PyTorch FP32") + mode_suffix
     print(f"\n--- Benchmarking {mode} ---")
 
@@ -342,8 +346,8 @@ def benchmark_pytorch(
         img_t = torch.from_numpy(img).to(device).float().permute(2, 0, 1).unsqueeze(0)
         img_t = img_t.div_(255.0)
 
-        # Compiled models (Inductor) can be unstable with dynamic + channels_last
-        if getattr(runner, "is_compiled", False):
+        # Compiled models can be unstable with dynamic + channels_last
+        if runner.is_compiled:
             img_t = img_t.contiguous()
         else:
             img_t = img_t.to(memory_format=torch.channels_last)
@@ -377,14 +381,21 @@ def benchmark_pytorch(
 
 
 def benchmark_tensorrt(
-    runner: TRTRunner,
+    engine_path: str,
     images: list[Path],
     scale: int,
+    is_video: bool = False,
     device: str = "cuda",
 ) -> dict:
-    """Benchmark TensorRT engine."""
-    mode = "TensorRT FP16"
+    """Benchmark TensorRT engine on a list of images."""
+    mode = f"TensorRT FP16{' (Video)' if is_video else ''}"
     print(f"\n--- Benchmarking {mode} ---")
+
+    try:
+        runner = TRTRunner(engine_path, is_video=is_video)
+    except Exception as e:
+        print(f"Error initializing TRTRunner: {e}")
+        return {}
 
     latencies = []
     image_sizes = []
@@ -393,11 +404,8 @@ def benchmark_tensorrt(
 
     # Warmup
     dummy = torch.zeros(1, 3, 64, 64, device=device, dtype=torch.float32)
-    out_dummy = torch.empty(
-        1, 3, 64 * scale, 64 * scale, device=device, dtype=torch.float32
-    )
     for _ in range(3):
-        runner.infer_with_buffers(dummy, out_dummy)
+        runner.run(dummy)
     torch.cuda.synchronize()
 
     for img_path in tqdm(images, desc=mode):
@@ -411,15 +419,11 @@ def benchmark_tensorrt(
         img_t = torch.from_numpy(img).to(device).float().permute(2, 0, 1).unsqueeze(0)
         img_t = img_t.div_(255.0)
 
-        out_t = torch.empty(
-            1, 3, h * scale, w * scale, device=device, dtype=torch.float32
-        )
-
         start_event = torch.cuda.Event(enable_timing=True)
         end_event = torch.cuda.Event(enable_timing=True)
 
         start_event.record()
-        runner.infer_with_buffers(img_t, out_t)
+        _ = runner.run(img_t)
         end_event.record()
         torch.cuda.synchronize()
 
@@ -464,9 +468,9 @@ def print_markdown_table(results: list[dict], arch: str, system_info: dict) -> N
     print()
 
 
-# ---------------------------------------------------------------------
+# =============================================================================
 # MAIN
-# ---------------------------------------------------------------------
+# =============================================================================
 
 
 def main() -> None:
@@ -502,7 +506,6 @@ def main() -> None:
         default=None,
         help="Override detail_gain setting",
     )
-
     parser.add_argument(
         "--attention_mode",
         type=str,
@@ -524,7 +527,12 @@ def main() -> None:
     parser.add_argument(
         "--benchmark_attention_modes",
         action="store_true",
-        help="If set, benchmarks No-Attn, SDPA, and Flex variants automatically (for Photo arch).",
+        help="Benchmark No-Attn, SDPA, and Flex variants (Photo arch only)",
+    )
+    parser.add_argument(
+        "--video",
+        action="store_true",
+        help="Enable feature_tap benchmarking (video temporal stability mode)",
     )
 
     args = parser.parse_args()
@@ -556,14 +564,12 @@ def main() -> None:
                 use_content_aware=args.use_content_aware,
                 upsampler_alpha=args.upsampler_alpha,
                 detail_gain=args.detail_gain,
-                # New overrides
                 attention_mode=attn_mode
                 if attn_mode is not None
                 else args.attention_mode,
                 export_safe=exp_safe if exp_safe is not None else args.export_safe,
                 window_size=args.window_size,
             )
-            # FP16 (AMP) benchmark only for speed comparisons
             res = benchmark_pytorch(
                 runner, images, args.scale, use_amp=True, mode_suffix=label_suffix
             )
@@ -621,8 +627,7 @@ def main() -> None:
             )
             torch.cuda.empty_cache()
 
-            # Compiled Benchmark (Future Proofing Speed Check)
-            # Note: First run will include compilation time, so we need a warmup
+            # Compiled Benchmark
             pt_runner.compile_model()
             results.append(
                 benchmark_pytorch(
@@ -642,9 +647,11 @@ def main() -> None:
         if not HAS_TRT:
             print("TensorRT not installed, skipping TRT benchmark.")
         else:
-            trt_runner = TRTRunner(args.trt_engine)
-            results.append(benchmark_tensorrt(trt_runner, images, args.scale))
-            del trt_runner
+            results.append(
+                benchmark_tensorrt(
+                    args.trt_engine, images, args.scale, is_video=args.video
+                )
+            )
             torch.cuda.empty_cache()
 
     # Print markdown table
