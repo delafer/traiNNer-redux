@@ -1,3 +1,7 @@
+# GENERATE TIME: Mon Dec 22 06:45:07 2025
+# CMD:
+# train.py -opt options/train/ParagonSR2/fidelity/2xParagonSR2_Photo_fidelity.yml --auto_resume
+
 #########################################################################################
 # ParagonSR2 Photo Fidelity Config
 # Optimized for highest PSNR/SSIM metrics with pure reconstruction (no sharpening)
