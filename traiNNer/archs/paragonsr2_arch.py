@@ -502,16 +502,24 @@ class ParagonSR2(nn.Module):
         self.conv_out = nn.Conv2d(num_feat, in_chans, 3, padding=1)
         self.detail_gain = nn.Parameter(torch.tensor(detail_gain))
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(
+        self, x: torch.Tensor, feature_tap: bool = False
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         base = self.base(x)
 
         x = self.conv_in(x)
+        feat = x if feature_tap else None
+
         x = self.body(x)
         x = self.conv_mid(x)
         x = self.up(x)
 
         detail = self.conv_out(x) * self.detail_gain
-        return base + detail
+        out = base + detail
+
+        if feature_tap:
+            return out, feat
+        return out
 
 
 # ============================================================================
@@ -543,7 +551,6 @@ def paragonsr2_stream(scale=4, **kw):
         variant="stream",
         detail_gain=kw.pop("detail_gain", 0.1),
         upsampler_alpha=kw.pop("upsampler_alpha", 0.0),
-        use_content_aware=kw.pop("use_content_aware", True),
         **kw,
     )
 
