@@ -417,6 +417,14 @@ class ParagonConverter:
             # Prepare Input
             inp = preprocess_image(img_path)
 
+            # Center crop to avoid OOM on high-res images (e.g. Urban100)
+            # We only need to verify math correctness between PT and ONNX
+            _, _, h, w = inp.shape
+            if h > 512 or w > 512:
+                ch, cw = min(h, 512), min(w, 512)
+                h_start, w_start = (h - ch) // 2, (w - cw) // 2
+                inp = inp[:, :, h_start : h_start + ch, w_start : w_start + cw]
+
             # PyTorch Inference
             with torch.no_grad():
                 pt_in = torch.from_numpy(inp).to(self.device)
@@ -456,7 +464,7 @@ if __name__ == "__main__":
         help="Enable feature_tap output for video temporal stability (output: model_video.onnx)",
     )
     parser.add_argument(
-        "--opset", type=int, default=17, help="ONNX opset version (default: 17)"
+        "--opset", type=int, default=18, help="ONNX opset version (default: 18)"
     )
     parser.add_argument(
         "--val_count", type=int, default=50, help="Number of images to test"
