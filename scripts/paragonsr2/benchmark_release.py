@@ -61,7 +61,7 @@ except ImportError:
 
 # Try importing FlexAttention (PyTorch 2.5+)
 try:
-    from torch.nn.attention import flex_attention as _flex_attention
+    from torch.nn.attention.flex_attention import flex_attention as _flex_attention
 
     HAS_FLEX = True
 except (ImportError, AttributeError):
@@ -234,8 +234,11 @@ class PyTorchRunner:
 
     def compile_model(self) -> None:
         """Compile model with torch.compile for faster inference."""
-        print("      Compiling model (mode='reduce-overhead', dynamic=True)...")
-        self.model = torch.compile(self.model, mode="reduce-overhead", dynamic=True)
+        # Use 'default' mode which is the most robust for dynamic shapes.
+        # 'reduce-overhead' and 'max-autotune' enable CUDA graphs which
+        # crash on varying stride/shape patterns in differing images.
+        print("      Compiling model (mode='default', dynamic=True)...")
+        self.model = torch.compile(self.model, mode="default", dynamic=True)
         self.is_compiled = True
 
 
@@ -327,13 +330,14 @@ def benchmark_pytorch(
 
     torch.cuda.reset_peak_memory_stats()
 
-    # Warmup
-    dummy = torch.zeros(1, 3, 64, 64, device=device).to(
-        memory_format=torch.channels_last
-    )
-    for _ in range(3):
-        runner.infer(dummy, use_amp=use_amp)
-    torch.cuda.synchronize()
+    # Warmup with a standard size (skip for compiled to prevent static shape baking)
+    if not runner.is_compiled:
+        warmup_size = 64
+        dummy = torch.zeros(1, 3, warmup_size, warmup_size, device=device)
+        dummy = dummy.to(memory_format=torch.channels_last)
+        for _ in range(3):
+            runner.infer(dummy, use_amp=use_amp)
+        torch.cuda.synchronize()
 
     for img_path in tqdm(images, desc=mode):
         img = cv2.imread(str(img_path))
@@ -346,9 +350,18 @@ def benchmark_pytorch(
         img_t = torch.from_numpy(img).to(device).float().permute(2, 0, 1).unsqueeze(0)
         img_t = img_t.div_(255.0)
 
-        # Compiled models can be unstable with dynamic + channels_last
+        # For compiled models, ensure contiguous memory for safer dynamic handling
+        # For non-compiled, channels_last is usually faster
         if runner.is_compiled:
             img_t = img_t.contiguous()
+            # Mark dynamic dimensions to prevent specialization crashes
+            if hasattr(torch, "_dynamo"):
+                torch._dynamo.mark_dynamic(img_t, 2)
+                torch._dynamo.mark_dynamic(img_t, 3)
+
+            # Dynamic shape warmup (crucial for Inductor stability on varying shapes)
+            if len(latencies) == 0:
+                _ = runner.infer(img_t, use_amp=use_amp)
         else:
             img_t = img_t.to(memory_format=torch.channels_last)
 
@@ -556,7 +569,7 @@ def main() -> None:
     # PyTorch Benchmarks
     if args.pt_model and args.arch:
         # Helper to run a config
-        def run_config(attn_mode=None, exp_safe=None, label_suffix=""):
+        def run_config(attn_mode=None, exp_safe=None, label_suffix="", compile=False):
             runner = PyTorchRunner(
                 args.pt_model,
                 args.arch,
@@ -570,6 +583,10 @@ def main() -> None:
                 export_safe=exp_safe if exp_safe is not None else args.export_safe,
                 window_size=args.window_size,
             )
+            if compile:
+                runner.compile_model()
+                label_suffix += " (Compiled)"
+
             res = benchmark_pytorch(
                 runner, images, args.scale, use_amp=True, mode_suffix=label_suffix
             )
@@ -583,20 +600,61 @@ def main() -> None:
             # 1. No Attention (Export Safe)
             print("1. Testing: No Attention (Export Safe aka CNN-only)")
             results.append(
-                run_config(attn_mode="sdpa", exp_safe=True, label_suffix=" (No Attn)")
+                run_config(
+                    attn_mode="sdpa",
+                    exp_safe=True,
+                    label_suffix=" (No Attn)",
+                    compile=False,
+                )
+            )
+            results.append(
+                run_config(
+                    attn_mode="sdpa",
+                    exp_safe=True,
+                    label_suffix=" (No Attn)",
+                    compile=True,
+                )
             )
 
             # 2. SDPA
             print("2. Testing: SDPA (Standard)")
             results.append(
-                run_config(attn_mode="sdpa", exp_safe=False, label_suffix=" (SDPA)")
+                run_config(
+                    attn_mode="sdpa",
+                    exp_safe=False,
+                    label_suffix=" (SDPA)",
+                    compile=False,
+                )
+            )
+            results.append(
+                run_config(
+                    attn_mode="sdpa",
+                    exp_safe=False,
+                    label_suffix=" (SDPA)",
+                    compile=True,
+                )
             )
 
             # 3. FlexAttention
             if HAS_FLEX:
                 print("3. Testing: FlexAttention")
+                # Eager (slow, for reference)
                 results.append(
-                    run_config(attn_mode="flex", exp_safe=False, label_suffix=" (Flex)")
+                    run_config(
+                        attn_mode="flex",
+                        exp_safe=False,
+                        label_suffix=" (Flex)",
+                        compile=False,
+                    )
+                )
+                # Compiled (fast)
+                results.append(
+                    run_config(
+                        attn_mode="flex",
+                        exp_safe=False,
+                        label_suffix=" (Flex)",
+                        compile=True,
+                    )
                 )
             else:
                 print("3. FlexAttention skipped (not available in this PyTorch build).")
