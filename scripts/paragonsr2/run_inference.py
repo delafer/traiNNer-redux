@@ -329,6 +329,17 @@ class InferenceOrchestrator:
                 out_t = out_t[0]
 
         out_img = out_t.squeeze(0).permute(1, 2, 0).cpu().numpy()
+
+        # NaN/Inf Detection
+        if np.isnan(out_img).any() or np.isinf(out_img).any():
+            print(
+                "    [Warning] Numerical instability (NaN/Inf) detected in model output!"
+            )
+            print("              This often happens in FP16 mode with certain inputs.")
+            print(
+                "              Try running with --fp32 or --disable_compile to resolve."
+            )
+
         out_img = np.clip(out_img, 0, 1) * 255.0
         return out_img.round().astype(np.uint8)
 
@@ -412,6 +423,13 @@ class InferenceOrchestrator:
 
             # Postprocess
             out_img = out_t.squeeze(0).permute(1, 2, 0).cpu().numpy()
+
+            # NaN detection for video frames
+            if np.isnan(out_img).any() or np.isinf(out_img).any():
+                print(
+                    f"\n    [Warning] Numerical instability detected at frame {pbar.n + 1}!"
+                )
+
             out_img = np.clip(out_img, 0, 1) * 255.0
             out_bgr = cv2.cvtColor(out_img.round().astype(np.uint8), cv2.COLOR_RGB2BGR)
             writer.write(out_bgr)
@@ -450,10 +468,9 @@ def main() -> None:
         "--output", default="output", help="Output folder (default: output)"
     )
     parser.add_argument(
-        "--fp16",
+        "--fp32",
         action="store_true",
-        default=True,
-        help="Use FP16 inference (default: True)",
+        help="Use FP32 inference (disables FP16). More stable but slower.",
     )
     parser.add_argument(
         "--upsampler_alpha",
@@ -477,6 +494,9 @@ def main() -> None:
     input_path = Path(args.input)
     output_dir = Path(args.output)
     output_dir.mkdir(parents=True, exist_ok=True)
+
+    # Re-map fp16 based on fp32 flag
+    args.fp16 = not args.fp32
 
     orchestrator = InferenceOrchestrator(args)
 

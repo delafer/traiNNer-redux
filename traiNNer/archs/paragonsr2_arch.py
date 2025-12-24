@@ -132,7 +132,11 @@ class RMSNorm(nn.Module):
         self.eps = eps
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        rms = torch.sqrt(x.pow(2).mean(dim=1, keepdim=True) + self.eps)
+        # Calculate variance in FP32 for stability, then cast back
+        # Separation helps torch.compile trace the graph correctly
+        x_f32 = x.float()
+        variance = x_f32.pow(2).mean(dim=1, keepdim=True)
+        rms = torch.sqrt(variance + self.eps).to(x.dtype)
         return self.scale * x / rms + self.bias
 
 
@@ -325,7 +329,8 @@ class StreamBlock(nn.Module):
         x = self.proj(x)
         x = self.gate(x)
         a, b = x.chunk(2, dim=1)
-        x = a * b
+        # Multiplication in FP32 to prevent overflow in half-precision
+        x = (a.float() * b.float()).to(a.dtype)
 
         x = self.out(x)
         return x + res
