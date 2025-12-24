@@ -27,6 +27,9 @@ Usage:
         --arch paragonsr2_photo \\
         --output /output/folder
 
+        python scripts/paragonsr2/run_inference.py     --input /home/phips/Documents/dataset/Urban100/x2     --model ./paragonsr2/2xParagonSR2_Photo_fidelity.safetensors     --arch paragonsr2_photo     --output /home/phips/Documents/dataset/Urban100/upscaled     --fp16     --upsampler_alpha 0.0 --scale 2
+
+
 Author: Philip Hofmann
 License: MIT
 """
@@ -129,12 +132,17 @@ class PyTorchRunner:
         arch: str,
         scale: int,
         device: str = "cuda",
-        compile: bool = False,
+        compile: bool = True,
         fp16: bool = True,
+        upsampler_alpha: float | None = None,
+        export_safe: bool = False,
     ) -> None:
         self.device = device
+        self.warmup_done = False
         self.fp16 = fp16
+
         self.compiled = False
+        self.warmup_done = False
 
         print(f"      [Backend] Loading PyTorch Model: {Path(model_path).name}")
 
@@ -146,8 +154,12 @@ class PyTorchRunner:
         if arch not in arch_map:
             raise ValueError(f"Unknown architecture: {arch}")
 
-        # Use export_safe=True for maximum compatibility
-        self.model = arch_map[arch](scale=scale, export_safe=True)
+        # Build model options
+        model_kwargs = {"scale": scale, "export_safe": export_safe}
+        if upsampler_alpha is not None:
+            model_kwargs["upsampler_alpha"] = upsampler_alpha
+
+        self.model = arch_map[arch](**model_kwargs)
 
         # Load weights
         if str(model_path).endswith(".safetensors"):
@@ -181,9 +193,13 @@ class PyTorchRunner:
             self.model.half()
 
         if compile:
-            print("      [Backend] Compiling model (reduce-overhead)...")
-            self.model = torch.compile(self.model, mode="reduce-overhead", dynamic=True)
+            print(
+                "      [Backend] Compiling model (default mode for dynamic robustnes)..."
+            )
+            # 'default' is robust for dynamic shapes; 'reduce-overhead' crashes on varying inputs
+            self.model = torch.compile(self.model, mode="default", dynamic=True)
             self.compiled = True
+            self.warmup_done = False
 
     def run(
         self,
@@ -196,6 +212,24 @@ class PyTorchRunner:
             input_tensor = input_tensor.contiguous()
             if prev_feat is not None:
                 prev_feat = prev_feat.contiguous()
+
+            # Critical: Mark dynamic dimensions to prevent compiler crashing on varying shapes
+            if hasattr(torch, "_dynamo"):
+                # Mark H (2) and W (3) as dynamic
+                torch._dynamo.mark_dynamic(input_tensor, 2)
+                torch._dynamo.mark_dynamic(input_tensor, 3)
+
+            # Just-in-time warmup for the first run if needed
+            if not self.warmup_done:
+                self.warmup_done = True
+                # Simple warmup call
+                with (
+                    torch.no_grad(),
+                    torch.autocast(device_type=self.device, dtype=torch.float16),
+                ):
+                    _ = self.model(
+                        input_tensor, feature_tap=feature_tap, prev_feat=prev_feat
+                    )
 
         with torch.no_grad():
             with torch.autocast(
@@ -263,6 +297,8 @@ class InferenceOrchestrator:
                     device=self.device,
                     compile=use_compile,
                     fp16=self.args.fp16,
+                    upsampler_alpha=self.args.upsampler_alpha,
+                    export_safe=self.args.export_safe,
                 )
                 self.mode = "pt_compiled" if use_compile else "pt"
                 print(
@@ -418,6 +454,17 @@ def main() -> None:
         action="store_true",
         default=True,
         help="Use FP16 inference (default: True)",
+    )
+    parser.add_argument(
+        "--upsampler_alpha",
+        type=float,
+        default=None,
+        help="Sharpening strength (0.0-1.0). Default: Arch specific (Photo=0.4, Stream=0.0)",
+    )
+    parser.add_argument(
+        "--export_safe",
+        action="store_true",
+        help="Disable attention for compatibility (may reduce quality)",
     )
     parser.add_argument(
         "--disable_compile",
