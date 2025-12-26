@@ -27,7 +27,7 @@ datasets:
 
     # METRIC-OPTIMIZED PARAMETERS for RTX 3060 12GB (Auto-VRAM managed)
     lq_size: 256 # Large patch size (256 crop -> 512 HR) provides vital global context for the attention-free GateBlock
-    batch_size_per_gpu: 24 # Initial batch size (managed by optimizer). 24 is a solid baseline for stable gradients
+    batch_size_per_gpu: 64
     num_worker_per_gpu: 8 # 8 workers balance CPU preprocessing speed with overhead
     accum_iter: 1 # Realtime updates preferred over accumulation for this batch size
     prefetch_mode: cpu # CPU prefetching reduces GPU VRAM pressure
