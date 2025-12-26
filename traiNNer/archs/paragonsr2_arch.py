@@ -19,8 +19,6 @@ License: MIT
 
 from __future__ import annotations
 
-import math
-
 import numpy as np
 import torch
 from torch import nn
@@ -31,7 +29,7 @@ from torch.utils import checkpoint
 from traiNNer.utils.registry import ARCH_REGISTRY
 
 
-def to_2tuple(x):
+def to_2tuple(x: int | tuple[int, int]) -> tuple[int, int]:
     if isinstance(x, int):
         return (x, x)
     return x
@@ -132,21 +130,24 @@ class MagicKernelSharp2021Upsample(nn.Module):
 
 class RMSNorm(nn.Module):
     """
-    Root Mean Square Normalization.
-    Stabilizes hidden states by normalizing them with the RMS of inputs.
+    Spatial RMS Normalization.
+
+    More stable than BatchNorm for SR and safe in FP16.
+    Computes variance in FP32 for numerical stability.
     """
 
-    def __init__(self, dim: int, eps: float = 1e-6) -> None:
+    def __init__(self, channels: int, eps: float = 1e-6) -> None:
         super().__init__()
+        self.scale = nn.Parameter(torch.ones(channels, 1, 1))
+        self.bias = nn.Parameter(torch.zeros(channels, 1, 1))
         self.eps = eps
-        self.scale = nn.Parameter(torch.ones(dim))
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # Expects (B, C, H, W)
-        norm_x = x.norm(2, dim=1, keepdim=True)
-        d_x = self.scale.shape[0] ** 0.5
-        x_normed = x / (norm_x / d_x + self.eps)
-        return self.scale[None, :, None, None] * x_normed
+        # Calculate variance in FP32 for stability, then cast back
+        x_f32 = x.float()
+        variance = x_f32.pow(2).mean(dim=1, keepdim=True)
+        rms = torch.sqrt(variance + self.eps).to(x.dtype)
+        return self.scale * x / rms + self.bias
 
 
 class LayerScale(nn.Module):
@@ -441,7 +442,8 @@ class ResidualGroup(nn.Module):
 # ============================================================================
 
 
-def index_reverse(index):
+def index_reverse(index: torch.Tensor) -> torch.Tensor:
+    """Reverse a permutation index tensor."""
     index_r = torch.zeros_like(index)
     ind = torch.arange(0, index.shape[-1]).to(index.device)
     for i in range(index.shape[0]):
@@ -449,7 +451,8 @@ def index_reverse(index):
     return index_r
 
 
-def feature_shuffle(x, index):
+def feature_shuffle(x: torch.Tensor, index: torch.Tensor) -> torch.Tensor:
+    """Shuffle features according to index."""
     dim = index.dim()
     # Handle dimension mismatch if necessary, though typical usage matches
     # spandrel logic.
@@ -459,7 +462,7 @@ def feature_shuffle(x, index):
     return torch.gather(x, dim=dim - 1, index=index)
 
 
-def window_partition(x, window_size):
+def window_partition(x: torch.Tensor, window_size: int) -> torch.Tensor:
     """
     Args:
         x: (b, h, w, c)
@@ -476,7 +479,9 @@ def window_partition(x, window_size):
     return windows
 
 
-def window_reverse(windows, window_size, h, w):
+def window_reverse(
+    windows: torch.Tensor, window_size: int, h: int, w: int
+) -> torch.Tensor:
     """
     Args:
         windows: (num_windows*b, window_size, window_size, c)
@@ -508,12 +513,12 @@ class ATDWindowAttention(nn.Module):
 
     def __init__(
         self,
-        dim,
-        window_size,
-        num_heads,
-        qkv_bias=True,
-        attention_mode="sdpa",
-        export_safe=False,
+        dim: int,
+        window_size: tuple[int, int],
+        num_heads: int,
+        qkv_bias: bool = True,
+        attention_mode: str = "sdpa",
+        export_safe: bool = False,
     ) -> None:
         super().__init__()
         self.dim = dim
@@ -532,7 +537,9 @@ class ATDWindowAttention(nn.Module):
         trunc_normal_(self.relative_position_bias_table, std=0.02)
         self.softmax = nn.Softmax(dim=-1)
 
-    def forward(self, qkv, rpi, mask=None):
+    def forward(
+        self, qkv: torch.Tensor, rpi: torch.Tensor, mask: torch.Tensor | None = None
+    ) -> torch.Tensor:
         b_, n, c3 = qkv.shape
         c = c3 // 3
         qkv = qkv.reshape(b_, n, 3, self.num_heads, c // self.num_heads).permute(
@@ -589,9 +596,20 @@ class ATDWindowAttention(nn.Module):
         return x
 
 
-class ATD_CA(nn.Module):
+class AdaptiveTokenCA(nn.Module):
+    """
+    Adaptive Token Dictionary Cross-Attention.
+
+    Attends to a learned token dictionary for global context.
+    """
+
     def __init__(
-        self, dim, input_resolution, num_tokens=64, reducted_dim=10, qkv_bias=True
+        self,
+        dim: int,
+        input_resolution: tuple[int, int],
+        num_tokens: int = 64,
+        reducted_dim: int = 10,
+        qkv_bias: bool = True,
     ) -> None:
         super().__init__()
         self.wq = nn.Linear(dim, reducted_dim, bias=qkv_bias)
@@ -602,7 +620,9 @@ class ATD_CA(nn.Module):
         self.softmax = nn.Softmax(dim=-1)
         self.num_tokens = num_tokens
 
-    def forward(self, x, td, x_size):
+    def forward(
+        self, x: torch.Tensor, td: torch.Tensor, x_size: tuple[int, int]
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         b, n, c = x.shape
         # Q: b, n, c
         q = self.wq(x)
@@ -622,15 +642,21 @@ class ATD_CA(nn.Module):
         return x, attn
 
 
-class AC_MSA(nn.Module):
+class AdaptiveCategoryMSA(nn.Module):
+    """
+    Adaptive Category-based Multi-head Self-Attention.
+
+    Groups tokens by category (via similarity to dictionary) for efficient global attention.
+    """
+
     def __init__(
         self,
-        dim,
-        input_resolution,
-        num_tokens=64,
-        num_heads=4,
-        category_size=128,
-        qkv_bias=True,
+        dim: int,
+        input_resolution: tuple[int, int],
+        num_tokens: int = 64,
+        num_heads: int = 4,
+        category_size: int = 128,
+        qkv_bias: bool = True,
     ) -> None:
         super().__init__()
         self.num_heads = num_heads
@@ -641,7 +667,9 @@ class AC_MSA(nn.Module):
         )
         self.softmax = nn.Softmax(dim=-1)
 
-    def forward(self, qkv, sim, x_size):
+    def forward(
+        self, qkv: torch.Tensor, sim: torch.Tensor, x_size: tuple[int, int]
+    ) -> torch.Tensor:
         b, n, c3 = qkv.shape
         c = c3 // 3
         gs = min(n, self.category_size)
@@ -683,9 +711,17 @@ class AC_MSA(nn.Module):
         return x
 
 
-class ATD_ConvFFN(nn.Module):
+class AdaptiveConvFFN(nn.Module):
+    """
+    Convolutional Feed-Forward Network with depthwise convolution mixing.
+    """
+
     def __init__(
-        self, in_features, hidden_features=None, out_features=None, kernel_size=5
+        self,
+        in_features: int,
+        hidden_features: int | None = None,
+        out_features: int | None = None,
+        kernel_size: int = 5,
     ) -> None:
         super().__init__()
         out_features = out_features or in_features
@@ -758,14 +794,14 @@ class ATDTransformerLayer(nn.Module):
             attention_mode=attention_mode,
             export_safe=export_safe,
         )
-        self.attn_atd = ATD_CA(
+        self.attn_atd = AdaptiveTokenCA(
             dim,
             input_resolution=input_resolution,
             qkv_bias=qkv_bias,
             num_tokens=num_tokens,
             reducted_dim=reducted_dim,
         )
-        self.attn_aca = AC_MSA(
+        self.attn_aca = AdaptiveCategoryMSA(
             dim,
             input_resolution=input_resolution,
             num_tokens=num_tokens,
@@ -775,7 +811,7 @@ class ATDTransformerLayer(nn.Module):
         )
 
         mlp_hidden_dim = int(dim * mlp_ratio)
-        self.convffn = ATD_ConvFFN(
+        self.convffn = AdaptiveConvFFN(
             in_features=dim,
             hidden_features=mlp_hidden_dim,
             kernel_size=convffn_kernel_size,
