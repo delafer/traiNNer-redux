@@ -1,0 +1,132 @@
+#########################################################################################
+# ParagonSR2 Pro Fidelity Config
+# SOTA quality using ATD (Adaptive Token Dictionary) Transformers
+# Optimized for highest PSNR/SSIM metrics with pure reconstruction (no sharpening)
+#########################################################################################
+name: 2xParagonSR2_Pro_fidelity
+scale: 2
+
+# VRAM MANAGEMENT SYSTEM
+auto_vram_management:
+  enabled: true
+  target_vram_usage: 0.85
+  safety_margin: 0.05
+
+use_amp: true # BF16 is essential for Pro (heavy attention)
+amp_bf16: true # BF16 prevents NaN in long-range attention
+use_channels_last: true # Tensor Core optimization
+num_gpu: auto
+use_compile: false # Can enable later once training is stable
+
+datasets:
+  train:
+    name: CC0_147k_Train
+    type: pairedimagedataset
+    dataroot_gt: /home/phips/Documents/dataset/cc0/filtered_versions/cc0_c5_hr
+    dataroot_lq: /home/phips/Documents/dataset/cc0/filtered_versions/cc0_c5_lr_x2
+
+    # PRO VARIANT: Smaller batch size due to ATD attention overhead
+    lq_size: 128 # Smaller patches (128 -> 256 HR) to fit ATD in 12GB. Still covers window_size (8)
+    batch_size_per_gpu: 8 # Conservative start for ATD. VRAM automation will adjust upward if possible.
+    num_worker_per_gpu: 8
+    accum_iter: 2 # Gradient accumulation compensates for smaller batch size (effective batch = 16)
+    prefetch_mode: cpu
+    pin_memory: false
+
+    use_hflip: true
+    use_rot: true
+
+  val:
+    name: CC0_147k_Val
+    type: pairedimagedataset
+    dataroot_gt: /home/phips/Documents/dataset/cc0/val_hr
+    dataroot_lq: /home/phips/Documents/dataset/cc0/val_lr_x2_bicubic_aa
+
+network_g:
+  type: paragonsr2_pro # ATD Transformer variant
+  # FIDELITY OPTIMIZATION: Pure reconstruction for highest PSNR/SSIM
+  upsampler_alpha: 0.0 # No sharpening for metric purity
+  attention_mode: sdpa # Use SDPA for fast training (FlashAttention/MemEff)
+  use_checkpointing: true # REQUIRED for Pro on 12GB VRAM
+
+path:
+  pretrain_network_g: ~
+  strict_load_g: true
+
+train:
+  ema_decay: 0.999
+  ema_power: 0.75
+  grad_clip: true # Critical for deep Transformer networks
+
+  optim_g:
+    type: AdamW
+    lr: !!float 1e-4 # Lower LR (1e-4) for Transformer stability
+    weight_decay: !!float 1e-4
+    betas: [0.9, 0.99]
+
+  scheduler:
+    type: MultiStepLR
+    milestones: [80000, 100000, 110000] # Later milestones for longer training
+    gamma: 0.5
+
+  total_iter: 500000 # Pro needs more iterations (deeper, more capacity)
+  warmup_iter: 2000 # Longer warmup for Transformer
+
+  # DYNAMIC LOSS SCHEDULING WITH AUTO-CALIBRATION
+  dynamic_loss_scheduling:
+    enabled: true
+
+  # TRAINING AUTOMATIONS
+  training_automations:
+    enabled: true
+    intelligent_learning_rate_scheduler:
+      enabled: true
+
+    DynamicBatchAndPatchSizeOptimizer:
+      enabled: true
+      target_vram_usage: 0.85
+      safety_margin: 0.05
+      adjustment_frequency: 100
+      min_batch_size: 2
+      max_batch_size: 32 # Lower max for Pro (heavier model)
+      min_lq_size: 64
+      max_lq_size: 128 # Smaller max patch for Pro
+      vram_history_size: 50
+
+    IntelligentEarlyStopping:
+      enabled: true
+      patience: 20000 # Longer patience for Pro (slower convergence)
+      min_improvement: 0.01
+      monitor_metric: "val/psnr"
+      convergence_threshold: 0.0001
+      convergence_log_frequency: 500
+
+    adaptive_gradient_clipping:
+      enabled: true
+
+  # OPTIMAL FIDELITY LOSS COMBINATION
+  losses:
+    - type: l1loss
+      loss_weight: 1.0
+    - type: mssimloss
+      loss_weight: 0.08
+
+val:
+  val_enabled: true
+  val_freq: 2000 # Less frequent validation (Pro is slower)
+  save_img: true
+
+  metrics_enabled: true
+  metrics:
+    psnr:
+      type: calculate_psnr
+      crop_border: 4
+    ssim:
+      type: calculate_ssim
+      crop_border: 4
+
+logger:
+  print_freq: 100
+  save_checkpoint_freq: 10000
+  save_checkpoint_format: safetensors
+  use_tb_logger: true
