@@ -150,6 +150,7 @@ class PyTorchRunner:
             "paragonsr2_realtime": paragonsr2_arch.paragonsr2_realtime,
             "paragonsr2_stream": paragonsr2_arch.paragonsr2_stream,
             "paragonsr2_photo": paragonsr2_arch.paragonsr2_photo,
+            "paragonsr2_pro": paragonsr2_arch.paragonsr2_pro,
         }
         if arch not in arch_map:
             raise ValueError(f"Unknown architecture: {arch}")
@@ -180,6 +181,8 @@ class PyTorchRunner:
             k = k.replace("base_upsampler.resample_conv.", "base.blur.")
             k = k.replace("base_upsampler.sharpen.", "base.sharp.")
             k = k.replace("global_detail_gain", "detail_gain")
+            k = k.replace("conv_fuse.", "conv_mid.")
+            k = k.replace("detail_upsampler.up_conv.", "up.0.")
             if ".blocks." in k and ".net." in k:
                 k = k.replace(".net.0.", ".conv1.")
                 k = k.replace(".net.2.", ".dw.")
@@ -206,9 +209,10 @@ class PyTorchRunner:
         input_tensor: torch.Tensor,
         feature_tap: bool = False,
         prev_feat: torch.Tensor | None = None,
+        force_fp32: bool = False,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         """Run PyTorch inference with optional feature tap."""
-        if self.compiled:
+        if self.compiled and not force_fp32:
             input_tensor = input_tensor.contiguous()
             if prev_feat is not None:
                 prev_feat = prev_feat.contiguous()
@@ -231,14 +235,66 @@ class PyTorchRunner:
                         input_tensor, feature_tap=feature_tap, prev_feat=prev_feat
                     )
 
+        # Determine precision
+        use_fp16 = self.fp16 and not force_fp32
+
+        # If forcing FP32 on a compiled model, we might need to use the original model
+        # if the compiled one is hard-coded for something else, but torch.compile usually handles it.
+        # However, for maximum safety during fallback, it might be safer to use the original model object
+        # if we could access it. But self.model is overwritten.
+        # We rely on autocast(enabled=False) to force FP32.
+
         with torch.no_grad():
-            with torch.autocast(
-                device_type=self.device,
-                dtype=torch.float16 if self.fp16 else torch.float32,
-            ):
-                out = self.model(
-                    input_tensor, feature_tap=feature_tap, prev_feat=prev_feat
-                )
+            if use_fp16:
+                with torch.autocast(device_type=self.device, dtype=torch.float16):
+                    out = self.model(
+                        input_tensor, feature_tap=feature_tap, prev_feat=prev_feat
+                    )
+            else:
+                # Force FP32 context
+                # If the model is half(), we need to cast input to half? No, if we want FP32, we want float().
+                # But if self.model.half() was called, weights are half.
+                # executing half weights in float32 autocast?
+                # If model is half, we must run in half or cast model back.
+                # Re-casting model is expensive.
+                # If self.fp16 was set, self.model.half() was called.
+                # If we want to fix NaNs, usually we need FP32 weights + FP32 ops.
+                # But maybe running FP16 weights in FP32 accumulation helps? (autocast disabled).
+                # Wait, if weights are FP16, running without autocast expects inputs to be FP16.
+                # And ops will be FP16.
+
+                # If model is converted to half (line 193), we cannot easily run in FP32
+                # without converting back to float.
+                pass
+
+        # To properly support force_fp32 fallback when model is .half():
+        # We must cast the model to float temporarily or keep a float copy.
+        # Keeping a copy is memory expensive.
+        # Casting back and forth is acceptable for a "Retry" scenario (slow but works).
+
+        if force_fp32 and self.fp16:
+            # Cast model to float, run, cast back
+            # Note: maximizing stability over speed here
+            self.model.float()
+            # Input must be float (it is created as float in process_*, only autocast handles the rest)
+            # but we need to make sure input_tensor is float.
+            input_tensor = input_tensor.float()
+            if prev_feat is not None:
+                prev_feat = prev_feat.float()
+
+            out = self.model(input_tensor, feature_tap=feature_tap, prev_feat=prev_feat)
+
+            # Restore half
+            self.model.half()
+        else:
+            with torch.no_grad():
+                with torch.autocast(
+                    device_type=self.device,
+                    dtype=torch.float16 if use_fp16 else torch.float32,
+                ):
+                    out = self.model(
+                        input_tensor, feature_tap=feature_tap, prev_feat=prev_feat
+                    )
 
         if feature_tap:
             return out[0], out[1]
@@ -319,26 +375,44 @@ class InferenceOrchestrator:
         if self.mode == "pt_compiled":
             img_t = img_t.contiguous()
 
-        if self.mode == "trt":
-            out_t = self.runner.run(img_t)
-            if isinstance(out_t, tuple):
-                out_t = out_t[0]
-        else:
-            out_t = self.runner.run(img_t, feature_tap=False)
-            if isinstance(out_t, tuple):
-                out_t = out_t[0]
+        # RUN INFERENCE
+        def _run(force_fp32=False):
+            if self.mode == "trt":
+                # TRT cannot force FP32 easily
+                out = self.runner.run(img_t)
+            else:
+                out = self.runner.run(img_t, feature_tap=False, force_fp32=force_fp32)
 
+            if isinstance(out, tuple):
+                out = out[0]
+            return out
+
+        out_t = _run(force_fp32=False)
         out_img = out_t.squeeze(0).permute(1, 2, 0).cpu().numpy()
 
-        # NaN/Inf Detection
+        # NaN/Inf Detection & Retry
         if np.isnan(out_img).any() or np.isinf(out_img).any():
-            print(
-                "    [Warning] Numerical instability (NaN/Inf) detected in model output!"
-            )
-            print("              This often happens in FP16 mode with certain inputs.")
-            print(
-                "              Try running with --fp32 or --disable_compile to resolve."
-            )
+            if self.mode != "trt":
+                print(
+                    "    [Warning] Numerical instability detected. Retrying with FP32..."
+                )
+                try:
+                    out_t = _run(force_fp32=True)
+                    out_img = out_t.squeeze(0).permute(1, 2, 0).cpu().numpy()
+
+                    # Check again
+                    if np.isnan(out_img).any() or np.isinf(out_img).any():
+                        print(
+                            "    [Error] FP32 retry failed. Output still contains NaNs."
+                        )
+                    else:
+                        print("    [Success] FP32 retry successful.")
+                except Exception as e:
+                    print(f"    [Error] FP32 retry failed with exception: {e}")
+            else:
+                print(
+                    "    [Warning] Numerical instability detected in TRT! Cannot retry in FP32."
+                )
 
         out_img = np.clip(out_img, 0, 1) * 255.0
         return out_img.round().astype(np.uint8)
@@ -402,33 +476,42 @@ class InferenceOrchestrator:
             if self.mode == "pt_compiled":
                 img_t = img_t.contiguous()
 
-            # Inference with feature tap
-            if self.mode == "trt":
-                # TRT runner doesn't support prev_feat injection currently
-                res = self.runner.run(img_t)
-                if isinstance(res, tuple):
-                    out_t, new_feat = res
+            # Inner run function to handle potential retry
+            def _run_video(p_feat, force_fp32=False):
+                if self.mode == "trt":
+                    res = self.runner.run(img_t)
+                    if isinstance(res, tuple):
+                        return res[0], res[1]
+                    return res, None
                 else:
-                    out_t, new_feat = res, None
-            else:
-                # PyTorch runner supports full feature tap with prev_feat injection
-                res = self.runner.run(img_t, feature_tap=True, prev_feat=prev_feat)
-                if isinstance(res, tuple):
-                    out_t, new_feat = res
+                    res = self.runner.run(
+                        img_t, feature_tap=True, prev_feat=p_feat, force_fp32=force_fp32
+                    )
+                    if isinstance(res, tuple):
+                        return res[0], res[1]
+                    return res, None
+
+            # First attempt
+            out_t, new_feat = _run_video(prev_feat, force_fp32=False)
+
+            # Check for NaNs
+            # Optimization: Check GPU tensor directly or CPU numpy?
+            # Checking GPU tensor for nan is fast.
+            if torch.isnan(out_t).any() or torch.isinf(out_t).any():
+                if self.mode != "trt":
+                    # Retry in FP32
+                    # Note: We must be careful if prev_feat was FP16. _run_video/run handles float() cast internally.
+                    out_t, new_feat = _run_video(prev_feat, force_fp32=True)
                 else:
-                    out_t, new_feat = res, None
+                    pass  # Can't fix TRT
 
             # Update temporal state for next frame
-            prev_feat = new_feat
+            # Detach to separate graph
+            if new_feat is not None:
+                prev_feat = new_feat.detach()
 
             # Postprocess
             out_img = out_t.squeeze(0).permute(1, 2, 0).cpu().numpy()
-
-            # NaN detection for video frames
-            if np.isnan(out_img).any() or np.isinf(out_img).any():
-                print(
-                    f"\n    [Warning] Numerical instability detected at frame {pbar.n + 1}!"
-                )
 
             out_img = np.clip(out_img, 0, 1) * 255.0
             out_bgr = cv2.cvtColor(out_img.round().astype(np.uint8), cv2.COLOR_RGB2BGR)

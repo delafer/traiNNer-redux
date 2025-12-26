@@ -19,12 +19,23 @@ License: MIT
 
 from __future__ import annotations
 
+import math
+
+import numpy as np
 import torch
-import torch.nn.functional as F
 from torch import nn
+from torch.nn import functional as F
+from torch.nn.init import trunc_normal_
 from torch.utils import checkpoint
 
 from traiNNer.utils.registry import ARCH_REGISTRY
+
+
+def to_2tuple(x):
+    if isinstance(x, int):
+        return (x, x)
+    return x
+
 
 # ============================================================================
 # 1. CLASSICAL BASE UPSAMPLER (MAGIC KERNEL SHARP 2021)
@@ -39,9 +50,10 @@ def get_magic_kernel_weights():
 
 
 def get_magic_sharp_2021_kernel_weights():
-    """
-    Sharpening kernel from Magic Kernel Sharp 2021.
-    """
+    """Returns the weights for the Magic Kernel Sharp 2021 (MKS21) 3-tap filter."""
+    # Weights: [-0.015, 0.138, -0.015] -> [0.138, 0.862, 0.138] unnormalized?
+    # Actually MKS2021 is usually approximating Lanczos3 or Catmull-Rom.
+    # Here we use a standard sharp bicubic-like approximation.
     return torch.tensor([-1 / 32, 0, 9 / 32, 16 / 32, 9 / 32, 0, -1 / 32])
 
 
@@ -120,34 +132,32 @@ class MagicKernelSharp2021Upsample(nn.Module):
 
 class RMSNorm(nn.Module):
     """
-    Spatial RMS normalization.
-
-    More stable than BatchNorm for SR and safe in FP16.
+    Root Mean Square Normalization.
+    Stabilizes hidden states by normalizing them with the RMS of inputs.
     """
 
-    def __init__(self, channels: int, eps: float = 1e-6) -> None:
+    def __init__(self, dim: int, eps: float = 1e-6) -> None:
         super().__init__()
-        self.scale = nn.Parameter(torch.ones(channels, 1, 1))
-        self.bias = nn.Parameter(torch.zeros(channels, 1, 1))
         self.eps = eps
+        self.scale = nn.Parameter(torch.ones(dim))
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # Calculate variance in FP32 for stability, then cast back
-        # Separation helps torch.compile trace the graph correctly
-        x_f32 = x.float()
-        variance = x_f32.pow(2).mean(dim=1, keepdim=True)
-        rms = torch.sqrt(variance + self.eps).to(x.dtype)
-        return self.scale * x / rms + self.bias
+        # Expects (B, C, H, W)
+        norm_x = x.norm(2, dim=1, keepdim=True)
+        d_x = self.scale.shape[0] ** 0.5
+        x_normed = x / (norm_x / d_x + self.eps)
+        return self.scale[None, :, None, None] * x_normed
 
 
 class LayerScale(nn.Module):
     """
-    Residual scaling for training stability.
+    LayerScale: Learnable per-channel scaling factor initialized to a small value.
+    Crucial for stabilizing deep networks, especially in FP16.
     """
 
-    def __init__(self, channels: int, init: float = 1e-5) -> None:
+    def __init__(self, dim: int, init_values: float = 1e-5) -> None:
         super().__init__()
-        self.gamma = nn.Parameter(torch.full((1, channels, 1, 1), init))
+        self.gamma = nn.Parameter(init_values * torch.ones(1, dim, 1, 1))
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return x * self.gamma
@@ -274,12 +284,8 @@ class WindowAttention(nn.Module):
 
 class NanoBlock(nn.Module):
     """
-    Ultra-lightweight block for the Realtime variant.
-
-    Optimized for throughput:
-    - No gating
-    - No attention
-    - Minimal receptive field
+    Ultra-lightweight block for Realtime variants.
+    Consists of a Depthwise-Conv sandwich with LayerScale for stability.
     """
 
     def __init__(self, dim: int, expansion: float = 2.0, **kwargs) -> None:
@@ -289,22 +295,20 @@ class NanoBlock(nn.Module):
         self.conv1 = nn.Conv2d(dim, hidden, 1)
         self.dw = nn.Conv2d(hidden, hidden, 3, padding=1, groups=hidden)
         self.conv2 = nn.Conv2d(hidden, dim, 1)
+        self.scale = LayerScale(dim)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         res = x
         x = F.gelu(self.dw(self.conv1(x)))
         x = self.conv2(x)
-        return x + res
+        return self.scale(x) + res
 
 
 class StreamBlock(nn.Module):
     """
-    Video-oriented block.
-
-    Designed to suppress compression artifacts using:
-    - Multi-rate depthwise context
-    - Simple gating
-    - Fully convolutional operations
+    Mid-range block for Stream variants.
+    Uses fused convolution and gated linear units.
+    Stabilized with LayerScale and value clamping for FP16 safety.
     """
 
     def __init__(self, dim: int, expansion: float = 2.0, **kwargs) -> None:
@@ -320,20 +324,26 @@ class StreamBlock(nn.Module):
         self.gate = nn.Conv2d(hidden * 2, hidden * 2, 3, padding=1, groups=hidden * 2)
         self.out = nn.Conv2d(hidden, dim, 1)
 
+        self.scale = LayerScale(dim)
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         res = x
 
+        # Multi-scale feature extraction
         x = torch.cat([self.dw1(x), self.dw3(x)], dim=1)
         x = self.fuse(x)
 
+        # Gated Feed Forward
         x = self.proj(x)
         x = self.gate(x)
         a, b = x.chunk(2, dim=1)
-        # Multiplication in FP32 to prevent overflow in half-precision
-        x = (a.float() * b.float()).to(a.dtype)
+
+        # Multiplication in FP32 to prevent overflow, then CLAMP to valid FP16 range
+        x_f32 = a.float() * b.float()
+        x = x_f32.clamp(-65504, 65504).to(a.dtype)
 
         x = self.out(x)
-        return x + res
+        return self.scale(x) + res
 
 
 class PhotoBlock(nn.Module):
@@ -424,6 +434,521 @@ class ResidualGroup(nn.Module):
                 x = checkpoint.checkpoint(b, x, use_reentrant=False)
             return x
         return self.blocks(x)
+
+
+# ============================================================================
+# 5. ATD COMPONENTS (Advanced Token Dictionary)
+# ============================================================================
+
+
+def index_reverse(index):
+    index_r = torch.zeros_like(index)
+    ind = torch.arange(0, index.shape[-1]).to(index.device)
+    for i in range(index.shape[0]):
+        index_r[i, index[i, :]] = ind
+    return index_r
+
+
+def feature_shuffle(x, index):
+    dim = index.dim()
+    # Handle dimension mismatch if necessary, though typical usage matches
+    # spandrel logic.
+    for _ in range(x.dim() - index.dim()):
+        index = index.unsqueeze(-1)
+    index = index.expand(x.shape)
+    return torch.gather(x, dim=dim - 1, index=index)
+
+
+def window_partition(x, window_size):
+    """
+    Args:
+        x: (b, h, w, c)
+        window_size (int): window size
+
+    Returns:
+        windows: (num_windows*b, window_size, window_size, c)
+    """
+    b, h, w, c = x.shape
+    x = x.view(b, h // window_size, window_size, w // window_size, window_size, c)
+    windows = (
+        x.permute(0, 1, 3, 2, 4, 5).contiguous().view(-1, window_size, window_size, c)
+    )
+    return windows
+
+
+def window_reverse(windows, window_size, h, w):
+    """
+    Args:
+        windows: (num_windows*b, window_size, window_size, c)
+        window_size (int): Window size
+        h (int): Height of image
+        w (int): Width of image
+
+    Returns:
+        x: (b, h, w, c)
+    """
+    b = int(windows.shape[0] / (h * w / window_size / window_size))
+    x = windows.view(
+        b, h // window_size, w // window_size, window_size, window_size, -1
+    )
+    x = x.permute(0, 1, 3, 2, 4, 5).contiguous().view(b, h, w, -1)
+    return x
+
+
+class ATDWindowAttention(nn.Module):
+    """
+    Standard Window Attention module adapted for ATD Block.
+
+    Supports:
+    - Shifted Window Attention
+    - Relative Position Bias
+    - SDPA (Scaled Dot Product Attention) for efficiency
+    - Export Safe mode (Manual MatMul)
+    """
+
+    def __init__(
+        self,
+        dim,
+        window_size,
+        num_heads,
+        qkv_bias=True,
+        attention_mode="sdpa",
+        export_safe=False,
+    ) -> None:
+        super().__init__()
+        self.dim = dim
+        self.window_size = window_size  # Wh, Ww
+        self.num_heads = num_heads
+        head_dim = dim // num_heads
+        self.scale = head_dim**-0.5
+        self.attention_mode = attention_mode
+        self.export_safe = export_safe
+
+        self.relative_position_bias_table = nn.Parameter(
+            torch.zeros((2 * window_size[0] - 1) * (2 * window_size[1] - 1), num_heads)
+        )
+
+        self.proj = nn.Linear(dim, dim)
+        trunc_normal_(self.relative_position_bias_table, std=0.02)
+        self.softmax = nn.Softmax(dim=-1)
+
+    def forward(self, qkv, rpi, mask=None):
+        b_, n, c3 = qkv.shape
+        c = c3 // 3
+        qkv = qkv.reshape(b_, n, 3, self.num_heads, c // self.num_heads).permute(
+            2, 0, 3, 1, 4
+        )
+        q, k, v = qkv[0], qkv[1], qkv[2]
+
+        # Calculate Relative Position Bias
+        relative_position_bias = self.relative_position_bias_table[rpi.view(-1)].view(
+            self.window_size[0] * self.window_size[1],
+            self.window_size[0] * self.window_size[1],
+            -1,
+        )
+        relative_position_bias = relative_position_bias.permute(2, 0, 1).contiguous()
+
+        # Prepare bias mask (RPI + Optional Mask)
+        # relative_position_bias: (H, N, N)
+        attn_bias = relative_position_bias.unsqueeze(0)  # (1, H, N, N)
+
+        if mask is not None:
+            nw = mask.shape[0]
+            # mask: (nw, N, N) -> (nw, 1, N, N)
+            # attn_bias broadcasts to (nw, H, N, N)
+            attn_bias = attn_bias + mask.unsqueeze(1)
+
+            # For SDPA, we need to match the batch dimension of q (b_ = B * nw)
+            # q: (B*nw, H, N, D)
+            # attn_bias: (nw, H, N, N)
+            # We need to repeat attn_bias B times to match B*nw
+            if self.attention_mode == "sdpa" and not self.export_safe:
+                B = b_ // nw
+                if B > 1:
+                    attn_bias = attn_bias.repeat(B, 1, 1, 1)
+
+        # SDPA Path
+        if self.attention_mode == "sdpa" and not self.export_safe:
+            # F.scaled_dot_product_attention handles scale internally, but we need to add bias.
+            # It enables FlashAttention / MemEffAttention automatically.
+            x = F.scaled_dot_product_attention(
+                q, k, v, attn_mask=attn_bias, scale=self.scale
+            )
+        else:
+            # Manual / Export Safe Path
+            q = q * self.scale
+            attn = q @ k.transpose(-2, -1)
+            # attn: (B*nw, H, N, N)
+            # attn_bias: (nw, H, N, N) or (1, H, N, N) - broadcasts correctly
+            attn = attn + attn_bias
+            attn = self.softmax(attn)
+            x = attn @ v
+
+        x = x.transpose(1, 2).reshape(b_, n, c)
+        x = self.proj(x)
+        return x
+
+
+class ATD_CA(nn.Module):
+    def __init__(
+        self, dim, input_resolution, num_tokens=64, reducted_dim=10, qkv_bias=True
+    ) -> None:
+        super().__init__()
+        self.wq = nn.Linear(dim, reducted_dim, bias=qkv_bias)
+        self.wk = nn.Linear(dim, reducted_dim, bias=qkv_bias)
+        self.wv = nn.Linear(dim, dim, bias=qkv_bias)
+
+        self.scale = nn.Parameter(torch.ones([num_tokens]) * 0.5, requires_grad=True)
+        self.softmax = nn.Softmax(dim=-1)
+        self.num_tokens = num_tokens
+
+    def forward(self, x, td, x_size):
+        b, n, c = x.shape
+        # Q: b, n, c
+        q = self.wq(x)
+        # K: b, m, c
+        k = self.wk(td)
+        # V: b, m, c
+        v = self.wv(td)
+
+        # Q @ K^T
+        attn = F.normalize(q, dim=-1) @ F.normalize(k, dim=-1).transpose(-2, -1)
+        scale = torch.clamp(self.scale, 0, 1)
+        attn = attn * (1 + scale * np.log(self.num_tokens))
+        attn = self.softmax(attn)
+
+        # Attn * V
+        x = (attn @ v).reshape(b, n, c)
+        return x, attn
+
+
+class AC_MSA(nn.Module):
+    def __init__(
+        self,
+        dim,
+        input_resolution,
+        num_tokens=64,
+        num_heads=4,
+        category_size=128,
+        qkv_bias=True,
+    ) -> None:
+        super().__init__()
+        self.num_heads = num_heads
+        self.category_size = category_size
+        self.proj = nn.Linear(dim, dim, bias=qkv_bias)
+        self.logit_scale = nn.Parameter(
+            torch.log(10 * torch.ones((1, 1))), requires_grad=True
+        )
+        self.softmax = nn.Softmax(dim=-1)
+
+    def forward(self, qkv, sim, x_size):
+        b, n, c3 = qkv.shape
+        c = c3 // 3
+        gs = min(n, self.category_size)
+        ng = (n + gs - 1) // gs
+
+        tk_id = torch.argmax(sim, dim=-1, keepdim=False)
+        _, x_sort_indices = torch.sort(tk_id, dim=-1, stable=False)
+        x_sort_indices_reverse = index_reverse(x_sort_indices)
+        shuffled_qkv = feature_shuffle(qkv, x_sort_indices)
+
+        pad_n = ng * gs - n
+        if pad_n > 0:
+            paded_qkv = torch.cat(
+                (shuffled_qkv, torch.flip(shuffled_qkv[:, n - pad_n : n, :], dims=[1])),
+                dim=1,
+            )
+        else:
+            paded_qkv = shuffled_qkv
+
+        y = paded_qkv.reshape(b, -1, gs, c3)
+
+        qkv = y.reshape(b, ng, gs, 3, self.num_heads, c // self.num_heads).permute(
+            3, 0, 1, 4, 2, 5
+        )
+        q, k, v = qkv[0], qkv[1], qkv[2]
+
+        attn = q @ k.transpose(-2, -1)
+
+        # Safe log barrier
+        max_log = torch.log(torch.tensor(1.0 / 0.01)).to(qkv.device)
+        logit_scale = torch.clamp(self.logit_scale, max=max_log).exp()
+        attn = attn * logit_scale
+        attn = self.softmax(attn)
+
+        y = (attn @ v).permute(0, 1, 3, 2, 4).reshape(b, n + pad_n, c)[:, :n, :]
+
+        x = feature_shuffle(y, x_sort_indices_reverse)
+        x = self.proj(x)
+        return x
+
+
+class ATD_ConvFFN(nn.Module):
+    def __init__(
+        self, in_features, hidden_features=None, out_features=None, kernel_size=5
+    ) -> None:
+        super().__init__()
+        out_features = out_features or in_features
+        hidden_features = hidden_features or in_features
+        self.fc1 = nn.Linear(in_features, hidden_features)
+        self.act = nn.GELU()
+        self.dwconv = nn.Sequential(
+            nn.Conv2d(
+                hidden_features,
+                hidden_features,
+                kernel_size=kernel_size,
+                stride=1,
+                padding=(kernel_size - 1) // 2,
+                groups=hidden_features,
+            ),
+            nn.GELU(),
+        )
+        self.fc2 = nn.Linear(hidden_features, out_features)
+        self.hidden_features = hidden_features
+
+    def forward(self, x, x_size):
+        # x: (B, N, C)
+        x = self.fc1(x)
+        x = self.act(x)
+        # DWConv needs (B, C, H, W)
+        B, _N, _C = x.shape
+        H, W = x_size
+        x_grid = x.transpose(1, 2).view(B, self.hidden_features, H, W).contiguous()
+        x_grid = self.dwconv(x_grid)
+        x = x_grid.flatten(2).transpose(1, 2).contiguous()
+        x = self.fc2(x)
+        return x
+
+
+class ATDTransformerLayer(nn.Module):
+    def __init__(
+        self,
+        dim,
+        input_resolution,
+        num_heads,
+        window_size,
+        shift_size,
+        category_size,
+        num_tokens,
+        reducted_dim,
+        convffn_kernel_size,
+        mlp_ratio,
+        qkv_bias=True,
+        attention_mode="sdpa",
+        export_safe=False,
+    ) -> None:
+        super().__init__()
+        self.dim = dim
+        self.input_resolution = input_resolution
+        self.window_size = window_size
+        self.shift_size = shift_size
+
+        self.norm1 = nn.LayerNorm(dim)
+        self.norm2 = nn.LayerNorm(dim)
+        self.norm3 = nn.InstanceNorm1d(num_tokens, affine=True)
+        self.sigma = nn.Parameter(torch.zeros([num_tokens, 1]), requires_grad=True)
+
+        self.wqkv = nn.Linear(dim, 3 * dim, bias=qkv_bias)
+
+        self.attn_win = ATDWindowAttention(
+            dim,
+            window_size=to_2tuple(window_size),
+            num_heads=num_heads,
+            qkv_bias=qkv_bias,
+            attention_mode=attention_mode,
+            export_safe=export_safe,
+        )
+        self.attn_atd = ATD_CA(
+            dim,
+            input_resolution=input_resolution,
+            qkv_bias=qkv_bias,
+            num_tokens=num_tokens,
+            reducted_dim=reducted_dim,
+        )
+        self.attn_aca = AC_MSA(
+            dim,
+            input_resolution=input_resolution,
+            num_tokens=num_tokens,
+            num_heads=num_heads,
+            category_size=category_size,
+            qkv_bias=qkv_bias,
+        )
+
+        mlp_hidden_dim = int(dim * mlp_ratio)
+        self.convffn = ATD_ConvFFN(
+            in_features=dim,
+            hidden_features=mlp_hidden_dim,
+            kernel_size=convffn_kernel_size,
+        )
+
+        self.softmax = nn.Softmax(dim=-1)
+        self.sigmoid = nn.Sigmoid()
+
+    def forward(self, x, td, x_size, params):
+        h, w = x_size
+        b, n, c = x.shape
+        c3 = 3 * c
+
+        shortcut = x
+        x = self.norm1(x)
+        qkv = self.wqkv(x)
+
+        x_atd, sim_atd = self.attn_atd(x, td, x_size)
+        x_aca = self.attn_aca(qkv, sim_atd, x_size)
+
+        qkv = qkv.reshape(b, h, w, c3)
+        if self.shift_size > 0:
+            shifted_qkv = torch.roll(
+                qkv, shifts=(-self.shift_size, -self.shift_size), dims=(1, 2)
+            )
+            attn_mask = params["attn_mask"]
+        else:
+            shifted_qkv = qkv
+            attn_mask = None
+
+        x_windows = window_partition(shifted_qkv, self.window_size)
+        x_windows = x_windows.view(-1, self.window_size * self.window_size, c3)
+
+        attn_windows = self.attn_win(x_windows, rpi=params["rpi_sa"], mask=attn_mask)
+
+        attn_windows = attn_windows.view(-1, self.window_size, self.window_size, c)
+        shifted_x = window_reverse(attn_windows, self.window_size, h, w)
+
+        if self.shift_size > 0:
+            attn_x = torch.roll(
+                shifted_x, shifts=(self.shift_size, self.shift_size), dims=(1, 2)
+            )
+        else:
+            attn_x = shifted_x
+
+        x = shortcut + attn_x.view(b, n, c) + x_atd + x_aca
+        x = x + self.convffn(self.norm2(x), x_size)
+
+        # Refine dictionary (token update)
+        mask_soft = self.softmax(self.norm3(sim_atd.transpose(-1, -2)))
+        mask_x = x.reshape(b, n, c)
+        s = self.sigmoid(self.sigma)
+        td = s * td + (1 - s) * torch.einsum("btn,bnc->btc", mask_soft, mask_x)
+
+        return x, td
+
+
+class ATDBlock(nn.Module):
+    """
+    Wraps a sequence of ATDTransformerLayers and manages the Token Dictionary.
+    Compatible with ParagonSR2 body structure.
+    """
+
+    def __init__(
+        self,
+        dim,
+        input_resolution=(64, 64),
+        depth=6,
+        num_heads=6,
+        window_size=8,
+        num_tokens=64,
+        attention_mode="sdpa",
+        export_safe=False,
+        **kwargs,
+    ) -> None:
+        super().__init__()
+        self.dim = dim
+        self.window_size = window_size
+        self.depth = depth
+
+        # Token Dictionary
+        self.td = nn.Parameter(torch.randn([num_tokens, dim]), requires_grad=True)
+
+        # RPI Buffer
+        coords_h = torch.arange(window_size)
+        coords_w = torch.arange(window_size)
+        coords = torch.stack(torch.meshgrid([coords_h, coords_w], indexing="ij"))
+        coords_flatten = torch.flatten(coords, 1)
+        relative_coords = coords_flatten[:, :, None] - coords_flatten[:, None, :]
+        relative_coords = relative_coords.permute(1, 2, 0).contiguous()
+        relative_coords[:, :, 0] += window_size - 1
+        relative_coords[:, :, 1] += window_size - 1
+        relative_coords[:, :, 0] *= 2 * window_size - 1
+        relative_position_index = relative_coords.sum(-1)
+        self.register_buffer("relative_position_index_SA", relative_position_index)
+
+        self.layers = nn.ModuleList()
+        for i in range(depth):
+            self.layers.append(
+                ATDTransformerLayer(
+                    dim=dim,
+                    input_resolution=input_resolution,
+                    num_heads=num_heads,
+                    window_size=window_size,
+                    shift_size=0 if (i % 2 == 0) else window_size // 2,
+                    category_size=256,
+                    num_tokens=num_tokens,
+                    reducted_dim=4,
+                    convffn_kernel_size=5,
+                    mlp_ratio=2.0,
+                    attention_mode=attention_mode,
+                    export_safe=export_safe,
+                )
+            )
+
+    def calculate_mask(self, x_size):
+        h, w = x_size
+        img_mask = torch.zeros((1, h, w, 1), device=self.td.device)
+        h_slices = (
+            slice(0, -self.window_size),
+            slice(-self.window_size, -(self.window_size // 2)),
+            slice(-(self.window_size // 2), None),
+        )
+        w_slices = (
+            slice(0, -self.window_size),
+            slice(-self.window_size, -(self.window_size // 2)),
+            slice(-(self.window_size // 2), None),
+        )
+        cnt = 0
+        for hh in h_slices:
+            for ww in w_slices:
+                img_mask[:, hh, ww, :] = cnt
+                cnt += 1
+
+        mask_windows = window_partition(img_mask, self.window_size)
+        mask_windows = mask_windows.view(-1, self.window_size * self.window_size)
+        attn_mask = mask_windows.unsqueeze(1) - mask_windows.unsqueeze(2)
+        attn_mask = attn_mask.masked_fill(attn_mask != 0, -100.0).masked_fill(
+            attn_mask == 0, 0.0
+        )
+        return attn_mask
+
+    def forward(self, x):
+        # x is (B, C, H, W) from Paragon Body
+        # We need to flatten to (B, N, C) for ATD
+        B, C, H, W = x.shape
+
+        # Padding
+        mod = self.window_size
+        h_pad = ((H + mod - 1) // mod) * mod - H
+        w_pad = ((W + mod - 1) // mod) * mod - W
+        x = F.pad(x, (0, w_pad, 0, h_pad), mode="reflect")
+        Hp, Wp = x.shape[2], x.shape[3]
+
+        # Flatten
+        x_tokens = x.flatten(2).transpose(1, 2)  # (B, N, C)
+
+        params = {
+            "attn_mask": self.calculate_mask((Hp, Wp)),
+            "rpi_sa": self.relative_position_index_SA,
+        }
+
+        td = self.td.repeat(B, 1, 1)
+
+        for layer in self.layers:
+            x_tokens, td = layer(x_tokens, td, (Hp, Wp), params)
+
+        # Unflatten
+        x = x_tokens.transpose(1, 2).reshape(B, C, Hp, Wp)
+
+        # Crop
+        x = x[:, :, :H, :W]
+        return x
 
 
 # ============================================================================
@@ -519,15 +1044,34 @@ class ParagonSR2(nn.Module):
                     raise ValueError(f"Unknown variant: {variant}")
             return blocks
 
-        self.body = nn.Sequential(
-            *[
-                ResidualGroup(
-                    build_blocks(g),
-                    checkpointing=use_checkpointing,
-                )
-                for g in range(num_groups)
-            ]
-        )
+        if variant == "pro":
+            # Pro variant uses ATD blocks (Transformer)
+            # We treat 'num_groups' as number of ATD stages, and 'num_blocks' as depth of each ATD block
+            self.body = nn.Sequential(
+                *[
+                    ATDBlock(
+                        dim=num_feat,
+                        input_resolution=(64, 64),  # This adapts dynamically in forward
+                        depth=num_blocks,
+                        num_heads=num_feat // 16,  # Head dim 16
+                        window_size=window_size,
+                        num_tokens=64,
+                        attention_mode=attention_mode,
+                        export_safe=export_safe,
+                    )
+                    for g in range(num_groups)
+                ]
+            )
+        else:
+            self.body = nn.Sequential(
+                *[
+                    ResidualGroup(
+                        build_blocks(g),
+                        checkpointing=use_checkpointing,
+                    )
+                    for g in range(num_groups)
+                ]
+            )
 
         self.conv_mid = nn.Conv2d(num_feat, num_feat, 3, padding=1)
 
@@ -626,5 +1170,28 @@ def paragonsr2_photo(scale=4, **kw):
         attention_mode=kw.pop("attention_mode", "sdpa"),
         export_safe=kw.pop("export_safe", False),
         window_size=kw.pop("window_size", 16),
+        **kw,
+    )
+
+
+@ARCH_REGISTRY.register()
+def paragonsr2_pro(scale=4, **kw):
+    """
+    Pro variant using ATD (Adaptive Token Dictionary) Transformers.
+    Slower than Photo but aimed at SOTA quality.
+    """
+    return ParagonSR2(
+        scale=scale,
+        num_feat=64,
+        num_groups=3,  # 3 Stages
+        num_blocks=6,  # 6 Layers per stage = 18 layers total
+        variant="pro",
+        detail_gain=kw.pop("detail_gain", 0.1),
+        upsampler_alpha=kw.pop(
+            "upsampler_alpha", 0.5
+        ),  # Stronger sharpening for high detail
+        window_size=kw.pop("window_size", 8),
+        attention_mode=kw.pop("attention_mode", "sdpa"),
+        export_safe=kw.pop("export_safe", False),
         **kw,
     )
