@@ -66,11 +66,11 @@ train:
 
   scheduler:
     type: MultiStepLR
-    milestones: [80000, 100000, 110000] # Later milestones for longer training
+    milestones: [150000, 250000, 350000] # Extended for 36-block model
     gamma: 0.5
 
-  total_iter: 500000 # Pro needs more iterations (deeper, more capacity)
-  warmup_iter: 2000 # Longer warmup for Transformer
+  total_iter: 600000 # Deeper model needs more training to fully converge
+  warmup_iter: 3000 # Slightly longer warmup for stability
 
   # DYNAMIC LOSS SCHEDULING WITH AUTO-CALIBRATION
   dynamic_loss_scheduling:
