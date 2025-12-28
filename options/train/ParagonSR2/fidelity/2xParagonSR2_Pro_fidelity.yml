@@ -26,10 +26,10 @@ datasets:
     dataroot_lq: /home/phips/Documents/dataset/cc0/filtered_versions/cc0_c5_lr_x2
 
     # PRO VARIANT: Smaller batch size due to ATD attention overhead
-    lq_size: 128 # Smaller patches (128 -> 256 HR) to fit ATD in 12GB. Still covers window_size (8)
-    batch_size_per_gpu: 8 # Conservative start for ATD. VRAM automation will adjust upward if possible.
+    lq_size: 256
+    batch_size_per_gpu: 2
     num_worker_per_gpu: 8
-    accum_iter: 2 # Gradient accumulation compensates for smaller batch size (effective batch = 16)
+    accum_iter: 1
     prefetch_mode: cpu
     pin_memory: false
 
@@ -88,9 +88,9 @@ train:
       safety_margin: 0.05
       adjustment_frequency: 100
       min_batch_size: 2
-      max_batch_size: 32 # Lower max for Pro (heavier model)
+      max_batch_size: 64
       min_lq_size: 64
-      max_lq_size: 128 # Smaller max patch for Pro
+      max_lq_size: 256
       vram_history_size: 50
 
     IntelligentEarlyStopping:

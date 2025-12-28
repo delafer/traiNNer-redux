@@ -374,9 +374,12 @@ class DynamicBatchAndPatchSizeOptimizer(TrainingAutomationBase):
         self.oom_recovery_count = 0
         self.vram_manager = None  # Will be set during training
 
-        # Dynamic wrappers for real-time updates
         self.dynamic_dataloader = None
         self.dynamic_dataset = None
+
+        # Failing parameters tracking to avoid repeating OOMs
+        self.failing_batch_size: int | None = None
+        self.failing_lq_size: int | None = None
 
     def update_vram_monitoring(self) -> tuple[int | None, int | None]:
         """Update VRAM monitoring and return suggested (batch_size_adjustment, lq_size_adjustment)."""
@@ -470,20 +473,33 @@ class DynamicBatchAndPatchSizeOptimizer(TrainingAutomationBase):
                 f"Current lq_size: {self.current_lq_size}"
             )
 
-        # If significantly under target, try to increase parameters (MORE AGGRESSIVE)
+        # Damping: if usage is very close to target, don't change anything
+        if abs(target_usage - peak_usage_ratio) < self.safety_margin:
+            return 0, 0
+
+        # If significantly under target, try to increase parameters (CONSERVATIVE)
         if peak_usage_ratio < target_usage - self.safety_margin:
             available_memory_ratio = target_usage - peak_usage_ratio
 
-            # PRIORITY 1: Increase lq_size first (better final metrics) - MORE AGGRESSIVE
+            # PRIORITY 1: Increase lq_size first (better final metrics)
             if self.current_lq_size < self.max_lq_size:
-                # Much more aggressive: increase lq_size with even small memory available
-                if (
-                    available_memory_ratio > 0.02
-                ):  # Only 2% memory available needed (was 5%)
-                    # Calculate how much we can increase lq_size - more aggressive increases
+                # Require at least 5% headroom for lq_size increase
+                if available_memory_ratio > 0.05:
+                    # Conservative increases: patch sizes in steps of 2-4
                     suggested_lq_increase = min(
-                        8, max(2, int(available_memory_ratio / 0.05))
-                    )  # Increase by 2-8 patch sizes (was 1-4)
+                        4, max(2, int(available_memory_ratio / 0.10) * 2)
+                    )
+
+                    # Respect failing parameters
+                    if self.failing_lq_size is not None and self.current_batch_size >= (
+                        self.failing_batch_size or 0
+                    ):
+                        new_lq_size = self.current_lq_size + suggested_lq_increase
+                        if new_lq_size >= self.failing_lq_size:
+                            suggested_lq_increase = (
+                                self.failing_lq_size - self.current_lq_size - 2
+                            )
+
                     # Ensure we don't exceed max limits
                     suggested_lq_increase = min(
                         suggested_lq_increase, self.max_lq_size - self.current_lq_size
@@ -492,18 +508,27 @@ class DynamicBatchAndPatchSizeOptimizer(TrainingAutomationBase):
                     if suggested_lq_increase > 0:
                         lq_adjustment = suggested_lq_increase
                         logger.info(
-                            f"🔄 VRAM OPTIMIZATION (PEAK-BASED): Available memory {available_memory_ratio:.3f} ({available_memory_ratio * 100:.1f}%), "
+                            f"🔄 VRAM OPTIMIZATION (STABLE): Available memory {available_memory_ratio:.3f}, "
                             f"suggesting lq_size increase of +{suggested_lq_increase} "
                             f"({self.current_lq_size} → {self.current_lq_size + suggested_lq_increase})"
                         )
 
-            # PRIORITY 2: Then increase batch size if lq_size is already at maximum
+            # PRIORITY 2: Then increase batch size if lq_size is already at maximum (or close to it)
             elif self.current_batch_size < self.max_batch_size:
                 remaining_memory = target_usage - peak_usage_ratio
-                if remaining_memory > 0.01:  # Even 1% memory available (was 2%)
-                    suggested_batch_increase = min(
-                        8, max(2, int(remaining_memory / 0.03))
-                    )  # Increase by 2-8 batch sizes (was 1-4)
+                # Require at least 5% headroom for batch size increase (more conservative than lq)
+                if remaining_memory > 0.05:
+                    suggested_batch_increase = 2  # Fixed small step for stability
+
+                    # Respect failing parameters
+                    if self.failing_batch_size is not None:
+                        new_batch_size = (
+                            self.current_batch_size + suggested_batch_increase
+                        )
+                        if new_batch_size >= self.failing_batch_size:
+                            # If we're approaching the failing batch size, don't increase
+                            suggested_batch_increase = 0
+
                     # Ensure we don't exceed max limits
                     suggested_batch_increase = min(
                         suggested_batch_increase,
@@ -513,7 +538,7 @@ class DynamicBatchAndPatchSizeOptimizer(TrainingAutomationBase):
                     if suggested_batch_increase > 0:
                         batch_adjustment = suggested_batch_increase
                         logger.info(
-                            f"🔄 VRAM OPTIMIZATION (PEAK-BASED): Remaining memory {remaining_memory:.3f} ({remaining_memory * 100:.1f}%), "
+                            f"🔄 VRAM OPTIMIZATION (STABLE): Remaining memory {remaining_memory:.3f}, "
                             f"suggesting batch_size increase of +{suggested_batch_increase} "
                             f"({self.current_batch_size} → {self.current_batch_size + suggested_batch_increase})"
                         )
@@ -609,6 +634,14 @@ class DynamicBatchAndPatchSizeOptimizer(TrainingAutomationBase):
             "batch_size", new_batch_size, safe_batch_size, "OOM recovery"
         )
         self.record_adjustment("lq_size", new_lq_size, safe_lq_size, "OOM recovery")
+
+        # Update failing parameters to prevent re-entering OOM zones
+        if self.failing_batch_size is None or new_batch_size >= self.failing_batch_size:
+            self.failing_batch_size = new_batch_size
+            self.failing_lq_size = new_lq_size
+            logger.info(
+                f"Automation {self.name}: Updated failing parameters - failing_batch_size: {new_batch_size}, failing_lq_size: {new_lq_size}"
+            )
 
     def set_dynamic_wrappers(
         self, dynamic_dataloader=None, dynamic_dataset=None
