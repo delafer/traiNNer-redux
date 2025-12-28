@@ -1,3 +1,7 @@
+# GENERATE TIME: Sat Dec 27 11:55:16 2025
+# CMD:
+# train.py -opt options/train/ParagonSR2/fidelity/2xParagonSR2_Stream_fidelity.yml
+
 #########################################################################################
 # ParagonSR2 Stream Fidelity Config
 # Optimized for highest PSNR/SSIM metrics with pure reconstruction (no sharpening)
