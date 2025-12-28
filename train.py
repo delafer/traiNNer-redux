@@ -765,18 +765,23 @@ def train_pipeline(root_path: str) -> None:
                             logger.info(
                                 "OOM detected, attempting automation recovery..."
                             )
-                            # Get current batch size for recovery
-                            current_batch_size = opt.datasets[
-                                "train"
-                            ].batch_size_per_gpu
-                            # Suggest reduced batch size (automation will handle actual adjustment)
-                            suggested_batch_size = max(1, current_batch_size // 2)
-                            suggested_lq_size = opt.datasets["train"].lq_size // 2
-                            model.handle_automation_oom_recovery(
-                                suggested_batch_size, suggested_lq_size
-                            )
 
-                            # Apply OOM recovery to dynamic wrappers (this is the key fix!)
+                            # Automation will record actual failing params and return safe recovery values
+                            recovery_params = model.handle_automation_oom_recovery()
+
+                            if recovery_params:
+                                suggested_batch_size, suggested_lq_size = (
+                                    recovery_params
+                                )
+                            else:
+                                # Fallback if automation is not managing these
+                                current_batch_size = opt.datasets[
+                                    "train"
+                                ].batch_size_per_gpu
+                                suggested_batch_size = max(1, current_batch_size // 2)
+                                suggested_lq_size = opt.datasets["train"].lq_size // 2
+
+                            # Apply OOM recovery to dynamic wrappers
                             if dynamic_dataloader_wrapper:
                                 dynamic_dataloader_wrapper.set_batch_size(
                                     suggested_batch_size

@@ -741,6 +741,14 @@ class BaseModel:
             elif self.net_ae_ema is not None:
                 state["ema_step"] = self.net_ae_ema.step
 
+            if (
+                hasattr(self, "training_automation_manager")
+                and self.training_automation_manager
+            ):
+                state["training_automation_manager"] = (
+                    self.training_automation_manager.state_dict()
+                )
+
             save_filename = f"{current_iter}.state"
             save_path = os.path.join(self.opt.path.training_states, save_filename)
 
@@ -813,6 +821,15 @@ class BaseModel:
             elif self.net_ae_ema is not None:
                 self.net_ae_ema.register_buffer("step", resume_state["ema_step"])
                 self.net_ae_ema.register_buffer("initted", torch.tensor(True))
+
+        if (
+            "training_automation_manager" in resume_state
+            and hasattr(self, "training_automation_manager")
+            and self.training_automation_manager
+        ):
+            self.training_automation_manager.load_state_dict(
+                resume_state["training_automation_manager"]
+            )
 
     def reduce_loss_dict(self, loss_dict: dict[str, Any]) -> dict[str, Any]:
         """reduce loss dict.
@@ -962,17 +979,19 @@ class BaseModel:
         return {}
 
     def handle_automation_oom_recovery(
-        self, new_batch_size: int, new_lq_size: int
-    ) -> None:
+        self, failed_batch_size: int | None = None, failed_lq_size: int | None = None
+    ) -> tuple[int, int] | None:
         """Handle OOM recovery through automation."""
         if not self.training_automation_manager:
-            return
+            return None
 
         automation = self.training_automation_manager.automations.get(
             "DynamicBatchAndPatchSizeOptimizer"
         )
         if automation and automation.enabled:
-            automation.handle_oom_recovery(new_batch_size, new_lq_size)
+            return automation.handle_oom_recovery(failed_batch_size, failed_lq_size)
+
+        return None
 
     def set_automation_batch_size(self, batch_size: int) -> None:
         """Set current batch size for automation monitoring."""

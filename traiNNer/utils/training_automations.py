@@ -114,6 +114,26 @@ class TrainingAutomationBase:
         self.record_adjustment(parameter, current_value, new_value, reason)
         return new_value
 
+    def state_dict(self) -> dict[str, Any]:
+        """Return the state of the automation for checkpointing."""
+        return {
+            "enabled": self.enabled,
+            "adjustment_count": self.adjustment_count,
+            "iteration": self.iteration,
+            "enabled_iterations": self.enabled_iterations,
+        }
+
+    def load_state_dict(self, state_dict: dict[str, Any]) -> None:
+        """Load the state of the automation from a checkpoint."""
+        self.enabled = state_dict.get("enabled", self.enabled)
+        self.adjustment_count = state_dict.get(
+            "adjustment_count", self.adjustment_count
+        )
+        self.iteration = state_dict.get("iteration", self.iteration)
+        self.enabled_iterations = state_dict.get(
+            "enabled_iterations", self.enabled_iterations
+        )
+
 
 @AUTOMATION_REGISTRY.register()
 class IntelligentLearningRateScheduler(TrainingAutomationBase):
@@ -600,18 +620,43 @@ class DynamicBatchAndPatchSizeOptimizer(TrainingAutomationBase):
         self.target_batch_size = batch_size
         self.target_lq_size = lq_size
 
-    def handle_oom_recovery(self, new_batch_size: int, new_lq_size: int) -> None:
-        """Handle OOM recovery and adjust both batch size and lq_size."""
+    def handle_oom_recovery(
+        self, failed_batch_size: int | None = None, failed_lq_size: int | None = None
+    ) -> tuple[int, int]:
+        """Handle OOM recovery, record failing parameters, and return safe recovery parameters."""
         self.oom_detected = True
         self.oom_recovery_count += 1
 
-        logger.warning(
-            f"Automation {self.name}: OOM detected, adjusting batch size to {new_batch_size} and lq_size to {new_lq_size}"
+        # Use passed parameters if available, otherwise fallback to current tracked parameters
+        actual_failed_batch = (
+            failed_batch_size
+            if failed_batch_size is not None
+            else self.current_batch_size
+        )
+        actual_failed_lq = (
+            failed_lq_size if failed_lq_size is not None else self.current_lq_size
         )
 
-        # Reduce parameters more aggressively after OOM
-        safe_batch_size = max(self.min_batch_size, new_batch_size // 2)
-        safe_lq_size = max(self.min_lq_size, new_lq_size // 2)
+        logger.warning(
+            f"Automation {self.name}: OOM detected at Batch: {actual_failed_batch}, LQ: {actual_failed_lq}. Triggering recovery."
+        )
+
+        # Update failing parameters to prevent re-entering OOM zones
+        if (
+            self.failing_batch_size is None
+            or actual_failed_batch >= self.failing_batch_size
+        ):
+            self.failing_batch_size = actual_failed_batch
+            self.failing_lq_size = actual_failed_lq
+            logger.info(
+                f"Automation {self.name}: Recorded failing parameters - Batch: {actual_failed_batch}, LQ: {actual_failed_lq}"
+            )
+
+        # Calculate safe parameters for recovery (conservative reduction)
+        safe_batch_size = max(self.min_batch_size, actual_failed_batch // 2)
+        safe_lq_size = max(
+            self.min_lq_size, (actual_failed_lq // 2 // 4) * 4
+        )  # Keep multiple of 4
 
         self.current_batch_size = safe_batch_size
         self.current_lq_size = safe_lq_size
@@ -631,17 +676,43 @@ class DynamicBatchAndPatchSizeOptimizer(TrainingAutomationBase):
 
         # Record the adjustments
         self.record_adjustment(
-            "batch_size", new_batch_size, safe_batch_size, "OOM recovery"
+            "batch_size", actual_failed_batch, safe_batch_size, "OOM recovery"
         )
-        self.record_adjustment("lq_size", new_lq_size, safe_lq_size, "OOM recovery")
+        self.record_adjustment(
+            "lq_size", actual_failed_lq, safe_lq_size, "OOM recovery"
+        )
 
-        # Update failing parameters to prevent re-entering OOM zones
-        if self.failing_batch_size is None or new_batch_size >= self.failing_batch_size:
-            self.failing_batch_size = new_batch_size
-            self.failing_lq_size = new_lq_size
-            logger.info(
-                f"Automation {self.name}: Updated failing parameters - failing_batch_size: {new_batch_size}, failing_lq_size: {new_lq_size}"
-            )
+        return safe_batch_size, safe_lq_size
+
+    def state_dict(self) -> dict[str, Any]:
+        """Return the state of the automation for checkpointing."""
+        state = super().state_dict()
+        state.update(
+            {
+                "current_batch_size": self.current_batch_size,
+                "current_lq_size": self.current_lq_size,
+                "failing_batch_size": self.failing_batch_size,
+                "failing_lq_size": self.failing_lq_size,
+                "vram_history": list(self.vram_history),
+            }
+        )
+        return state
+
+    def load_state_dict(self, state_dict: dict[str, Any]) -> None:
+        """Load the state of the automation from a checkpoint."""
+        super().load_state_dict(state_dict)
+        self.current_batch_size = state_dict.get(
+            "current_batch_size", self.current_batch_size
+        )
+        self.current_lq_size = state_dict.get("current_lq_size", self.current_lq_size)
+        self.failing_batch_size = state_dict.get(
+            "failing_batch_size", self.failing_batch_size
+        )
+        self.failing_lq_size = state_dict.get("failing_lq_size", self.failing_lq_size)
+        if "vram_history" in state_dict:
+            from collections import deque
+
+            self.vram_history = deque(state_dict["vram_history"], maxlen=20)
 
     def set_dynamic_wrappers(
         self, dynamic_dataloader=None, dynamic_dataset=None
@@ -1291,6 +1362,19 @@ class TrainingAutomationManager:
 
             stats[name] = automation_stats
         return stats
+
+    def state_dict(self) -> dict[str, Any]:
+        """Return the state of all automations for checkpointing."""
+        return {
+            name: automation.state_dict()
+            for name, automation in self.automations.items()
+        }
+
+    def load_state_dict(self, state_dict: dict[str, Any]) -> None:
+        """Load the state of all automations from a checkpoint."""
+        for name, automation_state in state_dict.items():
+            if name in self.automations:
+                self.automations[name].load_state_dict(automation_state)
 
 
 # Convenience function for easy integration
