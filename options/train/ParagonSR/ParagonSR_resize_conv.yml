@@ -1,0 +1,150 @@
+# yaml-language-server: $schema=https://raw.githubusercontent.com/the-database/traiNNer-redux/refs/heads/master/schemas/redux-config.schema.json
+#########################################################################################
+# General Settings
+#########################################################################################
+name: 4xParagonSR_S_ResizeConv_GAN
+scale: 4
+use_amp: true
+amp_bf16: true
+use_channels_last: false
+fast_matmul: false
+num_gpu: auto
+
+
+########################################################################################################################
+# Dataset and Dataloader Settings
+########################################################################################################################
+datasets:
+  train:
+    name: Train Dataset
+    type: pairedimagedataset
+    dataroot_gt: [/home/phips/Documents/dataset/cc0/hr]
+    dataroot_lq: [/home/phips/Documents/dataset/cc0/lr_pretrain_x4]
+    lq_size: 64
+    use_hflip: true
+    use_rot: true
+    num_worker_per_gpu: 8
+    batch_size_per_gpu: 4
+    accum_iter: 1
+
+  val:
+    name: Val Dataset
+    type: pairedimagedataset
+    dataroot_gt: [/home/phips/Documents/dataset/cc0/val_hr]
+    dataroot_lq: [/home/phips/Documents/dataset/cc0/val_x4]
+
+#####################################################################
+# Network Settings
+#####################################################################
+network_g:
+  type: paragonsr_s
+
+network_d:
+  type: dunet
+
+#########################################################################################
+# Pretrain and Resume Paths
+#########################################################################################
+path:
+  # Load the weights from a pre-trained model (e.g., a PSNR-oriented one) to accelerate convergence.
+  pretrain_network_g: experiments/4x_ParagonSR_S/models/net_g_ema_450000.safetensors
+  param_key_g: ~
+  strict_load_g: false
+  resume_state: ~
+
+###########################################################################################
+# Training Settings
+###########################################################################################
+train:
+  ema_decay: 0.999
+  grad_clip: true
+
+  optim_g:
+    type: AdamW
+    lr: !!float 2e-5
+    weight_decay: 0.02
+    betas: [0.9, 0.99] # Using more standard betas for stability
+  optim_d:
+    type: AdamW
+    lr: !!float 2e-5
+    weight_decay: 0
+    betas: [0.9, 0.99]
+
+  scheduler:
+    type: CosineAnnealingWarmRestarts
+    T_0: 250000
+    eta_min: !!float 1e-7
+
+  total_iter: 250000
+  warmup_iter: 5000 # Longer warmup for stability with many losses
+
+  # losses: Curated for high perceptual quality and artifact suppression
+  losses:
+    # --- Foundational Content & Structure Losses ---
+    - type: l1loss
+      loss_weight: 1.0 # Strong L1 base for pixel-perfect reconstruction anchor
+    - type: ffloss
+      loss_weight: 0.5 # For sharp details without being overly aggressive
+    - type: mssimloss
+      loss_weight: 0.8 # Excellent for preserving structural integrity
+
+    # --- Perceptual & Realism Losses ---
+    - type: perceptualloss
+      criterion: l1
+      loss_weight: 0.5 # VGG features for perceptual similarity
+      layer_weights:
+        'conv5_4': 1.0 # Focus on higher-level features
+    - type: distsloss
+      loss_weight: 0.4 # A robust perceptual metric
+    - type: ContrastiveLoss
+      loss_weight: 0.3 # CLIP-based loss for semantic coherence
+      temperature: 0.07
+
+    # --- Color & Artifact-Specific Losses ---
+    - type: hsluvloss
+      criterion: l1
+      loss_weight: 0.2 # Gentle push for better color representation
+    - type: CheckerboardLoss
+      loss_weight: 0.1 # Directly targets checkerboard/raster artifacts
+      scale: 4
+      criterion: "l1"
+
+    # --- Adversarial Loss ---
+    # R3GAN is powerful but can be unstable. We use a lower weight and no gradient penalties (R1/R2)
+    # initially, relying on the robust loss mix for stability. This mitigates the "waterpainterly" GAN look.
+    - type: ganloss
+      gan_type: r3gan
+      loss_weight: 0.01 # Very low weight to gently nudge towards realism without dominating
+
+##############################################################################################
+# Validation
+##############################################################################################
+val:
+  val_enabled: true
+  val_freq: 1000
+  save_img: true
+  metrics_enabled: true
+  metrics:
+    topiq:
+      type: calculate_topiq
+    psnr:
+      type: calculate_psnr
+      crop_border: 4
+    ssim:
+      type: calculate_ssim
+      crop_border: 4
+    lpips:
+      type: calculate_lpips
+      better: lower
+    dists:
+      type: calculate_dists
+      better: lower
+
+##############################################################################################
+# Logging
+##############################################################################################
+logger:
+  print_freq: 100
+  save_checkpoint_freq: 1000
+  save_checkpoint_format: safetensors
+  use_tb_logger: true

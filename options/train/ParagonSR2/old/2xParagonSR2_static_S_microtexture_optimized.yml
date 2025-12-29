@@ -1,0 +1,401 @@
+# =============================================================================
+# ParagonSR2 Static-S Microtexture Training Configuration - OPTIMIZED VERSION
+# =============================================================================
+# This configuration applies the optimization recommendations from loss schedule analysis:
+# 1. Staggered loss initialization to prevent early training instability
+# 2. Smooth LDL transitions for gradual learning
+# 3. Refined weight balance for better loss category balance
+
+# Training run identification
+name: 2xParagonSR2_S_with_FeatureMatching_Optimized
+
+# Super-resolution scale factor (2x = 2x the resolution)
+scale: 2
+
+# =============================================================================
+# TRAINING ACCELERATION SETTINGS
+# =============================================================================
+# These settings optimize training speed and memory usage without quality loss
+
+# Automatic Mixed Precision - Speeds up training and reduces memory usage
+use_amp: true
+
+# Brain Float 16 - More numerically stable than regular FP16, prevents NaN/Inf
+# Particularly important for deep networks and gradient accumulation
+amp_bf16: true
+
+# Channels Last Memory Format - Optimizes GPU memory access patterns
+# Especially beneficial for convolution-heavy architectures like ParagonSR2
+use_channels_last: true
+
+# Fast Matrix Operations - Trades small precision for significant speed gains
+# Uses TensorFloat32 for matrix multiplications on modern NVIDIA GPUs
+fast_matmul: true
+
+# Auto-detect GPU count - Uses all available GPUs for training
+num_gpu: auto
+
+# =============================================================================
+# DATASET CONFIGURATION
+# =============================================================================
+# Paired image dataset for supervised learning
+
+datasets:
+  # Training dataset configuration
+  train:
+    name: Train_Dataset
+    type: pairedimagedataset
+
+    # Data paths - replace with your actual dataset paths
+    dataroot_gt: /home/phips/Documents/dataset/cc0/hr    # Ground truth (high-resolution) images directory
+    dataroot_lq: /home/phips/Documents/dataset/cc0/lr_x2    # Low-quality (input) images directory
+
+    # Input image size - 128x128 patches for efficient training
+    # Balance between detail capture and computational efficiency
+    lq_size: 128
+
+    # Data augmentation - Horizontal flipping
+    # Doubles effective dataset size, improves generalization
+    use_hflip: true
+
+    # Data augmentation - Random rotation (90°, 180°, 270°)
+    # Helps with orientation invariance, especially for texture patterns
+    use_rot: true
+
+    # Data loading workers per GPU - Loads data in parallel
+    # Higher values improve data pipeline efficiency
+    num_worker_per_gpu: 8
+
+    # Batch size per GPU - Total batch size = batch_size_per_gpu * num_gpu
+    # 8 is optimal for 2x SR on modern GPUs with AMP enabled
+    batch_size_per_gpu: 8
+
+    # Gradient accumulation steps - Simulates larger batch size
+    # accum_iter: 1 means no accumulation (each batch updates gradients)
+    accum_iter: 1
+
+  # Validation dataset configuration
+  val:
+    name: Val_Dataset
+    type: pairedimagedataset
+    dataroot_gt: /home/phips/Documents/dataset/cc0/val_hr
+    dataroot_lq: /home/phips/Documents/dataset/cc0/val_lr_x2
+
+# =============================================================================
+# NETWORK ARCHITECTURES
+# =============================================================================
+# Generator and discriminator networks for adversarial training
+
+# Generator: ParagonSR2 Static-S architecture
+# Optimized for speed while maintaining high-quality results
+# Static-S variant uses simplified attention mechanisms for faster inference
+network_g:
+  type: paragonsr2_static_s
+
+# Discriminator: MUNet (Multi-Branch UNet)
+# Multi-branch design captures different aspects of image quality:
+# - Spatial branch: Overall structure and layout
+# - Frequency branch: Texture and frequency content
+# - Patch branch: Local texture patterns
+network_d:
+  type: munet
+
+# =============================================================================
+# MODEL LOADING AND SAVING
+# =============================================================================
+path:
+  # Pretrained generator weights - None for training from scratch
+  # Set to checkpoint path for fine-tuning
+  pretrain_network_g: experiments/2xParagonSR2_static_S_fidelity/models/net_g_ema_340000.safetensors # my fidelity pretrain, psnr checkpoint
+
+  # Strict loading ensures parameter names must match exactly
+  # Prevents loading incompatible checkpoint files
+  strict_load_g: true
+
+  # Resume training from checkpoint - None for fresh training
+  resume_state: ~
+
+# =============================================================================
+# TRAINING SETTINGS
+# =============================================================================
+train:
+  # Exponential Moving Average for generator weights
+  # Creates a smoother, more stable version of the generator
+  # Helps prevent training instability and improves generalization
+  # EMA decay rate - 0.995 means 99.5% of previous weights retained
+  ema_decay: 0.995
+
+  # EMA power - Controls how quickly EMA model updates
+  # 0.75 is a good balance for stable training
+  ema_power: 0.75
+
+  # Gradient clipping - Prevents exploding gradients
+  # Clips gradients to maximum norm of 1.0
+  grad_clip: true
+
+  # =============================================================================
+  # OPTIMIZER CONFIGURATION
+  # =============================================================================
+  # Separate optimizers for generator and discriminator
+
+  # Generator optimizer - AdamW (Adam with weight decay)
+  # Better than regular Adam for image generation tasks
+  optim_g:
+    type: AdamW
+
+    # Learning rate - 1.2e-4 is conservative for stable training
+    # Too high leads to instability, too low slows convergence
+    lr: !!float 1.2e-4
+
+    # Weight decay - L2 regularization to prevent overfitting
+    # 1.0e-4 is moderate, helps generalization
+    weight_decay: !!float 1.0e-4
+
+    # Adam hyperparameters - [beta1, beta2]
+    # beta1=0.9: momentum term for gradient accumulation
+    # beta2=0.99: second moment estimation for adaptive learning rates
+    betas: [0.9, 0.99]
+
+  # Discriminator optimizer - Higher learning rate for faster adaptation
+  # Discriminators often need to adapt faster than generators
+  optim_d:
+    type: AdamW
+
+    # Slightly higher LR than generator (1.5e-4 vs 1.2e-4)
+    # Discriminator needs to keep up with generator improvements
+    lr: !!float 1.5e-4
+
+    # No weight decay for discriminator
+    # Can hurt discriminator's ability to distinguish real vs fake
+    weight_decay: !!float 0.0
+
+    betas: [0.9, 0.99]
+
+  # =============================================================================
+  # LEARNING RATE SCHEDULING
+  # =============================================================================
+  # MultiStepLR - Drops learning rate at specific milestones
+  # Helps fine-tune the model at different training stages
+  scheduler:
+    type: MultiStepLR
+
+    # Learning rate drops at these iterations
+    # 70k: Focus shifts from reconstruction to perceptual quality
+    # 110k: Final fine-tuning for best perceptual scores
+    milestones: [70000, 110000]
+
+    # Gamma - Multiplicative factor for LR reduction
+    # 0.5 means LR is halved at each milestone
+    gamma: 0.5
+
+  # Total training iterations - 140k provides good training depth
+  # Enough iterations to converge without overfitting
+  total_iter: 140000
+
+  # Warmup iterations - Gradual learning rate increase
+  # Prevents instability at the beginning of training
+  warmup_iter: 500
+
+  # =============================================================================
+  # LOSS FUNCTION CONFIGURATION - OPTIMIZED SCHEDULE
+  # =============================================================================
+  # Multi-component loss with staggered initialization for optimal stability
+
+  losses:
+
+    # =============================================================================
+    # PHASE 1: CORE RECONSTRUCTION (0-5k iterations) - Foundation building
+    # =============================================================================
+
+    # Charbonnier Loss - Primary reconstruction with reduced weight for better balance
+    # Optimized: Reduced from 0.6→0.5 to prevent early reconstruction dominance
+    - type: charbonnierloss
+      loss_weight: 0.5     # OPTIMIZED: Reduced from 0.6
+      start_iter: 0
+      target_iter: 25000   # Gradually reduce over 25k iterations
+      target_weight: 0.32  # OPTIMIZED: Reduced final weight
+      schedule_type: linear
+
+    # DISTS Loss - Deep structural similarity
+    # Start immediately for structural foundation
+    - type: distsloss
+      loss_weight: 0.10
+      start_iter: 0        # Immediate activation
+      target_iter: 0
+      target_weight: 0.10
+      as_loss: true
+      load_weights: true
+      use_input_norm: true
+
+    # Feature Matching - NEW! Multi-branch discriminator guidance
+    # OPTIMIZED: Increased weight for better stabilization
+    - type: featurematchingloss
+      loss_weight: 0.20
+      start_iter: 0        # Immediate activation for stability
+      target_iter: 0
+      target_weight: 0.20
+      layers: [ 'down1', 'down2', 'mid' ]  # Key MUNet layers
+      criterion: charbonnier
+
+    # =============================================================================
+    # PHASE 2: PERCEPTUAL ENHANCEMENT (5k-10k iterations) - Visual quality
+    # =============================================================================
+
+    # ConvNeXt Perceptual Loss - Semantic understanding
+    # OPTIMIZED: Slightly increased weight for better perceptual quality
+    - type: convnextperceptualloss
+      loss_weight: 0.18    # OPTIMIZED: Increased from 0.16
+      start_iter: 5000     # PHASE 2: Wait 5k iterations
+      target_iter: 25000
+      target_weight: 0.37
+      layers: [1, 2]       # Use layers 1 and 2 from ConvNeXt
+      layer_weights: [1.0, 0.7]  # Weight for each layer
+      eps: 1.0e-6
+
+    # HFEN Loss - High-frequency edge preservation
+    - type: hfenloss
+      loss_weight: 0.012
+      start_iter: 5000     # PHASE 2: Start with perceptual losses
+      target_iter: 5000
+      target_weight: 0.012
+      kernel_size: 7
+      sigma: 1.0
+      criterion: charbonnier
+      reduction: mean
+
+    # =============================================================================
+    # PHASE 3: FREQUENCY DOMAIN (10k-15k iterations) - Texture enhancement
+    # =============================================================================
+
+    # FF Loss - Frequency feature preservation
+    # OPTIMIZED: Slightly reduced weight for better balance
+    - type: ffloss
+      loss_weight: 0.38
+      start_iter: 10000    # PHASE 3: Start after perceptual foundation
+      target_iter: 90000
+      target_weight: 0.56
+      schedule_type: linear
+
+    # Gradient Variance Loss - Microtexture preservation
+    - type: GradientVarianceLoss
+      loss_weight: 0.05
+      start_iter: 500      # Keep early start (was already good)
+      target_iter: 500
+      target_weight: 0.05
+      patch_size: 16
+      criterion: charbonnier
+
+    # Adaptive Block TV - Artifact reduction
+    # OPTIMIZED: Slightly increased weight for better artifact control
+    - type: AdaptiveBlockTVLoss
+      loss_weight: 0.005   # OPTIMIZED: Increased from 0.004
+      start_iter: 10000    # PHASE 3: Start with frequency losses
+      target_iter: 10000
+      target_weight: 0.005
+      block_size: 2
+      sharpness: 4.0
+      reduction: mean
+      eps: 1e-6
+
+    # =============================================================================
+    # PHASE 4: STABILIZATION (15k-30k iterations) - Training stability
+    # =============================================================================
+
+    # LDL Loss - Local discriminator learning with smooth transitions
+    # OPTIMIZED: Gradual ramp-up and reduced final weight
+    - type: ldlloss
+      loss_weight: 0.25    # OPTIMIZED: Reduced from 0.3
+      start_iter: 15000    # PHASE 4: Gradual introduction
+      target_iter: 30000   # Reach full strength over 15k iterations
+      target_weight: 0.25  # Smooth ramp-up instead of instant
+      disable_after: 100000
+
+    # =============================================================================
+    # PHASE 5: ADVERSARIAL TRAINING (30k+ iterations) - Photorealism
+    # =============================================================================
+
+    # GAN Loss - R3GAN with gradient penalties
+    # Keep original timing for proper GAN warmup
+    - type: ganloss
+      gan_type: r3gan
+      loss_weight: 0.00    # Starts at 0, gradually increases
+      start_iter: 30000    # Wait for solid foundation
+      target_iter: 45000
+      target_weight: 0.06  # Final adversarial strength
+      r1_weight: 2.0
+      r2_weight: 2.0
+      schedule_type: linear
+
+    # =============================================================================
+    # PHASE 6: SEMANTIC ENHANCEMENT (60k+ iterations) - Advanced quality
+    # =============================================================================
+
+    # Contrastive Loss - CLIP-based semantic consistency
+    # Keep original timing for late-stage enhancement
+    - type: ContrastiveLoss
+      loss_weight: 0.00
+      start_iter: 60000    # Late-stage enhancement
+      target_iter: 60000
+      target_weight: 0.05
+      temperature: 0.1
+
+# =============================================================================
+# VALIDATION AND EVALUATION
+# =============================================================================
+val:
+  # Enable validation during training
+  val_enabled: true
+
+  # Validation frequency - Run validation every 5000 iterations
+  # Balance between monitoring training progress and training speed
+  val_freq: 5000
+
+  # Save validation images for visual inspection
+  save_img: true
+
+  # Enable comprehensive metrics calculation
+  metrics_enabled: true
+
+  # Metrics for evaluating both reconstruction quality and perceptual quality
+  metrics:
+    # PSNR - Peak Signal-to-Noise Ratio (pixel-wise reconstruction fidelity)
+    psnr:
+      type: calculate_psnr
+      crop_border: 2       # Ignore 2-pixel border (avoids boundary artifacts)
+
+    # SSIM - Structural Similarity Index (structural preservation)
+    ssim:
+      type: calculate_ssim
+      crop_border: 2       # Consistent crop for fair comparison
+
+    # LPIPS - Learned Perceptual Image Patch Similarity (perceptual quality)
+    lpips:
+      type: calculate_lpips
+      better: lower        # Lower LPIPS = better perceptual quality
+
+    # DISTS - Deep Image Structure and Texture Similarity (texture quality)
+    dists:
+      type: calculate_dists
+      better: lower        # Lower DISTS = better structure/texture match
+
+    # ToPIQ - Transferable Perceptual Image Quality (comprehensive quality)
+    topiq:
+      type: calculate_topiq
+
+# =============================================================================
+# LOGGING AND MONITORING
+# =============================================================================
+logger:
+  # Console logging frequency - Print training status every 100 iterations
+  print_freq: 100
+
+  # Save model checkpoints every 5000 iterations
+  # Critical for resuming training and model evaluation
+  save_checkpoint_freq: 5000
+
+  # Use modern checkpoint format - SafeTensors is more secure and portable
+  save_checkpoint_format: safetensors
+
+  # TensorBoard logging for loss curves and image visualization
+  # Essential for monitoring training progress and debugging
+  use_tb_logger: true

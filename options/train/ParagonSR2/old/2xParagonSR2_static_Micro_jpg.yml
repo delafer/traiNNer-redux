@@ -1,0 +1,203 @@
+name: 2xParagonSR2_Micro_DeJPEG_Stream
+scale: 2
+use_amp: true
+amp_bf16: true
+use_channels_last: true
+fast_matmul: true
+num_gpu: auto
+
+datasets:
+  train:
+    name: Train_Dataset
+    type: pairedimagedataset
+    # POINT THIS TO YOUR JPEG-DEGRADED DATASET
+    dataroot_gt: /home/phips/Documents/dataset/cc0/hr
+    dataroot_lq: /home/phips/Documents/dataset/cc0/lr_x2_jpg  # <--- NEW FOLDER
+    lq_size: 128
+    use_hflip: true
+    use_rot: true
+    num_worker_per_gpu: 8
+    batch_size_per_gpu: 8
+    accum_iter: 1
+
+  val:
+    name: Val_Dataset
+    type: pairedimagedataset
+    dataroot_gt: /home/phips/Documents/dataset/cc0/val_hr
+    # POINT THIS TO JPEG VAL IMAGES TO SEE REAL PROGRESS
+    dataroot_lq: /home/phips/Documents/dataset/cc0/val_lr_x2_jpg
+
+network_g:
+  type: paragonsr2_static_micro
+  hr_blocks: 1
+
+network_d:
+  type: munet
+
+path:
+  # RESUME FROM YOUR FINISHED PERCEPTUAL MODEL
+  pretrain_network_g: experiments/2xParagonSR2_Micro_hrblock_with_FeatureMatching_Optimized/models/net_g_ema_140000.safetensors
+  strict_load_g: true
+  resume_state: ~
+
+train:
+  ema_decay: 0.995
+  ema_power: 0.75
+  grad_clip: true
+
+  optim_g:
+    type: AdamW
+    lr: !!float 5e-5      # LOWER LR (Fine-tuning)
+    weight_decay: !!float 1.0e-4
+    betas: [0.9, 0.99]
+
+  optim_d:
+    type: AdamW
+    lr: !!float 5e-5      # Match G
+    weight_decay: 0
+    betas: [0.9, 0.99]
+
+  scheduler:
+    type: MultiStepLR
+    milestones: [30000, 45000] # Short run
+    gamma: 0.5
+
+  # SHORT RUN: 50k iterations is enough to learn DeJPEG
+  total_iter: 50000
+  warmup_iter: 200
+
+  # =========================================================
+  # SPEED OPTIMIZED LOSS STACK
+  # Removed: DISTS, CLIP/Contrastive, HFEN (Too slow/Unnecessary)
+  # Kept: GAN, FeatureMatching, Perceptual, Charbonnier, LDL
+  # =========================================================
+  losses:
+    # 1. PIXEL LOSS: Low Weight
+    # Sufficient to keep colors correct, low enough to allow texture.
+    - type: charbonnierloss
+      loss_weight: 0.3
+      start_iter: 0
+      target_iter: 50000
+      target_weight: 0.3
+      schedule_type: linear
+
+    # 2. PERCEPTUAL: High Weight
+    # This is the "Micro" model's anchor. It ensures shapes are correct.
+    - type: convnextperceptualloss
+      loss_weight: 0.3
+      start_iter: 0
+      layers: [1, 2]
+      layer_weights: [1.0, 0.7]
+
+    # 3. GAN LOSS: Medium Weight
+    # The engine of texture.
+    - type: ganloss
+      gan_type: r3gan
+      loss_weight: 0.05       # Standard r3gan weight
+      start_iter: 0
+      r1_weight: 0.0
+      r2_weight: 0.0
+
+    # 4. FEATURE MATCHING: High Weight
+    # helps the Micro model learn
+    # from the discriminator without being overwhelmed.
+    - type: featurematchingloss
+      loss_weight: 0.5
+      start_iter: 0
+      layers: [ 'down2', 'mid' ]
+      criterion: charbonnier
+
+    # 5. LDL: High Weight
+    # The specific anti-artifact loss. We increase it so it actually does something.
+    - type: ldlloss
+      loss_weight: 10.0       # Increased to make it impactful
+      start_iter: 0
+
+    #- type: distsloss
+    #  loss_weight: 0.05
+    #  start_iter: 0
+
+    #- type: AdaptiveBlockTVLoss
+    #  loss_weight: 0.005    # Down from 0.05 (Micro-appropriate)
+    #  start_iter: 0
+    #  block_size: 8         # Keep for JPEG targeting
+    #  sharpness: 4.0        # Keep default
+
+    #- type: ContrastiveLoss
+    #  loss_weight: 0.00
+    #  start_iter: 0
+    #  target_iter: 50000
+    #  target_weight: 0.05
+    #  temperature: 0.1
+
+    #- type: GradientVarianceLoss
+    #  loss_weight: 0.05
+    #  start_iter: 0
+    #  target_iter: 500
+    #  target_weight: 0.05
+    #  patch_size: 16
+    #  criterion: charbonnier
+
+    #- type: ffloss
+    #  loss_weight: 0.38
+    #  start_iter: 10000    # PHASE 3: Start after perceptual foundation
+    #  target_iter: 90000
+    #  target_weight: 0.56
+    #  schedule_type: linear
+
+    #- type: hfenloss
+    #  loss_weight: 0.012
+    #  start_iter: 5000     # PHASE 2: Start with perceptual losses
+    #  target_iter: 5000
+    #  target_weight: 0.012
+    #  kernel_size: 7
+    #  sigma: 1.0
+    #  criterion: charbonnier
+    #  reduction: mean
+
+    - type: ConsistencyLoss
+      loss_weight: 0.5
+      start_iter: 0
+      criterion: "chc"
+      blur: false           # No blur for detail preservation
+      brightness: 1.0       # ← Restore original brightness exactly
+      saturation: 1.0       # ← Restore original saturation exactly
+      cosim: true
+      cosim_weight: 0.5
+
+    #- type: LaplacianPyramidLoss
+    #  loss_weight: 0.1         # Low weight, multi-scale detail preservation
+    #  levels: 3                # 3 levels is usually sufficient
+    #  criterion: charbonnier
+    #  start_iter: 0
+
+    #- type: CheckerboardLoss
+    #  loss_weight: 0.01        # Very low weight
+    #  scale: 2                 # Match your upscale factor
+    #  criterion: charbonnier
+    #  start_iter: 0
+
+    - type: ffloss
+      loss_weight: 0.05        # Start moderate
+      start_iter: 5000         # Wait 1k more iterations
+      target_iter: 25000
+      target_weight: 0.1       # Ramp up gradually
+      schedule_type: linear
+
+val:
+  val_enabled: true
+  val_freq: 1000
+  save_img: true
+  metrics_enabled: true
+  metrics:
+    psnr:
+      type: calculate_psnr
+      crop_border: 2
+    # Removed LPIPS/DISTS/TOPIQ to speed up validation checks
+    # Visual inspection is more important for DeJPEG anyway
+
+logger:
+  print_freq: 100
+  save_checkpoint_freq: 1000
+  save_checkpoint_format: safetensors
+  use_tb_logger: true

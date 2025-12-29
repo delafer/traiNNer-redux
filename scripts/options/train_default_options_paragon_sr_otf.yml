@@ -1,0 +1,243 @@
+# yaml-language-server: $schema=https://raw.githubusercontent.com/the-database/traiNNer-redux/refs/heads/master/schemas/redux-config.schema.json
+#########################################################################################
+# ParagonSR OTF Training Configuration with Extended Degradations
+# Added by Philip Hofmann for enhanced training of ParagonSR Super-Resolution Network
+#########################################################################################
+
+name: %scale%_%archname%_paragon_sr_otf
+scale: %scale%
+use_amp: true
+amp_bf16: false
+use_channels_last: true
+fast_matmul: false
+num_gpu: auto
+# manual_seed: 1024
+
+########################################################################################################################
+# Dataset and Dataloader Settings for ParagonSR with Enhanced OTF
+########################################################################################################################
+datasets:
+  train:
+    name: ParagonSR Training Dataset (OTF)
+    type: realesrgandataset
+    dataroot_gt: [
+      datasets/train/dataset1/hr,
+      datasets/train/dataset1/hr2
+    ]
+    # Meta info for OTF kernels - generated during training
+    # blur_kernel_size: 12
+    # kernel_list: ["iso", "aniso", "generalized_iso", "generalized_aniso", "plateau_iso", "plateau_aniso"]
+    # kernel_prob: [0.45, 0.25, 0.12, 0.03, 0.12, 0.03]
+    # kernel_range: [5, 17]
+    # sinc_prob: 0
+    # blur_sigma: [0.2, 2]
+    # betag_range: [0.5, 4]
+    # betap_range: [1, 2]
+    # blur_kernel_size2: 12
+    # kernel_list2: ["iso", "aniso", "generalized_iso", "generalized_aniso", "plateau_iso", "plateau_aniso"]
+    # kernel_prob2: [0.45, 0.25, 0.12, 0.03, 0.12, 0.03]
+    # kernel_range2: [5, 17]
+    # sinc_prob2: 0
+    # blur_sigma2: [0.2, 1]
+    # betag_range2: [0.5, 4]
+    # betap_range2: [1, 2]
+    # final_sinc_prob: 0
+    # final_kernel_range: [5, 17]
+
+    lq_size: %lq_size%
+    use_hflip: true
+    use_rot: true
+
+    num_worker_per_gpu: 8
+    batch_size_per_gpu: %batch_size_per_gpu%
+    accum_iter: %accum_iter%
+
+  val:
+    name: ParagonSR Validation Dataset
+    type: pairedimagedataset
+    dataroot_gt: [
+      datasets/val/dataset1/hr,
+      datasets/val/dataset1/hr2
+    ]
+    dataroot_lq: [
+      datasets/val/dataset1/lr,
+      datasets/val/dataset1/lr2
+    ]
+
+#####################################################################
+# Network Settings
+#####################################################################
+network_g:
+  type: %archname%
+
+network_d:
+  type: dunet
+
+#########################################################################################
+# Pretrain and Resume Paths
+#########################################################################################
+path:
+  pretrain_network_g: experiments/pretrained_models/pretrain.pth
+  param_key_g: ~
+  strict_load_g: true
+  resume_state: ~
+
+###########################################################################################
+# Training Settings with ParagonSR Enhanced OTF
+###########################################################################################
+train:
+  ema_decay: %ema_decay%
+  grad_clip: false
+
+  optim_g:
+    type: AdamW
+    lr: %lr%
+    weight_decay: 0
+    betas: %betas%
+  optim_d:
+    type: AdamW
+    lr: %lr%
+    weight_decay: 0
+    betas: %betas%
+
+  scheduler:
+    type: MultiStepLR
+    milestones: %milestones%
+    gamma: 0.5
+
+  total_iter: %total_iter%
+  warmup_iter: %warmup_iter%
+
+  #######################################################################
+  # Losses
+  #######################################################################
+  losses:
+    # Content Losses
+    - type: mssimloss
+      loss_weight: 0.5
+    - type: perceptualloss
+      criterion: charbonnier
+      loss_weight: 0.01
+    - type: hsluvloss
+      criterion: charbonnier
+      loss_weight: 1.0
+    - type: cosimloss
+      loss_weight: 1.0
+
+    # GAN Loss (R3GAN)
+    - type: ganloss
+      gan_type: r3gan
+      loss_weight: 0.1
+      r1_weight: 10.0
+      r2_weight: 10.0
+
+  #######################################################################
+  # ParagonSR Enhanced OTF Degradation Settings
+  #######################################################################
+
+  # Enable OTF processing
+  high_order_degradation: true
+
+  # Clean Pass-Through for Identity Learning
+  p_clean: 0.1  # 10% chance to pass clean images through
+
+  # Original Real-ESRGAN Degradations
+  blur_prob: 0.7
+  resize_prob: [0.2, 0.7, 0.1]
+  resize_mode_list: ["bilinear", "bicubic", "nearest-exact", "lanczos"]
+  resize_mode_prob: [0.25, 0.25, 0.25, 0.25]
+  resize_range: [0.4, 1.5]
+  gaussian_noise_prob: 0.7
+  noise_range: [0, 15]
+  gray_noise_prob: 0
+  jpeg_prob: 0.8
+  jpeg_range: [75, 95]
+
+  blur_prob2: 0.7
+  resize_prob2: [0.3, 0.4, 0.3]
+  resize_mode_list2: ["bilinear", "bicubic", "nearest-exact", "lanczos"]
+  resize_mode_prob2: [0.25, 0.25, 0.25, 0.25]
+  resize_range2: [0.6, 1.2]
+  gaussian_noise_prob2: 0.5
+  noise_range2: [0, 10]
+  gray_noise_prob2: 0
+  jpeg_prob2: 0.6
+  jpeg_range2: [75, 95]
+
+  resize_mode_list3: ["bilinear", "bicubic", "nearest-exact", "lanczos"]
+  resize_mode_prob3: [0.25, 0.25, 0.25, 0.25]
+
+  # ParagonSR Extended Degradations (by Philip Hofmann)
+  #######################################################################
+  # Modern Compression Formats
+  #######################################################################
+  webp_prob: 0.3  # WebP compression
+  webp_range: [75, 95]
+
+  avif_prob: 0.2  # AVIF compression
+  avif_range: [75, 95]
+
+  heif_prob: 0.1  # HEIF compression
+  heif_range: [75, 95]
+
+  #######################################################################
+  # Camera Artifacts & Effects
+  #######################################################################
+  oversharpen_prob: 0.2  # Oversharpening effects
+  oversharpen_strength: [1.0, 2.0]
+
+  chromatic_aberration_prob: 0.1  # Chromatic aberration
+  demosaic_prob: 0.1  # Demosaicing artifacts
+  aliasing_prob: 0.2  # Aliasing artifacts
+  aliasing_scale_range: [0.6, 0.9]
+
+  motion_blur_prob: 0.15  # Motion blur simulation
+  motion_blur_kernel_size: [5, 15]
+  motion_blur_angle_range: [0, 360]
+
+  lens_distort_prob: 0.1  # Barrel/pincushion distortion
+  lens_distort_strength_range: [-0.3, 0.3]
+
+  exposure_prob: 0.2  # Under/overexposure
+  exposure_factor_range: [0.5, 2.0]
+
+  color_temp_prob: 0.15  # Color temperature shifts
+  color_temp_shift_range: [-0.2, 0.2]  # Negative = cooler, Positive = warmer
+
+  sensor_noise_prob: 0.25  # Sensor-specific noise
+  sensor_noise_std_range: [0.01, 0.1]
+
+  rolling_shutter_prob: 0.05  # Rolling shutter distortion
+  rolling_shutter_strength_range: [-0.1, 0.1]
+
+  #######################################################################
+  # Mix of Augmentations (MoA)
+  #######################################################################
+  use_moa: false
+  moa_augs: ['none', 'mixup', 'cutmix', 'resizemix', 'cutblur']
+  moa_probs: [0.4, 0.084, 0.084, 0.084, 0.348]
+  moa_debug: false
+  moa_debug_limit: 100
+
+##############################################################################################
+# Validation
+##############################################################################################
+val:
+  val_enabled: false
+  val_freq: 1000
+  save_img: true
+  tile_size: 0
+  tile_overlap: 8
+  metrics_enabled: true
+  metrics:
+    topiq:
+      type: calculate_topiq
+
+##############################################################################################
+# Logging
+##############################################################################################
+logger:
+  print_freq: 100
+  save_checkpoint_freq: 1000
+  save_checkpoint_format: safetensors
+  use_tb_logger: true

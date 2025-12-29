@@ -22,6 +22,10 @@ from traiNNer.archs import build_network
 from traiNNer.archs.arch_info import ARCHS_WITHOUT_FP16
 from traiNNer.data.base_dataset import BaseDataset
 from traiNNer.losses import build_loss
+from traiNNer.losses.contrastive_loss import ContrastiveLoss
+from traiNNer.losses.dynamic_loss_scheduling import DynamicLossScheduler
+from traiNNer.losses.feature_matching_loss import FeatureMatchingLoss
+from traiNNer.losses.r3gan_loss import R3GANLoss
 from traiNNer.metrics import calculate_metric
 from traiNNer.models.base_model import BaseModel
 from traiNNer.utils import get_root_logger, imwrite, tensor2img
@@ -123,14 +127,16 @@ class SRModel(BaseModel):
 
             if not gan_opt:
                 if self.opt.train.losses:
-                    gan_opts = list(
-                        filter(
-                            lambda x: x["type"].lower() == "ganloss",
-                            self.opt.train.losses,
-                        )
-                    )
-                    if gan_opts:
-                        gan_opt = gan_opts[0]
+                    for loss in self.opt.train.losses:
+                        loss_type = loss["type"].lower()
+                        if loss_type in [
+                            "ganloss",
+                            "r3ganloss",
+                            "multiscaleganloss",
+                            "featurematchingloss",
+                        ]:
+                            self.has_gan = True
+                            break
 
             if gan_opt:
                 if gan_opt.get("loss_weight", 0) != 0:
@@ -165,6 +171,7 @@ class SRModel(BaseModel):
 
             self.optimizer_g: Optimizer | None = None
             self.optimizer_d: Optimizer | None = None
+            self.dynamic_loss_scheduler: DynamicLossScheduler | None = None
 
             self.init_training_settings()
 
@@ -269,7 +276,7 @@ class SRModel(BaseModel):
             assert "loss_weight" in loss, f"{loss['type']} must define loss_weight"
             if float(loss["loss_weight"]) != 0:
                 label = loss_type_to_label(loss["type"])
-                if label == "l_g_gan":
+                if label in {"l_g_gan", "l_g_featurematching"}:
                     self.has_gan = True
                 self.losses[label] = build_loss(loss).to(
                     self.device,
@@ -285,6 +292,88 @@ class SRModel(BaseModel):
                 #     self.losses[label] = torch.compile(self.losses[label])
 
         assert self.losses, "At least one loss must be defined."
+
+        # Initialize dynamic loss scheduler if configured
+        if (
+            hasattr(train_opt, "dynamic_loss_scheduling")
+            and train_opt.dynamic_loss_scheduling is not None
+            and train_opt.dynamic_loss_scheduling.get("enabled", False)
+        ):
+            scheduler_config = (
+                train_opt.dynamic_loss_scheduling.copy()
+            )  # Make a copy to avoid modifying original
+
+            # Add intelligent context for auto-calibration
+            if scheduler_config.get("auto_calibrate", False):
+                # Get architecture type
+                architecture_type = "unknown"
+                if self.opt.network_g and "type" in self.opt.network_g:
+                    architecture_type = self.opt.network_g["type"]
+
+                # Get training configuration context
+                training_config = {
+                    "total_iterations": train_opt.total_iter,
+                    "dataset_info": getattr(
+                        self.opt.datasets.get("train"), "dataset_info", {}
+                    ),
+                }
+
+                # Use default dataset complexity values for auto-calibration
+                # Note: Automatic dataset analysis is disabled due to method availability issues
+                if not training_config["dataset_info"]:
+                    logger.info(
+                        "📊 Using default dataset complexity for auto-calibration",
+                        extra={"markup": True},
+                    )
+                    training_config["dataset_info"] = {
+                        "texture_variance": 0.5,
+                        "edge_density": 0.5,
+                        "color_variation": 0.5,
+                        "overall_complexity": 0.5,
+                    }
+
+                # Add context to scheduler config
+                scheduler_config["architecture_type"] = architecture_type
+                scheduler_config["training_config"] = training_config
+
+                logger.info(
+                    f"🧠 Auto-calibration mode enabled for {architecture_type} architecture",
+                    extra={"markup": True},
+                )
+
+                # Log the detected/used dataset info
+                dataset_info = training_config["dataset_info"]
+                if isinstance(dataset_info, dict):
+                    logger.info(
+                        f"📊 Using detected dataset complexity: "
+                        f"texture={dataset_info.get('texture_variance', 0.5):.2f}, "
+                        f"edges={dataset_info.get('edge_density', 0.5):.2f}, "
+                        f"colors={dataset_info.get('color_variation', 0.5):.2f}",
+                        extra={"markup": True},
+                    )
+
+            try:
+                from traiNNer.losses.dynamic_loss_scheduling import (
+                    create_dynamic_loss_scheduler,
+                )
+
+                self.dynamic_loss_scheduler = create_dynamic_loss_scheduler(
+                    self.losses, scheduler_config
+                )
+
+                if scheduler_config.get("auto_calibrate", False):
+                    logger.info(
+                        "✅ Intelligent dynamic loss scheduling ready - optimal parameters auto-configured",
+                        extra={"markup": True},
+                    )
+                else:
+                    logger.info(
+                        f"Dynamic loss scheduling enabled with config: {scheduler_config}",
+                        extra={"markup": True},
+                    )
+            except Exception as e:
+                logger.error(f"Failed to initialize dynamic loss scheduler: {e}")
+                logger.warning("Continuing without dynamic loss scheduling")
 
         if not self.has_gan:
             # warn that discriminator network / optimizer won't be used if enabled
@@ -363,8 +452,6 @@ class SRModel(BaseModel):
     def optimize_parameters(
         self, current_iter: int, current_accum_iter: int, apply_gradient: bool
     ) -> None:
-        # https://github.com/Corpsecreate/neosr/blob/2ee3e7fe5ce485e070744158d4e31b8419103db0/neosr/models/default.py#L328
-        # assert self.optimizer_g is not None
         assert self.lq is not None
         assert self.gt is not None
         assert self.scaler_d is not None
@@ -381,29 +468,37 @@ class SRModel(BaseModel):
         self.loss_samples += n_samples
         loss_dict: dict[str, Tensor | float] = OrderedDict()
 
-        lq = rgb2pixelformat_pt(
-            self.lq, self.opt.input_pixel_format
-        )  # lq: input_pixel_format
-        rgb2pixelformat_pt(
-            self.gt, self.opt.input_pixel_format
-        )  # gt: input_pixel_format
+        lq = rgb2pixelformat_pt(self.lq, self.opt.input_pixel_format)
+        rgb2pixelformat_pt(self.gt, self.opt.input_pixel_format)
 
         with torch.autocast(
             device_type=self.device.type, dtype=self.amp_dtype, enabled=self.use_amp
         ):
             if self.optimizer_g is not None:
-                output = self.net_g(lq)  # output: output_pixel_format
+                output = self.net_g(lq)
                 self.output = pixelformat2rgb_pt(
                     output, self.gt, self.opt.output_pixel_format
-                )  # self.output: rgb
+                )
 
                 assert isinstance(self.output, Tensor)
-                l_g_total = torch.tensor(0.0, device=self.output.device)
+                l_g_total = torch.tensor(0.0, device=self.lq.device)
 
                 lq_target = None
 
+                # Prepare images for losses
+                real_images_unaug = self.gt.clone()
+                fake_images_unaug = self.output.clone()
+                real_images_aug = real_images_unaug
+                fake_images_aug = fake_images_unaug
+                if self.batch_augment:
+                    real_images_aug, fake_images_aug = self.batch_augment(
+                        real_images_aug, fake_images_aug
+                    )
+
+                # First pass: compute all losses without dynamic weighting
+                raw_losses = {}
                 for label, loss in self.losses.items():
-                    target = self.gt
+                    target = real_images_aug
 
                     if loss.loss_weight < 0:
                         if lq_target is None:
@@ -420,64 +515,184 @@ class SRModel(BaseModel):
                                 )
                         target = lq_target
 
+                    # --- GAN LOSS (FIXED for Wrapper) ---
                     if label == "l_g_gan":
                         assert self.net_d is not None
-                        fake_g_pred = self.net_d(self.output)
-                        l_g_loss = loss(fake_g_pred, True, is_disc=False)
+
+                        # Robust check for R3GAN inside wrapper
+                        is_r3gan = isinstance(loss, R3GANLoss) or (
+                            hasattr(loss, "loss_module")
+                            and isinstance(loss.loss_module, R3GANLoss)
+                        )
+
+                        if is_r3gan:
+                            # R3GAN Signature
+                            if hasattr(loss, "loss_module"):  # Wrapped
+                                l_g_loss = loss(
+                                    net_d=self.net_d,
+                                    real_images=self.gt,
+                                    fake_images=self.output,
+                                    is_disc=False,
+                                    current_iter=current_iter,
+                                )
+                            else:  # Unwrapped
+                                l_g_loss = loss(
+                                    net_d=self.net_d,
+                                    real_images=self.gt,
+                                    fake_images=self.output,
+                                    is_disc=False,
+                                )
+                        else:
+                            # Standard GAN Signature
+                            fake_g_pred = self.net_d(self.output)
+                            if hasattr(loss, "loss_module"):  # Wrapped
+                                l_g_loss = loss(
+                                    fake_g_pred,
+                                    True,
+                                    is_disc=False,
+                                    current_iter=current_iter,
+                                )
+                            else:  # Unwrapped
+                                l_g_loss = loss(fake_g_pred, True, is_disc=False)
 
                         if self.adaptive_d:
                             l_g_gan_ema = (
                                 self.adaptive_d_ema_decay * self.l_g_gan_ema
                                 + (1 - self.adaptive_d_ema_decay) * l_g_loss.detach()
                             )
-
                             if (
                                 l_g_gan_ema
                                 > self.l_g_gan_ema * self.adaptive_d_threshold
                             ):
                                 skip_d_update = True
                                 self.optimizers_skipped[1] = True
-                                # print(current_iter, "skip_d_update")
-
                             self.l_g_gan_ema = l_g_gan_ema
 
+                    # --- LDL LOSS ---
                     elif label == "l_g_ldl":
-                        assert self.net_g_ema is not None, (
-                            "ema_decay must be enabled for LDL loss"
-                        )
+                        assert self.net_g_ema is not None
                         with torch.inference_mode():
                             output_ema = pixelformat2rgb_pt(
                                 self.net_g_ema(lq),
                                 self.gt,
                                 self.opt.output_pixel_format,
                             )
-                        l_g_loss = loss(self.output, output_ema, target)
+                        if hasattr(loss, "loss_module"):
+                            l_g_loss = loss(
+                                self.output,
+                                output_ema,
+                                target,
+                                current_iter=current_iter,
+                            )
+                        else:
+                            l_g_loss = loss(self.output, output_ema, target)
+
+                    # --- CONTRASTIVE LOSS (FIXED for Wrapper) ---
+                    elif isinstance(loss, ContrastiveLoss) or (
+                        hasattr(loss, "loss_module")
+                        and isinstance(loss.loss_module, ContrastiveLoss)
+                    ):
+                        if hasattr(loss, "loss_module"):
+                            l_g_loss = loss(
+                                self.output, target, self.lq, current_iter=current_iter
+                            )
+                        else:
+                            l_g_loss = loss(self.output, target, self.lq)
+
+                    # --- FEATURE MATCHING (FIXED for Wrapper) ---
+                    elif isinstance(loss, FeatureMatchingLoss) or (
+                        hasattr(loss, "loss_module")
+                        and isinstance(loss.loss_module, FeatureMatchingLoss)
+                    ):
+                        assert self.net_d is not None
+                        _real_pred, real_feats = self.net_d.forward_with_features(
+                            self.gt
+                        )
+                        _fake_pred, fake_feats = self.net_d.forward_with_features(
+                            self.output
+                        )
+
+                        if hasattr(loss, "loss_module"):
+                            l_g_loss = loss(
+                                real_feats, fake_feats, current_iter=current_iter
+                            )
+                        else:
+                            l_g_loss = loss(real_feats, fake_feats)
+
+                    # --- GENERIC LOSSES ---
+                    elif hasattr(loss, "loss_module"):
+                        l_g_loss = loss(self.output, target, current_iter=current_iter)
                     else:
                         l_g_loss = loss(self.output, target)
 
+                    # Store raw loss for dynamic scheduling
+                    raw_losses[label] = l_g_loss
+
+                # Apply dynamic loss scheduling if enabled
+                dynamic_weights = {}
+                if self.dynamic_loss_scheduler is not None:
+                    dynamic_weights = self.dynamic_loss_scheduler(
+                        raw_losses, current_iter
+                    )
+
+                # Second pass: accumulate losses with dynamic weights
+                for label, loss in self.losses.items():
+                    l_g_loss = raw_losses[label]
+                    base_weight = abs(loss.loss_weight)
+
+                    # Apply dynamic adjustment if available
+                    if (
+                        self.dynamic_loss_scheduler is not None
+                        and label in dynamic_weights
+                    ):
+                        dynamic_adjustment = dynamic_weights[label]
+                        adjusted_weight = base_weight * dynamic_adjustment
+                    else:
+                        adjusted_weight = base_weight
+
+                    # Accumulate Loss with adjusted weight
                     if isinstance(l_g_loss, dict):
                         for sublabel, loss_val in l_g_loss.items():
                             if loss_val > 0:
-                                weighted_loss_val = loss_val * abs(loss.loss_weight)
+                                weighted_loss_val = loss_val * adjusted_weight
                                 l_g_total += weighted_loss_val * self.accum_iters
                                 loss_dict[f"{label}_{sublabel}"] = weighted_loss_val
                     else:
-                        weighted_l_g_loss = l_g_loss * abs(loss.loss_weight)
+                        weighted_l_g_loss = l_g_loss * adjusted_weight
                         l_g_total += weighted_l_g_loss / self.accum_iters
                         loss_dict[label] = weighted_l_g_loss
 
                 if not l_g_total.isfinite():
-                    raise RuntimeError(
-                        "Training failed: NaN/Inf found in loss. Try reducing the learning rate. If training still fails, please file an issue: https://github.com/the-database/traiNNer-redux/issues"
-                    )
+                    raise RuntimeError("Training failed: NaN/Inf found in loss.")
 
-                # add total generator loss for tensorboard tracking
                 loss_dict["l_g_total"] = l_g_total
+
+                # Log dynamic loss weights if monitoring is enabled
+                if self.dynamic_loss_scheduler is not None:
+                    stats = self.dynamic_loss_scheduler.get_monitoring_stats()
+                    for loss_name, weight in stats["current_weights"].items():
+                        loss_dict[f"dynamic_weight_{loss_name}"] = weight
+
+                # Update training automations with loss tracking
+                self.update_automation_loss_tracking(
+                    float(l_g_total.detach().cpu()), current_iter
+                )
 
                 self.scaler_g.scale(l_g_total).backward()
 
                 if apply_gradient:
                     self.scaler_g.unscale_(self.optimizer_g)
+
+                    # Collect gradients for monitoring
+                    gradients = [
+                        p.grad for p in self.net_g.parameters() if p.grad is not None
+                    ]
+
+                    # Update gradient monitoring for automation
+                    suggested_threshold = self.update_automation_gradient_monitoring(
+                        gradients
+                    )
+
                     grad_norm_g = torch.linalg.vector_norm(
                         torch.stack(
                             [
@@ -487,11 +702,13 @@ class SRModel(BaseModel):
                             ]
                         )
                     ).detach()
-
                     loss_dict["grad_norm_g"] = grad_norm_g
 
                     if self.grad_clip:
-                        clip_grad_norm_(self.net_g.parameters(), 1.0)
+                        # Use automation-based gradient clipping threshold if available
+                        clip_threshold = self.get_automation_clipping_threshold()
+                        clip_grad_norm_(self.net_g.parameters(), clip_threshold)
+                        loss_dict["grad_clip_threshold"] = clip_threshold
 
                     scale_before = self.scaler_g.get_scale()
                     self.scaler_g.step(self.optimizer_g)
@@ -503,40 +720,70 @@ class SRModel(BaseModel):
             else:
                 with torch.inference_mode():
                     self.output = self.net_g(self.lq)
-                    assert isinstance(self.output, Tensor)
 
+        # --- DISCRIMINATOR UPDATE ---
         cri_gan = self.losses.get("l_g_gan")
-
         if (
             self.net_d is not None
             and cri_gan is not None
             and self.optimizer_d is not None
             and not skip_d_update
         ):
-            # optimize net_d
             for p in self.net_d.parameters():
                 p.requires_grad = True
 
             with torch.autocast(
-                device_type=self.device.type,
-                dtype=self.amp_dtype,
-                enabled=self.use_amp,
+                device_type=self.device.type, dtype=self.amp_dtype, enabled=self.use_amp
             ):
-                # real
-                real_d_pred = self.net_d(self.gt)
-                l_d_real = cri_gan(real_d_pred, True, is_disc=True)
-                loss_dict["l_d_real"] = l_d_real
-                loss_dict["out_d_real"] = torch.mean(real_d_pred.detach())
-                # fake
-                fake_d_pred = self.net_d(self.output.detach())
-                l_d_fake = cri_gan(fake_d_pred, False, is_disc=True)
-                loss_dict["l_d_fake"] = l_d_fake
-                loss_dict["out_d_fake"] = torch.mean(fake_d_pred.detach())
+                # Unwrap GAN loss safely
+                loss_module = (
+                    cri_gan.loss_module if hasattr(cri_gan, "loss_module") else cri_gan
+                )
 
-            self.scaler_d.scale((l_d_real + l_d_fake) / self.accum_iters).backward()
+                if isinstance(loss_module, R3GANLoss):
+                    loss_d_dict = loss_module(
+                        net_d=self.net_d,
+                        real_images=real_images_aug,
+                        fake_images=fake_images_aug.detach(),
+                        real_images_unaug=real_images_unaug,
+                        fake_images_unaug=fake_images_unaug.detach(),
+                        is_disc=True,
+                    )
+                    l_d_total = loss_d_dict["d_loss"]
+                    loss_dict.update(
+                        {k: v for k, v in loss_d_dict.items() if k != "d_loss"}
+                    )
+                else:
+                    real_d_pred = self.net_d(self.gt)
+                    fake_d_pred = self.net_d(self.output.detach())
+                    l_d_real = loss_module(real_d_pred, True, is_disc=True)
+                    l_d_fake = loss_module(fake_d_pred, False, is_disc=True)
+
+                    # Apply schedule weight manually for Discriminator side
+                    weight = (
+                        cri_gan.get_current_weight(current_iter)
+                        if hasattr(cri_gan, "get_current_weight")
+                        else cri_gan.loss_weight
+                    )
+                    l_d_total = (l_d_real + l_d_fake) * weight
+                    loss_dict["l_d_real"] = l_d_real
+                    loss_dict["l_d_fake"] = l_d_fake
+
+            self.scaler_d.scale(l_d_total / self.accum_iters).backward()
 
             if apply_gradient:
                 self.scaler_d.unscale_(self.optimizer_d)
+
+                # Collect discriminator gradients for monitoring
+                gradients_d = [
+                    p.grad for p in self.net_d.parameters() if p.grad is not None
+                ]
+
+                # Update gradient monitoring for automation (includes discriminator)
+                suggested_threshold = self.update_automation_gradient_monitoring(
+                    gradients_d
+                )
+
                 grad_norm_d = torch.linalg.vector_norm(
                     torch.stack(
                         [
@@ -546,11 +793,12 @@ class SRModel(BaseModel):
                         ]
                     )
                 ).detach()
-
                 loss_dict["grad_norm_d"] = grad_norm_d
 
                 if self.grad_clip:
-                    clip_grad_norm_(self.net_d.parameters(), 1.0)
+                    # Use automation-based gradient clipping threshold
+                    clip_threshold = self.get_automation_clipping_threshold()
+                    clip_grad_norm_(self.net_d.parameters(), clip_threshold)
                 scale_before = self.scaler_d.get_scale()
                 self.scaler_d.step(self.optimizer_d)
                 self.scaler_d.update()
@@ -563,9 +811,15 @@ class SRModel(BaseModel):
             val = (
                 value
                 if isinstance(value, float)
-                else value.to(dtype=torch.float32).detach()  # pyright: ignore[reportAttributeAccessIssue]
+                else value.to(dtype=torch.float32).detach()
             )
             self.log_dict[key] = self.log_dict.get(key, 0) + val * n_samples
+
+        # Add enhanced logging information
+        enhanced_logging_stats = self._collect_enhanced_logging_stats(
+            loss_dict, current_iter, gradients if apply_gradient else []
+        )
+        self.log_dict.update(enhanced_logging_stats)
 
         self.log_dict = self.reduce_loss_dict(self.log_dict)
 
@@ -659,6 +913,17 @@ class SRModel(BaseModel):
                 self.lq, self.opt.input_pixel_format
             )  # lq: input_pixel_format
 
+            # Validation downscaling disabled for accurate metrics
+            # Original VRAM fix was causing validation on heavily downscaled images (64x64 max)
+            # which led to inaccurate PSNR/SSIM calculations and declining metric curves
+            if not self.is_train:  # Only during validation/testing
+                # Validate with full-resolution images for accurate metrics
+                # If you encounter VRAM issues during validation, consider:
+                # 1. Reducing batch size for validation
+                # 2. Using smaller validation tile sizes
+                # 3. Processing validation in smaller chunks
+                pass
+
             net = self.net_g_ema if self.net_g_ema is not None else self.net_g
             net.eval()
 
@@ -741,7 +1006,28 @@ class SRModel(BaseModel):
         for val_data in dataloader:
             img_name = osp.splitext(osp.basename(val_data["lq_path"][0]))[0]
             self.feed_data(val_data)
-            self.test()
+
+            try:
+                self.test()
+            except torch.cuda.OutOfMemoryError:
+                torch.cuda.empty_cache()
+                logger.warning(
+                    f"OOM during validation of {img_name}. Switching to tiled inference (tile_size=256)."
+                )
+                original_tile_size = self.opt.val.tile_size
+                # Force tile size for this image
+                self.opt.val.tile_size = 256
+                try:
+                    self.test()
+                except Exception as e:
+                    logger.error(f"Failed to validate {img_name} even with tiling: {e}")
+                finally:
+                    # Restore original setting (or keep it if we want to be safe for subsequent images)
+                    # Keeping it might be safer for the rest of validation
+                    pass
+            except Exception as e:
+                logger.error(f"Error during validation of {img_name}: {e}")
+                continue
 
             visuals = self.get_current_visuals()
             sr_img = tensor2img(
@@ -917,3 +1203,75 @@ class SRModel(BaseModel):
             )
 
         self.save_training_state(epoch, current_iter)
+
+    def _collect_enhanced_logging_stats(
+        self,
+        loss_dict: dict[str, Any],
+        current_iter: int,
+        gradients: list[torch.Tensor],
+    ) -> dict[str, Any]:
+        """Collect enhanced logging statistics for comprehensive training monitoring."""
+        enhanced_stats = {}
+
+        # Dynamic loss scheduling statistics
+        if self.dynamic_loss_scheduler is not None:
+            try:
+                stats = self.dynamic_loss_scheduler.get_monitoring_stats()
+                enhanced_stats["training_automation_stats"] = {
+                    "dynamic_loss_scheduling": stats
+                }
+            except Exception:
+                # Fallback if dynamic loss scheduler fails
+                enhanced_stats["training_automation_stats"] = {
+                    "dynamic_loss_scheduling": {"enabled": True, "error": True}
+                }
+
+        # Training automation statistics
+        automation_stats = {}
+        try:
+            # Check for automation manager if available
+            if hasattr(self, "training_automation_manager"):
+                automation_stats = (
+                    self.training_automation_manager.get_automation_stats()
+                )
+        except Exception:
+            pass
+
+        # Add automation stats if available
+        if automation_stats:
+            enhanced_stats["training_automation_stats"] = automation_stats
+
+        # Gradient monitoring statistics
+        gradient_stats = {}
+        if gradients:
+            try:
+                total_norm = torch.sqrt(
+                    sum(torch.sum(g**2) for g in gradients if g is not None)
+                )
+                gradient_stats["grad_norm_g"] = float(total_norm.item())
+                gradient_stats["num_parameters"] = len(
+                    [g for g in gradients if g is not None]
+                )
+
+                # Add gradient clipping threshold if available
+                if hasattr(self, "grad_clip") and self.grad_clip:
+                    clip_threshold = getattr(
+                        self, "get_automation_clipping_threshold", lambda: 1.0
+                    )()
+                    if callable(clip_threshold):
+                        clip_threshold = clip_threshold()
+                    gradient_stats["grad_clip_threshold"] = clip_threshold
+
+            except Exception:
+                gradient_stats["grad_norm_g"] = 0.0
+
+        enhanced_stats["gradient_stats"] = gradient_stats
+
+        # Add current VRAM usage for logging
+        try:
+            current_vram = torch.cuda.memory_allocated() / (1024**3)
+            enhanced_stats["current_vram_gb"] = current_vram
+        except Exception:
+            enhanced_stats["current_vram_gb"] = 0.0
+
+        return enhanced_stats

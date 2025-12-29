@@ -1,0 +1,127 @@
+# yaml-language-server: $schema=https://raw.githubusercontent.com/the-database/traiNNer-redux/refs/heads/master/schemas/redux-config.schema.json
+#########################################################################################
+# ParagonSR2 Nano - Video Compression Handling
+# Handles H.264/H.265 compression artifacts (similar to JPEG but with temporal aspects)
+#########################################################################################
+name: 2xParagonSR2_Nano_Video
+scale: 2
+
+use_amp: true
+amp_bf16: true
+use_channels_last: true
+fast_matmul: true
+num_gpu: auto
+
+datasets:
+  train:
+    name: Train
+    type: pairedimagedataset
+    dataroot_gt: /home/phips/Documents/dataset/cc0/hr
+    dataroot_lq: /home/phips/Documents/dataset/cc0/lr_x2_video # Video compressed
+    lq_size: 128
+    use_hflip: true
+    use_rot: true
+    num_worker_per_gpu: 8
+    batch_size_per_gpu: 10
+    accum_iter: 1
+
+  val:
+    name: Val
+    type: pairedimagedataset
+    dataroot_gt: /home/phips/Documents/dataset/cc0/val_hr
+    dataroot_lq: /home/phips/Documents/dataset/cc0/val_lr_x2_video
+
+network_g:
+  type: paragonsr2_nano
+
+path:
+  # Optionally start from perceptual pretrain
+  pretrain_network_g: experiments/2xParagonSR2_Nano_Perceptual/models/net_g_ema_50000.safetensors
+  strict_load_g: true
+  resume_state: ~
+
+train:
+  ema_decay: 0.999
+  ema_power: 0.75
+  grad_clip: true
+
+  optim_g:
+    type: AdamW
+    lr: !!float 1e-4
+    weight_decay: !!float 1e-4
+    betas: [0.9, 0.99]
+
+  scheduler:
+    type: MultiStepLR
+    milestones: [20000, 35000]
+    gamma: 0.5
+
+  total_iter: 50000
+  warmup_iter: 200
+
+  # Loss stack optimized for video compression artifacts
+  losses:
+    # Pixel accuracy
+    - type: charbonnierloss
+      loss_weight: 1.0
+      target_iter: 25000
+      target_weight: 0.15
+      schedule_type: linear
+
+    # Perceptual - preserve structures
+    - type: convnextperceptualloss
+      loss_weight: 0.5
+      layers: [1, 2]
+      layer_weights: [1.0, 0.7]
+
+    # Texture quality
+    - type: distsloss
+      loss_weight: 0.1
+
+    # Color stability - prevents video encoder color shifts
+    - type: ConsistencyLoss
+      loss_weight: 0.2
+      criterion: "chc"
+      blur: false
+      cosim: true
+      cosim_weight: 0.5
+
+    # Block artifact removal (8x8 DCT blocks)
+    - type: AdaptiveBlockTVLoss
+      loss_weight: 0.015 # Higher for nano
+      block_size: 8
+      sharpness: 4.0
+
+    # Frequency domain - critical for compression artifacts
+    - type: ffloss
+      loss_weight: 0.1
+      start_iter: 2500
+      target_iter: 20000
+      target_weight: 0.25 # Higher for video artifacts
+      schedule_type: linear
+
+val:
+  val_enabled: true
+  val_freq: 2500
+  save_img: true
+
+  metrics_enabled: true
+  metrics:
+    psnr:
+      type: calculate_psnr
+      crop_border: 2
+    ssim:
+      type: calculate_ssim
+      crop_border: 2
+    lpips:
+      type: calculate_lpips
+      better: lower
+    dists:
+      type: calculate_dists
+      better: lower
+
+logger:
+  print_freq: 50
+  save_checkpoint_freq: 2500
+  save_checkpoint_format: safetensors
+  use_tb_logger: true

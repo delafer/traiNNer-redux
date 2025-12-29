@@ -1,0 +1,135 @@
+# GENERATE TIME: Sat Dec 27 11:55:16 2025
+# CMD:
+# train.py -opt options/train/ParagonSR2/fidelity/2xParagonSR2_Stream_fidelity.yml
+
+#########################################################################################
+# ParagonSR2 Stream Fidelity Config
+# Optimized for highest PSNR/SSIM metrics with pure reconstruction (no sharpening)
+# De-blocking focused variant for compressed video restoration
+#########################################################################################
+name: 2xParagonSR2_Stream_fidelity
+scale: 2
+
+# VRAM MANAGEMENT SYSTEM
+auto_vram_management:
+  enabled: true # Enable automatic VRAM management to maximize batch size dynamically
+  target_vram_usage: 0.85 # Target 85% VRAM usage (leaves 15% headroon for system spikes)
+  safety_margin: 0.05 # Additional 5% safety margin ensures reliability
+
+use_amp: true # Automatic Mixed Precision (BF16) speeds up training and reduces VRAM
+amp_bf16: true # BF16 is more stable than FP16 for training, protecting against NaN
+use_channels_last: true # Always true for NVIDIA GPUs (Tensor Cores), works with compile
+num_gpu: auto # Automatically detect and use all available GPUs
+use_compile: false # Torch.compile enables kernel fusion, further boosting speed on 30-series+
+
+datasets:
+  train:
+    name: CC0_147k_Train
+    type: pairedimagedataset
+    dataroot_gt: /home/phips/Documents/dataset/cc0/filtered_versions/cc0_c5_hr
+    dataroot_lq: /home/phips/Documents/dataset/cc0/filtered_versions/cc0_c5_lr_x2
+
+    # METRIC-OPTIMIZED PARAMETERS for RTX 3060 12GB (Auto-VRAM managed)
+    lq_size: 256 # Large patch size (256 crop -> 512 HR) provides vital global context for the attention-free GateBlock
+    batch_size_per_gpu: 8
+    num_worker_per_gpu: 8 # 8 workers balance CPU preprocessing speed with overhead
+    accum_iter: 1 # Realtime updates preferred over accumulation for this batch size
+    prefetch_mode: cpu # CPU prefetching reduces GPU VRAM pressure
+    pin_memory: false # Disabling pin_memory prevents potential pinned memory fragmentation issues on consumer OS
+
+    use_hflip: true # Data augmentation: Horizontal flip
+    use_rot: true # Data augmentation: Rotation (90/180/270) increases effective dataset size 8x
+
+  val:
+    name: CC0_147k_Val
+    type: pairedimagedataset
+    dataroot_gt: /home/phips/Documents/dataset/cc0/val_hr
+    dataroot_lq: /home/phips/Documents/dataset/cc0/val_lr_x2_bicubic_aa
+
+network_g:
+  type: paragonsr2_stream # The "Tiny" variant definition
+  # FIDELITY OPTIMIZATION: Pure reconstruction for highest PSNR/SSIM
+  upsampler_alpha: 0.0 # 0.0 = No sharpening. Crucial for PSNR/SSIM optimization as sharpening distorts pixel values
+  use_checkpointing: true # Trade-off: Saves significant VRAM (allowing larger batch/patches) at cost of minor compute time. Worth it for 12GB cards.
+
+path:
+  pretrain_network_g: ~ # No pretrain path (training from scratch)
+  strict_load_g: true
+
+train:
+  ema_decay: 0.999 # Standard EMA decay for stable model weights average
+  ema_power: 0.75 # EMA power factor
+  grad_clip: true # Prevents gradient explosion, critical for deep networks
+
+  optim_g:
+    type: AdamW # AdamW handles weight decay better than standard Adam
+    lr: !!float 2e-4 # 2e-4 is the standard sweet spot for SR transformer/CNN hybrids
+    weight_decay: !!float 1e-4 # Regularization to prevent overfitting on 147k dataset
+    betas: [0.9, 0.99] # Standard AdamW betas
+
+  scheduler:
+    type: MultiStepLR # Simple, robust scheduler for fidelity training
+    milestones: [40000, 50000, 55000] # Decays LR late in training to refine detailed convergence
+    gamma: 0.5 # Halves the learning rate at each milestone
+
+  total_iter: 200000 # 200k iterations is typically sufficient for convergence on this dataset size
+  warmup_iter: 1000 # Warmup prevents unstable updates at the start
+
+  # DYNAMIC LOSS SCHEDULING WITH AUTO-CALIBRATION
+  dynamic_loss_scheduling:
+    enabled: true # Automatically balances loss components (L1 vs MSSIM) during training
+
+  # TRAINING AUTOMATIONS
+  training_automations:
+    enabled: true # Master enable for all automations
+    intelligent_learning_rate_scheduler:
+      enabled: true # Adapts LR based on loss plateauing
+
+    DynamicBatchAndPatchSizeOptimizer:
+      enabled: true # This is KEY for 12GB VRAM. It will push batch_size up to the limit automatically.
+      target_vram_usage: 0.85
+      safety_margin: 0.05
+      adjustment_frequency: 100
+      min_batch_size: 2
+      max_batch_size: 64
+      min_lq_size: 64
+      max_lq_size: 256
+      vram_history_size: 50
+
+    IntelligentEarlyStopping:
+      enabled: true # Saves resources if model stops improving
+      patience: 10000
+      min_improvement: 0.01
+      monitor_metric: "val/psnr"
+      convergence_threshold: 0.0001
+      convergence_log_frequency: 500
+
+    adaptive_gradient_clipping:
+      enabled: true # Dynamic clipping threshold based on gradient history
+
+  # OPTIMAL FIDELITY LOSS COMBINATION
+  losses:
+    - type: l1loss
+      loss_weight: 1.0 # L1 is the primary driver for PSNR (pixel accuracy)
+    - type: mssimloss
+      loss_weight: 0.08 # Small MSSIM weight improves structural similarity (SSIM) without fighting L1 too much
+
+val:
+  val_enabled: true
+  val_freq: 1000 # Frequent validation to track progress
+  save_img: true
+
+  metrics_enabled: true
+  metrics:
+    psnr:
+      type: calculate_psnr
+      crop_border: 4 # Standard crop for SR metrics
+    ssim:
+      type: calculate_ssim
+      crop_border: 4
+
+logger:
+  print_freq: 100
+  save_checkpoint_freq: 10000 # Save full models every 10k iters
+  save_checkpoint_format: safetensors # Modern, safe format
+  use_tb_logger: true

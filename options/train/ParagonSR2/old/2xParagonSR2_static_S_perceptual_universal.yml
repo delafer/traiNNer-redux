@@ -1,0 +1,414 @@
+# yaml-language-server: $schema=https://raw.githubusercontent.com/the-database/traiNNer-redux/refs/heads/master/schemas/redux-config.schema.json
+# -------------------------------------------------------------------------------------------------
+# ParagonSR2-STATIC-S (Universal Perceptual) - Train from Fidelity to Perceptual
+# Universal perceptual training config incorporating all learnings for training from fidelity pretrain
+#
+# UNIVERSAL PERCEPTUAL STRATEGY:
+# This config is designed to train perceptual models from fidelity pretrain, incorporating
+# all our learnings about optimal ffloss enhancement and balanced training approach.
+# Can be used for any ParagonSR2 size (nano, xs, s, m, etc.) after fidelity training.
+#
+# KEY LEARNINGS INCORPORATED:
+# - Optimal ffloss range: 0.20→0.55 (balanced, not extreme)
+# - Gradual ffloss ramp: 80k iterations for stable integration
+# - Maintained perceptual quality: Strong perceptual losses throughout
+# - Conservative approach: Preserves structure while enhancing texture
+# - Extended training: 140k for comprehensive perceptual development
+#
+# USAGE:
+# - For any ParagonSR2 size after fidelity training
+# - Change pretrain path to your fidelity model checkpoint
+# - Adjust model name in experiments folder accordingly
+#
+# Author: Philip Hofmann
+# Based on learnings from microtexture fix and balanced approach development
+# -------------------------------------------------------------------------------------------------
+
+name: 2xParagonSR2_S_perceptual_universal
+scale: 2
+
+# -------------------------------------------------------------------------------------------------
+# PERFORMANCE OPTIMIZATION FLAGS
+# -------------------------------------------------------------------------------------------------
+use_amp: true                          # Enable Automatic Mixed Precision for faster training
+amp_bf16: true                        # Use BF16 for better numerical stability on Ampere+ GPUs
+use_channels_last: true               # Optimize memory layout for better performance
+fast_matmul: true                     # Trade precision for speed in matrix operations
+num_gpu: auto                        # Automatically detect and use available GPUs
+
+# -------------------------------------------------------------------------------------------------
+# DATASET CONFIGURATION
+# -------------------------------------------------------------------------------------------------
+datasets:
+  train:
+    name: Train_Dataset
+    type: pairedimagedataset
+    dataroot_gt: /home/phips/Documents/dataset/cc0/hr
+    dataroot_lq: /home/phips/Documents/dataset/cc0/lr_x2
+    lq_size: 128                      # Input patch size - balanced for memory vs. context
+    use_hflip: true                   # Horizontal flips for data augmentation
+    use_rot: true                     # Rotations for better spatial invariance
+    num_worker_per_gpu: 8             # Parallel data loading
+    batch_size_per_gpu: 8             # Batch size per GPU - tuned for 8GB VRAM
+    accum_iter: 1                     # Gradient accumulation steps
+
+  val:
+    name: Val_Dataset
+    type: pairedimagedataset
+    dataroot_gt: /home/phips/Documents/dataset/cc0/val_hr
+    dataroot_lq: /home/phips/Documents/dataset/cc0/val_lr_x2
+
+# -------------------------------------------------------------------------------------------------
+# NETWORK ARCHITECTURE
+# -------------------------------------------------------------------------------------------------
+network_g:
+  type: paragonsr2_static_s          # S-sized static ParagonSR2 - can be adapted for any size
+
+network_d:
+  type: munet                        # MUNet discriminator for R3GAN
+
+# -------------------------------------------------------------------------------------------------
+# PRETRAINING & RESUME CONFIGURATION
+# -------------------------------------------------------------------------------------------------
+path:
+  pretrain_network_g: experiments/2xParagonSR2_static_S_fidelity/models/net_g_ema_340000.safetensors # CHANGE THIS PATH to your fidelity model
+  strict_load_g: true                # Load exact weights from fidelity model
+  resume_state: ~                    # Fresh training from fidelity pretrain
+
+# -------------------------------------------------------------------------------------------------
+# TRAINING OPTIMIZATION SETTINGS
+# -------------------------------------------------------------------------------------------------
+train:
+  ema_decay: 0.995                   # Exponential Moving Average decay for stable training
+  ema_power: 0.75                   # EMA power for momentum calculation
+  grad_clip: true                   # Enable gradient clipping for stability
+
+  # Generator optimizer configuration
+  optim_g:
+    type: AdamW                      # AdamW for better weight decay handling
+    lr: !!float 1.0e-4              # Standard LR for training from fidelity pretrain
+    weight_decay: !!float 1.0e-4     # L2 regularization
+    betas: [0.9, 0.99]              # AdamW beta parameters
+
+  # Discriminator optimizer configuration
+  optim_d:
+    type: AdamW
+    lr: !!float 1.5e-4              # Standard discriminator LR
+    weight_decay: !!float 0.0       # No weight decay on discriminator
+    betas: [0.9, 0.99]
+
+  # Learning rate scheduler
+  scheduler:
+    type: MultiStepLR
+    milestones: [70000, 120000]      # Adjusted for 150k training
+    gamma: 0.5                       # Reduce LR by 50% at each milestone
+
+  total_iter: 150000                 # Total training iterations (150k) - comprehensive training
+  warmup_iter: 2000                  # Extended warmup for stability
+
+  # -------------------------------------------------------------------------------------------------
+  # UNIVERSAL PERCEPTUAL LOSS SCHEDULING: 5-PHASE COMPREHENSIVE DEVELOPMENT
+  # -------------------------------------------------------------------------------------------------
+  #
+  # UNIVERSAL PHILOSOPHY:
+  # Train perceptual model from fidelity foundation using optimal loss scheduling.
+  # Incorporates all learnings: balanced ffloss, preserved perceptual quality,
+  # gradual enhancement, and comprehensive training duration.
+  #
+  # EXPECTED VISUAL PROGRESSION:
+  # Phase 1 (0-20k):   Structural foundation with gradual perceptual introduction
+  # Phase 2 (20k-60k): Full perceptual development with balanced ffloss
+  # Phase 3 (60k-100k): Perceptual enhancement with microtexture focus
+  # Phase 4 (100k-130k): Fine-tuning balance between quality and texture
+  # Phase 5 (130k+):    Final polish with maintained microtexture enhancement
+  #
+  # OPTIMAL FFLOSS INTEGRATION:
+  # - Start with 0.15 weight after warmup (conservative start)
+  # - Target 0.55 weight by 80k (balanced enhancement)
+  # - Gradual 80k ramp for stable perceptual integration
+  # - Expected range: 3e-4 to 2e-3 (proper microtexture learning)
+  # -------------------------------------------------------------------------------------------------
+  losses:
+
+    # ===============================================================================================
+    # 1) STRUCTURAL PIXEL LOSS - FOUNDATION TO PERCEPTUAL TRANSITION
+    # ===============================================================================================
+    #
+    # PURPOSE: Provide structural foundation then gradually transition to perceptual focus
+    # RATIONALE: High initial pixel loss for structure, then gradual reduction for perceptual dominance
+    #
+    # SCHEDULE DECISION:
+    # - loss_weight: 1.0 → Start with full structural foundation from fidelity pretrain
+    # - start_iter: 0 → Active from beginning for structural stability
+    # - target_iter: 60000 → Gradual reduction over 60k iterations
+    # - target_weight: 0.6 → Still significant but reduced for perceptual focus
+    # - schedule_type: linear → Smooth transition to avoid training instability
+    #
+    # WHY THIS MATTERS: High initial pixel loss ensures structural accuracy from fidelity model,
+    #                  then gradual reduction allows perceptual losses to enhance quality
+    #                  without losing structural integrity.
+    # ===============================================================================================
+    - type: charbonnierloss
+      loss_weight: 1.0               # Start with full structural foundation
+      start_iter: 0                  # Active from beginning for stability
+      target_iter: 60000            # Gradual reduction over 60k iterations
+      target_weight: 0.6             # Significant but reduced for perceptual focus
+      schedule_type: linear          # Smooth transition to avoid instability
+
+    # ===============================================================================================
+    # 2) CONVNEXT PERCEPTUAL LOSS - CORE PERCEPTUAL DEVELOPMENT (PHASE 1 → 2)
+    # ===============================================================================================
+    #
+    # PURPOSE: Primary perceptual learning for texture-structure enhancement
+    # RATIONALE: Gradual ramp allows stable development from fidelity foundation
+    #
+    # SCHEDULE DECISION:
+    # - loss_weight: 0.10 → Conservative start for stable development
+    # - start_iter: 5000 → Begin after warmup for stability
+    # - target_iter: 60000 → Strong ramp over 55k iterations
+    # - target_weight: 0.30 → Strong but balanced perceptual enhancement
+    # - layers: [1, 2] → Optimal layer selection for perceptual balance
+    #
+    # WHY THIS MATTERS: Gradual perceptual ramp ensures stable development from
+    #                  fidelity foundation. Strong final weight provides excellent
+    #                  perceptual quality without overwhelming structural accuracy.
+    # ===============================================================================================
+    - type: convnextperceptualloss
+      loss_weight: 0.10              # Conservative start for stable development
+      layers: [1, 2]                 # Optimal perceptual layers
+      layer_weights: [1.0, 0.7]      # Balanced layer weighting
+      eps: 1.0e-6                   # Numerical stability
+      start_iter: 5000               # Begin after warmup for stability
+      target_iter: 60000            # Strong ramp over 55k iterations
+      target_weight: 0.30           # Strong but balanced perceptual enhancement
+
+    # ===============================================================================================
+    # 3) DISTS LOSS - CONSISTENT PERCEPTUAL FOUNDATION (FULL DURATION)
+    # ===============================================================================================
+    #
+    # PURPOSE: Consistent perceptual enhancement throughout training
+    # RATIONALE: Stable perceptual foundation with standard weight
+    #
+    # SCHEDULE DECISION:
+    # - loss_weight: 0.08 → Standard weight for consistent enhancement
+    # - Active throughout training for stable perceptual quality
+    # - as_loss: true → Direct loss function usage
+    # - load_weights: true → Load pretrained weights
+    # - use_input_norm: true → Normalize inputs
+    #
+    # WHY THIS MATTERS: Consistent perceptual enhancement provides stable foundation
+    #                  throughout all training phases while complementing other losses.
+    # ===============================================================================================
+    - type: distsloss
+      loss_weight: 0.08              # Standard weight for consistent enhancement
+      as_loss: true                  # Direct loss function
+      load_weights: true            # Load pretrained weights
+      use_input_norm: true          # Normalize inputs
+
+    # ===============================================================================================
+    # 4) OPTIMAL FREQUENCY LOSS - BALANCED MICROTEXTURE ENHANCEMENT (PHASE 2 → 3)
+    # ===============================================================================================
+    #
+    # PURPOSE: Enhance microtexture to eliminate grid patterns with balanced approach
+    # RATIONALE: OPTIMAL ffloss enhancement based on our learnings - not too extreme, not too weak
+    #
+    # SCHEDULE DECISION:
+    # - loss_weight: 0.15 → Conservative start after perceptual foundation
+    # - start_iter: 20000 → Begin when perceptual foundation is established
+    # - target_iter: 100000 → Gradual ramp over 80k iterations
+    # - target_weight: 0.55 → OPTIMAL target based on balanced approach learnings
+    # - schedule_type: linear → Gradual enhancement for stable integration
+    #
+    # EXPECTED FFLOSS VALUES:
+    # - With 0.15 initial weight, expect ffloss around 3e-4 to 8e-4
+    # - With 0.55 target weight, expect ffloss around 1e-3 to 2e-3
+    # - These values should provide proper microtexture learning without over-enhancement
+    #
+    # WHY THIS MATTERS: This is the OPTIMAL approach based on our balanced learnings.
+    #                  The 0.15→0.55 ramp with 80k duration should provide sufficient
+    #                  microtexture enhancement to eliminate grid patterns while
+    #                  maintaining perceptual quality and training stability.
+    #                  NOT extreme enough to overwrite good features, but strong
+    #                  enough to fix the ffloss deficiency.
+    # ===============================================================================================
+    - type: ffloss
+      loss_weight: 0.15              # Conservative start after perceptual foundation
+      start_iter: 20000              # Begin when perceptual foundation established
+      target_iter: 100000           # Gradual ramp over 80k iterations
+      target_weight: 0.55           # OPTIMAL target based on balanced learnings
+      schedule_type: linear         # Gradual enhancement for stable integration
+
+    # ===============================================================================================
+    # 5) GRADIENT VARIANCE LOSS - TEXTURE REGULARITY (EARLY ACTIVATION)
+    # ===============================================================================================
+    #
+    # PURPOSE: Prevent over-sharpening while allowing perceptual enhancement
+    # RATIONALE: Early activation ensures texture regularity from start
+    #
+    # SCHEDULE DECISION:
+    # - loss_weight: 0.03 → Standard weight for texture control
+    # - start_iter: 1000 → Early activation for texture stability
+    # - patch_size: 16 → Maintain optimal patch size
+    # - criterion: charbonnier → Robust texture analysis
+    #
+    # WHY THIS MATTERS: Early texture regularization prevents artifacts during
+    #                  the perceptual enhancement phases while allowing proper
+    #                  microtexture development.
+    # ===============================================================================================
+    - type: GradientVarianceLoss
+      loss_weight: 0.03              # Standard weight for texture control
+      start_iter: 1000               # Early activation for texture stability
+      patch_size: 16                # Optimal patch size for detail analysis
+      criterion: charbonnier        # Robust texture analysis
+
+    # ===============================================================================================
+    # 6) LDL LOSS - ARTIFACT SUPPRESSION (PHASE 3 → 4 TRANSITION)
+    # ===============================================================================================
+    #
+    # PURPOSE: Suppress artifacts during intense perceptual training
+    # RATIONALE: Standard weight and timing for artifact prevention
+    #
+    # SCHEDULE DECISION:
+    # - loss_weight: 0.5 → Standard weight for artifact suppression
+    # - disable_after: 100000 → Extended duration for comprehensive training
+    #
+    # WHY THIS MATTERS: Extended LDL coverage ensures artifact suppression throughout
+    #                  the comprehensive perceptual training phases.
+    # ===============================================================================================
+    - type: ldlloss
+      loss_weight: 0.5               # Standard weight for artifact suppression
+      disable_after: 100000         # Extended duration for comprehensive training
+
+    # ===============================================================================================
+    # 7) R3GAN LOSS - ADVERSARIAL ENHANCEMENT (PHASE 2 ACTIVATION)
+    # ===============================================================================================
+    #
+    # PURPOSE: Generate realistic textures with adversarial training
+    # RATIONALE: Standard timing and weight for balanced adversarial enhancement
+    #
+    # SCHEDULE DECISION:
+    # - loss_weight: 0.00 → Base weight
+    # - start_iter: 40000 → Standard timing after perceptual foundation
+    # - target_weight: 0.08 → Standard adversarial enhancement
+    # - gan_type: r3gan → Maintain R3GAN for stability
+    # - r1_weight: 2.0 → Strong regularization
+    # - r2_weight: 2.0 → Balanced training
+    #
+    # WHY THIS MATTERS: Standard adversarial timing and weight for balanced
+    #                  enhancement without interfering with perceptual development.
+    # ===============================================================================================
+    - type: ganloss
+      gan_type: r3gan
+      loss_weight: 0.00
+      start_iter: 40000             # Standard timing after perceptual foundation
+      target_weight: 0.08           # Standard adversarial enhancement
+      r1_weight: 2.0               # Strong regularization
+      r2_weight: 2.0               # Balanced training
+
+    # ===============================================================================================
+    # 8) CONTRASTIVE LOSS - SEMANTIC ENHANCEMENT (LATE ACTIVATION)
+    # ===============================================================================================
+    #
+    # PURPOSE: Final semantic enhancement for visual appeal
+    # RATIONALE: Late activation after main perceptual development
+    #
+    # SCHEDULE DECISION:
+    # - loss_weight: 0.00 → Base weight
+    # - start_iter: 80000 → Late activation after main training phases
+    # - target_weight: 0.05 → Standard weight for subtle enhancement
+    # - temperature: 0.1 → Sharp contrastive features
+    #
+    # WHY THIS MATTERS: Late contrastive activation provides final polish to
+    #                  visual appeal without interfering with core perceptual training.
+    # ===============================================================================================
+    - type: ContrastiveLoss
+      loss_weight: 0.00
+      temperature: 0.1              # Sharp contrastive features
+      start_iter: 80000             # Late activation after main training
+      target_weight: 0.05           # Standard weight for subtle enhancement
+
+# -------------------------------------------------------------------------------------------------
+# VALIDATION CONFIGURATION
+# -------------------------------------------------------------------------------------------------
+val:
+  val_enabled: true                 # Enable validation during training
+  val_freq: 5000                   # Validate every 5k iterations
+  save_img: true                   # Save validation images for progress monitoring
+  metrics_enabled: true            # Enable automatic metric calculation
+
+  # Comprehensive metric suite for quality assessment
+  metrics:
+    psnr:                          # Peak Signal-to-Noise Ratio (fidelity metric)
+      type: calculate_psnr
+      crop_border: 2               # Standard crop for fair comparison
+
+    ssim:                          # Structural Similarity Index (structural quality)
+      type: calculate_ssim
+      crop_border: 2
+
+    lpips:                         # Learned Perceptual Image Patch Similarity (perceptual quality)
+      type: calculate_lpips
+      better: lower               # Lower LPIPS = better perceptual quality
+
+    dists:                         # Deep Image Structure and Texture Similarity
+      type: calculate_dists
+      better: lower
+
+    topiq:                         # Task-Oriented Perceptual Image Quality
+      type: calculate_topiq
+
+# -------------------------------------------------------------------------------------------------
+# LOGGING CONFIGURATION
+# -------------------------------------------------------------------------------------------------
+logger:
+  print_freq: 100                  # Print training progress every 100 iterations
+  save_checkpoint_freq: 5000       # Save model checkpoints every 5k iterations
+  save_checkpoint_format: safetensors # Use SafeTensors format for better compatibility
+  use_tb_logger: true              # Enable TensorBoard logging for detailed monitoring
+
+# -------------------------------------------------------------------------------------------------
+# UNIVERSAL PERCEPTUAL TRAINING EXPECTATIONS
+# -------------------------------------------------------------------------------------------------
+#
+# UNIVERSAL APPLICATION:
+# This config can be used for any ParagonSR2 size after fidelity training:
+# - nano: Change model type and pretrain path accordingly
+# - xs: Change model type and pretrain path accordingly
+# - s: This config (no changes needed)
+# - m: Change model type and pretrain path accordingly
+# - l: Change model type and pretrain path accordingly
+#
+# EXPECTED VISUAL PROGRESSION:
+# - 20k iterations: Beginning perceptual enhancement visible
+# - 60k iterations: Significant perceptual quality improvement
+# - 100k iterations: Full microtexture enhancement with eliminated grid patterns
+# - 130k iterations: Mature perceptual model with superior quality
+#
+# KEY MONITORING METRICS:
+# - ffloss contribution: Should reach optimal range (1e-3 to 2e-3)
+# - LPIPS: Should show significant improvement (perceptual enhancement)
+# - Visual inspection: Grid patterns should disappear, textures should be crisp
+# - PSNR: May decrease slightly but acceptable for perceptual gain
+#
+# CRITICAL SUCCESS INDICATORS:
+# - ffloss values: Should reach 1e-3 to 2e-3 range (proper microtexture learning)
+# - Texture detail: Fine patterns should be crisp without pixelation
+# - Grid artifacts: Should be eliminated on detailed surfaces
+# - Perceptual quality: Should be significantly enhanced vs fidelity model
+#
+# QUALITY CHECKPOINTS:
+# - 30k: Verify perceptual development without artifacts
+# - 60k: Check microtexture enhancement with maintained quality
+# - 100k: Confirm grid elimination with superior perceptual quality
+# - 130k: Final universal perceptual model assessment
+#
+# CONFIGURATION ADAPTATION:
+# For different model sizes:
+# 1. Change network_g type to match desired size (e.g., paragonsr2_static_nano)
+# 2. Update pretrain_network_g path to corresponding fidelity model
+# 3. Adjust batch size if needed for VRAM constraints
+# 4. Keep all loss scheduling the same (optimal universal values)
+#
+# This universal configuration incorporates all learnings to provide optimal
+# perceptual training from fidelity foundation for any ParagonSR2 size.
+# -------------------------------------------------------------------------------------------------

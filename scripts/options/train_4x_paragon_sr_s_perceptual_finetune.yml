@@ -1,0 +1,397 @@
+# yaml-language-server: $schema=https://raw.githubusercontent.com/the-database/traiNNer-redux/refs/heads/master/schemas/redux-config.schema.json
+#########################################################################################
+# ParagonSR_S 4x Perceptual Fine-Tuning Configuration
+# Realistic Workflow Distribution + Identity Learning
+# Enhanced Stability Version
+# Author: Philip Hofmann
+#########################################################################################
+
+name: 4x_paragon_sr_s_perceptual_finetune
+scale: 4
+use_amp: true
+amp_bf16: true  # Enable BF16 for better stability (your PSNR dip experience)
+use_channels_last: false
+fast_matmul: false
+num_gpu: auto
+# manual_seed: 1024
+
+########################################################################################################################
+# Dataset Settings for Perceptual Fine-Tuning
+########################################################################################################################
+datasets:
+  train:
+    name: ParagonSR_S 4x Perceptual Fine-Tuning
+    type: pairedimagedataset
+    dataroot_gt: [
+      datasets/train/dataset1/hr,
+      datasets/train/dataset1/hr2,
+      datasets/train/dataset1/hr3
+    ]
+    dataroot_lq: [
+      datasets/train/dataset1/lr,
+      datasets/train/dataset1/lr2,
+      datasets/train/dataset1/lr3
+    ]
+    lq_size: 64  # For 4x scaling: 256x256 patches from 64x64 LQ images
+    use_hflip: true
+    use_rot: true
+
+    num_worker_per_gpu: 12  # Higher workers for better data loading during fine-tuning
+    batch_size_per_gpu: 4   # Small batch size for fine-tuning (prevents overfitting)
+    accum_iter: 0           # Disabled for speed (as requested) - training will be slower but more stable
+
+  val:
+    name: ParagonSR_S 4x Validation
+    type: pairedimagedataset
+    dataroot_gt: [
+      datasets/val/dataset1/hr,
+      datasets/val/dataset1/hr2
+    ]
+    dataroot_lq: [
+      datasets/val/dataset1/lr,
+      datasets/val/dataset1/lr2
+    ]
+
+#####################################################################
+# Network Settings (ParagonSR_S 4x)
+#####################################################################
+network_g:
+  type: paragonsr_s  # ParagonSR_S variant
+
+network_d:
+  type: dunet  # Lightweight discriminator for perceptual fine-tuning
+
+#########################################################################################
+# Path Options
+#########################################################################################
+path:
+  pretrain_network_g: experiments/pretrained_models/paragon_sr_s_4x.pth
+  param_key_g: ~
+  strict_load_g: true
+  resume_state: ~
+
+###########################################################################################
+# Training Settings for Perceptual Fine-Tuning - STABILITY ENHANCED
+###########################################################################################
+train:
+  ema_decay: 0.9999  # Very high EMA decay for stable fine-tuning
+  grad_clip: true     # Enable gradient clipping (essential for stability)
+
+  optim_g:
+    type: AdamW
+    lr: 5e-6          # Reduced LR for stability
+    weight_decay: 0.02  # Slight weight decay for regularization
+    betas: [0.85, 0.98]    # More aggressive beta1 for faster adaptation
+  optim_d:
+    type: AdamW
+    lr: 5e-6          # Needs to keep up
+    weight_decay: 0
+    betas: [0.85, 0.98]  # Match generator for balance
+
+  scheduler:
+    type: MultiStepLR
+    milestones: [2000, 4000, 6000, 8000] # Faster decay for fine-tuning
+    gamma: 0.5
+
+  total_iter: 12000     # Extended iterations for stable fine-tuning
+  warmup_iter: 2000     # Extended warmup for stability
+
+  #######################################################################
+  # Enhanced Losses for Stability and Realistic Photo Quality
+  #######################################################################
+  losses:
+    # === FOUNDATIONAL LOSSES ===
+
+    # Pixel/Content preservation (reduced from typical weights)
+    - type: l1loss
+      loss_weight: 0.3   # Increased for better content preservation during GAN training
+      reduction: mean
+
+    # SSIM-based structural loss (good for perceptual quality)
+    - type: mssimloss
+      loss_weight: 0.25
+
+    # === PERCEPTUAL LOSSES (Main focus for fine-tuning) ===
+
+    # Standard perceptual loss (VGG-based)
+    - type: perceptualloss
+      criterion: charbonnier
+      loss_weight: 1.0
+
+    # Enhanced color perception
+    - type: hsluvloss
+      criterion: charbonnier
+      loss_weight: 0.8    # Moderate weight for good color reproduction
+
+    # Structural similarity
+    - type: cosimloss
+      loss_weight: 0.6
+
+    # === ADVANCED PERCEPTUAL LOSSES ===
+
+    # Contextual loss for better texture preservation
+    - type: contextualloss
+      loss_weight: 0.2
+
+    - type: adistsloss      # Better than standard DISTS
+      loss_weight: 0.15
+
+    # Focal Frequency Loss - Great for sharp details and edges
+    - type: ffloss
+      loss_weight: 0.03
+
+    - type: gradientvarianceloss
+      loss_weight: 0.05
+
+    # === GAN LOSS (Optimized for stability + effectiveness) ===
+
+    - type: ganloss
+      gan_type: multiscaler3gan
+      loss_weight: 0.025    #
+      r1_weight: 3.0       # R1 penalty
+      r2_weight: 3.0       # R2 penalty
+
+    # === ANTI-PATTERN LOSS (Critical for PixelShuffle) ===
+    - type: checkerboardloss
+      loss_weight: 0.1  # Strong weight to prevent checkerboard patterns
+
+  #######################################################################
+  # REALISTIC WORKFLOW DISTRIBUTION CONFIGURATION
+  #######################################################################
+
+  # Enable comprehensive sequence system
+  high_order_degradation: true
+
+  # === IDENTITY LEARNING: 10% Clean Pass-Through ===
+  p_clean: 0.05  # 5% chance to pass clean images through (identity learning)
+
+  # === REALISTIC WORKFLOW SEQUENCES ===
+  enable_sequences: true
+  sequence_probability: 0.95  # 95% chance to use realistic workflows
+
+  predefined_sequences:
+
+    # ===== CLEAN WORKFLOWS (No degradation - for model to learn identity) =====
+    # Already handled by p_clean: 0.1 above
+
+    # ===== PROFESSIONAL CAMERA WORKFLOWS =====
+
+    # 1. Pure Professional Camera (minimal processing)
+    professional_camera:
+      enabled: true
+      probability: 0.15  # 15% chance - high quality capture
+      description: "Professional camera capture with minimal processing"
+      sequence_type: "combined"
+      steps:
+        - Real-ESRGAN:
+            - gaussian_noise: {noise_range: [0.5, 2], prob: 0.4}
+            - blur: {kernel: "dynamic", prob: 0.3}
+            - jpeg_compression: {range: [90, 98], prob: 0.8}
+        - ParagonSR:
+            - oversharpening: {strength: [1.02, 1.1], prob: 0.4}  # Minimal sharpening
+            - sensor_noise: {std: [0.005, 0.02], prob: 0.2}       # Professional sensor
+            - color_temp_shift: {range: [-0.05, 0.05], prob: 0.3}
+
+    # 2. Professional Camera → Internet Upload
+    pro_to_internet:
+      enabled: true
+      probability: 0.15  # 15% chance
+      description: "Professional camera → editing → internet sharing"
+      sequence_type: "combined"
+      steps:
+        - Real-ESRGAN:
+            - gaussian_noise: {noise_range: [0.5, 2], prob: 0.4}
+            - blur: {kernel: "dynamic", prob: 0.3}
+            - jpeg_compression: {range: [85, 95], prob: 0.8}
+        - ParagonSR:
+            - oversharpening: {strength: [1.05, 1.3], prob: 0.6}  # User sharpening
+            - color_temp_shift: {range: [-0.08, 0.08], prob: 0.5}
+            - exposure_error: {factor: [0.9, 1.2], prob: 0.3}
+            - webp_compression: {range: [75, 90], prob: 0.8}
+            - lens_distortion: {strength: [-0.02, 0.02], prob: 0.3}  # Platform processing
+
+    # 3. Professional Camera → Social Media
+    pro_to_social:
+      enabled: true
+      probability: 0.15  # 15% chance
+      description: "Professional camera → processing → social media"
+      sequence_type: "combined"
+      steps:
+        - Real-ESRGAN:
+            - gaussian_noise: {noise_range: [0.5, 2], prob: 0.4}
+            - blur: {kernel: "dynamic", prob: 0.3}
+            - jpeg_compression: {range: [85, 95], prob: 0.8}
+            - resize: {scale: [0.8, 1.1], mode: "bilinear", prob: 0.5}  # Platform resize
+        - ParagonSR:
+            - oversharpening: {strength: [1.05, 1.3], prob: 0.7}  # User editing
+            - color_temp_shift: {range: [-0.1, 0.1], prob: 0.6}
+            - exposure_error: {factor: [0.8, 1.3], prob: 0.4}
+            - webp_compression: {range: [60, 85], prob: 0.9}  # Social compression
+            - oversharpening: {strength: [1.1, 1.4], prob: 0.6}  # Platform sharpen
+            - aliasing: {scale: [0.7, 0.9], prob: 0.4}
+
+    # ===== PHONE CAMERA WORKFLOWS =====
+
+    # 4. Pure Phone Camera (heavy processing)
+    phone_camera:
+      enabled: true
+      probability: 0.15
+      description: "Phone camera with typical processing"
+      sequence_type: "combined"
+      steps:
+        - Real-ESRGAN:
+            - gaussian_noise: {noise_range: [1, 5], prob: 0.8}
+            - resize: {scale: [0.9, 1.1], mode: "bilinear", prob: 0.6}
+            - jpeg_compression: {range: [70, 90], prob: 0.7}
+        - ParagonSR:
+            - sensor_noise: {std: [0.02, 0.08], prob: 0.9}        # Phone sensor noise
+            - rolling_shutter: {strength: [0.01, 0.06], prob: 0.6}
+            - motion_blur: {kernel: [3, 7], prob: 0.3}             # Hand shake
+            - oversharpening: {strength: [1.2, 1.6], prob: 1.0}    # Heavy phone sharpening
+            - lens_distortion: {strength: [0.08, 0.25], prob: 0.7}
+            - chromatic_aberration: {prob: 0.6}
+            - heif_compression: {range: [75, 90], prob: 0.6}       # HEIF in phones
+
+    # 5. Phone Camera → Internet Upload
+    phone_to_internet:
+      enabled: true
+      probability: 0.15
+      description: "Phone camera → processing → internet sharing"
+      sequence_type: "combined"
+      steps:
+        - Real-ESRGAN:
+            - gaussian_noise: {noise_range: [1, 5], prob: 0.8}
+            - resize: {scale: [0.8, 1.2], mode: "bilinear", prob: 0.7}
+            - jpeg_compression: {range: [70, 85], prob: 0.6}
+        - ParagonSR:
+            - sensor_noise: {std: [0.02, 0.08], prob: 0.9}
+            - rolling_shutter: {strength: [0.01, 0.06], prob: 0.6}
+            - motion_blur: {kernel: [3, 7], prob: 0.3}
+            - oversharpening: {strength: [1.2, 1.6], prob: 1.0}    # Phone processing
+            - lens_distortion: {strength: [0.08, 0.25], prob: 0.7}
+            - chromatic_aberration: {prob: 0.6}
+            - exposure_error: {factor: [0.9, 1.4], prob: 0.4}      # User adjustments
+            - color_temp_shift: {range: [-0.15, 0.15], prob: 0.5}
+            - webp_compression: {range: [70, 85], prob: 0.8}
+
+    # 6. Phone Camera → Social Media (most aggressive)
+    phone_to_social:
+      enabled: true
+      probability: 0.25  # 25% chance - most common in reality
+      description: "Phone camera → processing → social media → multiple re-uploads"
+      sequence_type: "combined"
+      repeat: 1
+      repeat_probability: 0.4  # Multiple re-uploads common
+      steps:
+        - Real-ESRGAN:
+            - gaussian_noise: {noise_range: [1, 5], prob: 0.9}
+            - resize: {scale: [0.6, 1.0], mode: "bilinear", prob: 0.8}  # Aggressive resize
+            - jpeg_compression: {range: [60, 80], prob: 0.7}
+        - ParagonSR:
+            - sensor_noise: {std: [0.02, 0.08], prob: 1.0}            # Phone sensor
+            - rolling_shutter: {strength: [0.01, 0.08], prob: 0.7}
+            - motion_blur: {kernel: [3, 7], prob: 0.4}
+            - oversharpening: {strength: [1.2, 1.6], prob: 1.0}       # Phone processing
+            - lens_distortion: {strength: [0.1, 0.3], prob: 0.8}
+            - chromatic_aberration: {prob: 0.7}
+            - exposure_error: {factor: [0.8, 1.5], prob: 0.5}         # User filters
+            - color_temp_shift: {range: [-0.2, 0.2], prob: 0.7}
+            - webp_compression: {range: [50, 75], prob: 1.0}          # Heavy social compression
+            - oversharpening: {strength: [1.1, 1.5], prob: 0.8}       # Platform sharpening
+            - aliasing: {scale: [0.6, 0.8], prob: 0.5}
+            # Re-upload cycle
+            - jpeg_compression: {range: [60, 80], prob: 0.6}
+            - oversharpening: {strength: [1.2, 1.8], prob: 0.7}       # User re-sharpening
+
+  #######################################################################
+  # FALLBACK (rare individual degradations - only 10% of cases)
+  #######################################################################
+
+  # Real-ESRGAN Base Degradations (minimal usage during fine-tuning)
+  blur_prob: 0.02
+  resize_prob: [0.3, 0.5, 0.2]
+  resize_mode_list: ["bilinear", "bicubic", "lanczos"]
+  resize_mode_prob: [0.6, 0.3, 0.1]  # Favor bilinear for speed
+  resize_range: [0.8, 1.2]
+  gaussian_noise_prob: 0.02
+  noise_range: [0, 10]
+  gray_noise_prob: 0
+  jpeg_prob: 0.03
+  jpeg_range: [75, 95]
+
+  blur_prob2: 0.02
+  resize_prob2: [0.4, 0.4, 0.2]
+  resize_mode_list2: ["bilinear", "bicubic", "lanczos"]
+  resize_mode_prob2: [0.6, 0.3, 0.1]
+  resize_range2: [0.9, 1.1]
+  gaussian_noise_prob2: 0.01
+  noise_range2: [0, 5]
+  gray_noise_prob2: 0
+  jpeg_prob2: 0.02
+  jpeg_range2: [80, 95]
+
+  resize_mode_list3: ["bilinear", "bicubic", "lanczos"]
+  resize_mode_prob3: [0.6, 0.3, 0.1]
+
+  # ParagonSR Extended Degradations (minimal fallback usage)
+  webp_prob: 0.01
+  webp_range: [80, 95]
+  avif_prob: 0.005
+  avif_range: [80, 95]
+  heif_prob: 0.005
+  heif_range: [80, 95]
+  oversharpen_prob: 0.01
+  oversharpen_strength: [1.0, 1.3]
+  chromatic_aberration_prob: 0.005
+  demosaic_prob: 0.005
+  aliasing_prob: 0.01
+  aliasing_scale_range: [0.8, 0.95]
+  motion_blur_prob: 0.005
+  motion_blur_kernel_size: [3, 7]
+  motion_blur_angle_range: [0, 360]
+  lens_distort_prob: 0.005
+  lens_distort_strength_range: [-0.1, 0.1]
+  exposure_prob: 0.005
+  exposure_factor_range: [0.8, 1.2]
+  color_temp_prob: 0.005
+  color_temp_shift_range: [-0.1, 0.1]
+  sensor_noise_prob: 0.005
+  sensor_noise_std_range: [0.01, 0.05]
+  rolling_shutter_prob: 0.003
+  rolling_shutter_strength_range: [-0.05, 0.05]
+
+  #######################################################################
+  # Mix of Augmentations (MoA) - Disabled for fine-tuning
+  #######################################################################
+  use_moa: false  # Disable for fine-tuning to maintain consistency
+
+##############################################################################################
+# Validation (more frequent during fine-tuning)
+##############################################################################################
+val:
+  val_enabled: true  # Enable validation during fine-tuning
+  val_freq: 500      # More frequent validation
+  save_img: true
+  tile_size: 0
+  tile_overlap: 8
+  metrics_enabled: true
+  metrics:
+    topiq:
+      type: calculate_topiq
+    psnr:
+      type: calculate_psnr
+      crop_border: 4
+      test_y_channel: false
+    ssim:
+      type: calculate_ssim
+      crop_border: 4
+      test_y_channel: false
+
+##############################################################################################
+# Logging (more frequent during fine-tuning)
+##############################################################################################
+logger:
+  print_freq: 50    # More frequent logging
+  save_checkpoint_freq: 1000
+  save_checkpoint_format: safetensors
+  use_tb_logger: true

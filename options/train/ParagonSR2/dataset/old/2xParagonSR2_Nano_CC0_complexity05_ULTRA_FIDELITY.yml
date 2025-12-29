@@ -1,0 +1,140 @@
+#########################################################################################
+# ParagonSR2 Nano Fidelity Config
+# Optimized for highest PSNR scores with intelligent training automations
+# Enhanced: Dynamic loss scheduling + Auto-calibration + Training automations + L1+MS-SSIM
+#########################################################################################
+name: 2xParagonSR2_Nano_fidelity
+scale: 2
+
+use_amp: true
+amp_bf16: true
+use_channels_last: true
+fast_matmul: false
+num_gpu: auto
+#manual_seed: 1024
+
+datasets:
+  train:
+    name: CC0_147k_Train
+    type: pairedimagedataset
+    dataroot_gt: /home/phips/Documents/dataset/cc0/filtered_versions/cc0_c5_hr
+    dataroot_lq: /home/phips/Documents/dataset/cc0/filtered_versions/cc0_c5_lr_x2
+    lq_size: 128
+    use_hflip: true
+    use_rot: true
+    num_worker_per_gpu: 8
+    batch_size_per_gpu: 32  # Increased for efficiency on high-quality dataset
+    accum_iter: 1
+
+  val:
+    name: CC0_147k_Val
+    type: pairedimagedataset
+    dataroot_gt: /home/phips/Documents/dataset/cc0/val_hr
+    dataroot_lq: /home/phips/Documents/dataset/cc0/val_lr_x2_bicubic_aa
+
+network_g:
+  type: paragonsr2_nano
+
+path:
+  pretrain_network_g: ~
+  strict_load_g: true
+  resume_state: ~
+
+train:
+  ema_decay: 0.999
+  ema_power: 0.75
+  grad_clip: true
+
+  optim_g:
+    type: AdamW
+    lr: !!float 2e-4  # Higher LR for faster convergence on high-quality dataset
+    weight_decay: !!float 1e-4
+    betas: [0.9, 0.99]
+
+  # Longer training for maximum convergence on high-quality dataset
+  scheduler:
+    type: MultiStepLR
+    milestones: [40000, 50000, 55000]  # Extended milestones for 60k training
+    gamma: 0.5
+
+  total_iter: 60000  # Extended training for highest PSNR potential
+  warmup_iter: 1000  # Longer warmup for stability
+
+  # DYNAMIC LOSS SCHEDULING WITH AUTO-CALIBRATION
+  # Auto-calibration analyzes dataset complexity to set optimal starting weights
+  dynamic_loss_scheduling:
+    enabled: true                    # Enable intelligent loss adaptation
+    # momentum: 0.9                    # Smooth adaptation (0.0-1.0)
+    # adaptation_rate: 0.01            # Adaptive rate per iteration
+    # min_weight: 1e-6                 # Minimum possible weight
+    # max_weight: 100.0                # Maximum possible weight
+    # adaptation_threshold: 0.05       # More sensitive adaptation
+    # baseline_iterations: 200         # Establish baseline before adapting
+    # enable_monitoring: true          # Detailed logging
+    # auto_calibrate: true             # Auto-detect dataset complexity for optimal starting weights
+
+  # TRAINING AUTOMATIONS - Intelligent hyperparameter optimization
+  training_automations:
+    intelligent_learning_rate_scheduler:
+      enabled: true                   # Auto-adapt LR based on convergence progress
+      # strategy: "adaptive"            # adaptive, cosine, exponential, plateau
+      # adaptation_frequency: 1000      # Check every 1000 iterations
+      # improvement_threshold: 0.001    # Minimum improvement to continue current LR
+      # patience: 2000                  # LR scheduling patience
+      # max_lr_factor: 2.0              # Maximum LR multiplier
+      # min_lr_factor: 0.1              # Minimum LR multiplier
+
+    dynamic_batch_size_optimizer:
+      enabled: true                   # Auto-optimize batch size for VRAM efficiency
+      # target_vram_usage: 0.85         # Use 85% of available VRAM
+      # safety_margin: 0.05            # Keep 5% free for stability
+      # adjustment_frequency: 500       # Check every 500 iterations
+      # min_batch_size: 1              # Minimum batch size
+      # max_batch_size: 32             # Maximum batch size
+
+    early_stopping:
+      enabled: true                   # Auto-stop when converged
+      # patience: 3000                  # Wait 3000 iterations without improvement
+      # min_improvement: 0.0005         # Minimum PSNR improvement threshold
+      # metric: "val/psnr"              # Monitor validation PSNR
+      # save_best: true                 # Save best performing model
+      # min_iterations: 5000            # Minimum iterations before stopping
+      # warmup_iterations: 1000         # Warmup period
+
+    adaptive_gradient_clipping:
+      enabled: true                   # Fully autonomous - auto-detects architecture and calibrates parameters
+      # initial_threshold: 1.0          # Auto-calibrated based on architecture
+      # min_threshold: 0.1              # Auto-calibrated based on architecture
+      # max_threshold: 10.0             # Auto-calibrated based on architecture
+      # adjustment_factor: 1.2          # Auto-calibrated based on architecture
+      # monitoring_frequency: 50        # Auto-calibrated based on architecture
+      # gradient_history_size: 100      # Auto-calibrated based on architecture
+
+  # OPTIMAL FIDELITY LOSS COMBINATION
+  # L1 for pixel accuracy + MS-SSIM for structural similarity
+  losses:
+    - type: l1loss
+      loss_weight: 1.0                # Primary loss for pixel-accurate reconstruction
+    - type: ssimloss
+      loss_weight: 0.05               # Secondary loss for structural similarity
+                                    # Higher weight helps with perceptual quality
+
+val:
+  val_enabled: true
+  val_freq: 1000                      # More frequent validation for monitoring
+  save_img: true                      # Save validation images for quality inspection
+
+  metrics_enabled: true
+  metrics:
+    psnr:
+      type: calculate_psnr
+      crop_border: 4
+    ssim:
+      type: calculate_ssim
+      crop_border: 4
+
+logger:
+  print_freq: 100
+  save_checkpoint_freq: 10000         # Save more frequently for longer training
+  save_checkpoint_format: safetensors
+  use_tb_logger: true

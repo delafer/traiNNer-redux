@@ -323,6 +323,21 @@ class TrainOptions(StrictStruct):
         ),
     ] = 100
 
+    dynamic_loss_scheduling: Annotated[
+        dict[str, Any] | None,
+        Meta(
+            description="Configuration for dynamic loss scheduling that automatically adjusts loss weights based on current loss values during training. Enable with {'enabled': true} and customize parameters as needed."
+        ),
+    ] = None
+
+    # Training Automations (Phase 1: High-confidence automations)
+    training_automations: Annotated[
+        dict[str, Any] | None,
+        Meta(
+            description="Configuration for intelligent training automations including: IntelligentLearningRateScheduler, DynamicBatchAndPatchSizeOptimizer, AdaptiveGradientClipping, and IntelligentEarlyStopping. Enable with {'enabled': true} and configure individual automations as needed."
+        ),
+    ] = None
+
 
 class ValOptions(StrictStruct):
     val_enabled: Annotated[
@@ -503,6 +518,200 @@ class ReduxOptions(StrictStruct):
             description="The maximum number of OTF images to save when debugging is enabled."
         ),
     ] = 100
+    # Clean Pass-Through
+    p_clean: Annotated[
+        float,
+        Meta(
+            description="Probability of clean pass-through, where the GT image is returned as LQ without any degradations."
+        ),
+    ] = 0
+
+    # Modern Compression Artifacts
+    webp_prob: Annotated[
+        float,
+        Meta(description="Probability of applying WebP compression artifacts."),
+    ] = 0
+    webp_range: Annotated[
+        tuple[float, float],
+        Meta(
+            description="Quality range for WebP compression, in the format [min_quality, max_quality]."
+        ),
+    ] = (75, 95)
+    avif_prob: Annotated[
+        float,
+        Meta(description="Probability of applying AVIF compression artifacts."),
+    ] = 0
+    avif_range: Annotated[
+        tuple[float, float],
+        Meta(
+            description="Quality range for AVIF compression, in the format [min_quality, max_quality]."
+        ),
+    ] = (75, 95)
+
+    # Oversharpening Artifact Simulation
+    oversharpen_prob: Annotated[
+        float,
+        Meta(description="Probability of applying oversharpening artifacts."),
+    ] = 0
+    oversharpen_strength: Annotated[
+        tuple[float, float],
+        Meta(
+            description="Strength range for oversharpening artifacts, in the format [min_strength, max_strength]."
+        ),
+    ] = (1.0, 2.0)
+
+    # Chromatic Aberration Simulation
+    chromatic_aberration_prob: Annotated[
+        float,
+        Meta(description="Probability of applying chromatic aberration artifacts."),
+    ] = 0
+
+    # Demosaicing Artifact Simulation
+    demosaic_prob: Annotated[
+        float,
+        Meta(description="Probability of applying demosaicing artifacts."),
+    ] = 0
+
+    # Aliasing Artifact Simulation
+    aliasing_prob: Annotated[
+        float,
+        Meta(description="Probability of applying aliasing artifacts."),
+    ] = 0
+    aliasing_scale_range: Annotated[
+        tuple[float, float],
+        Meta(
+            description="Scale range for aliasing artifacts, in the format [min_scale, max_scale]."
+        ),
+    ] = (0.6, 0.9)
+
+    # Motion Blur Simulation (Added by Philip Hofmann for ParagonSR)
+    motion_blur_prob: Annotated[
+        float,
+        Meta(description="Probability of applying motion blur artifacts."),
+    ] = 0
+    motion_blur_kernel_size: Annotated[
+        tuple[int, int],
+        Meta(
+            description="Kernel size range for motion blur, in the format [min_size, max_size]."
+        ),
+    ] = (5, 15)
+    motion_blur_angle_range: Annotated[
+        tuple[float, float],
+        Meta(
+            description="Angle range for motion blur in degrees, in the format [min_angle, max_angle]."
+        ),
+    ] = (0, 360)
+
+    # Lens Distortion Simulation (Added by Philip Hofmann for ParagonSR)
+    lens_distort_prob: Annotated[
+        float,
+        Meta(description="Probability of applying lens distortion artifacts."),
+    ] = 0
+    lens_distort_strength_range: Annotated[
+        tuple[float, float],
+        Meta(
+            description="Strength range for lens distortion, in the format [min_strength, max_strength]."
+        ),
+    ] = (-0.3, 0.3)
+
+    # Exposure Error Simulation (Added by Philip Hofmann for ParagonSR)
+    exposure_prob: Annotated[
+        float,
+        Meta(description="Probability of applying exposure errors."),
+    ] = 0
+    exposure_factor_range: Annotated[
+        tuple[float, float],
+        Meta(
+            description="Exposure factor range, in the format [min_factor, max_factor]."
+        ),
+    ] = (0.5, 2.0)
+
+    # Color Temperature Shift Simulation (Added by Philip Hofmann for ParagonSR)
+    color_temp_prob: Annotated[
+        float,
+        Meta(description="Probability of applying color temperature shifts."),
+    ] = 0
+    color_temp_shift_range: Annotated[
+        tuple[float, float],
+        Meta(
+            description="Color temperature shift range (-1 to 1, negative=cooler, positive=warmer)."
+        ),
+    ] = (-0.2, 0.2)
+
+    # Sensor Noise Simulation (Added by Philip Hofmann for ParagonSR)
+    sensor_noise_prob: Annotated[
+        float,
+        Meta(description="Probability of applying sensor noise patterns."),
+    ] = 0
+    sensor_noise_std_range: Annotated[
+        tuple[float, float],
+        Meta(description="Standard deviation range for sensor noise."),
+    ] = (0.01, 0.1)
+
+    # Rolling Shutter Simulation (Added by Philip Hofmann for ParagonSR)
+    rolling_shutter_prob: Annotated[
+        float,
+        Meta(description="Probability of applying rolling shutter artifacts."),
+    ] = 0
+    rolling_shutter_strength_range: Annotated[
+        tuple[float, float],
+        Meta(description="Strength range for rolling shutter distortion."),
+    ] = (-0.1, 0.1)
+
+    # HEIF Compression Artifacts (Added by Philip Hofmann for ParagonSR)
+    heif_prob: Annotated[
+        float,
+        Meta(description="Probability of applying HEIF compression artifacts."),
+    ] = 0
+    heif_range: Annotated[
+        tuple[float, float],
+        Meta(
+            description="Quality range for HEIF compression, in the format [min_quality, max_quality]."
+        ),
+    ] = (75, 95)
+
+    # Degradation Sequence Control (Added by Philip Hofmann for ParagonSR)
+    enable_sequences: Annotated[
+        bool,
+        Meta(description="Enable degradation sequence control for realistic chains."),
+    ] = False
+    editing_prob: Annotated[
+        float,
+        Meta(
+            description="Probability of applying photo editing stage (filters, adjustments)."
+        ),
+    ] = 0
+    editing_exposure_prob: Annotated[
+        float,
+        Meta(
+            description="Probability of applying exposure adjustment in editing stage."
+        ),
+    ] = 0
+    editing_exposure_range: Annotated[
+        tuple[float, float],
+        Meta(description="Exposure factor range for editing stage."),
+    ] = (0.9, 1.1)
+    editing_oversharpen_prob: Annotated[
+        float,
+        Meta(description="Probability of applying oversharpening in editing stage."),
+    ] = 0
+    editing_oversharpen_strength: Annotated[
+        tuple[float, float],
+        Meta(description="Strength range for oversharpening in editing stage."),
+    ] = (1.0, 1.3)
+    sequence_probability: Annotated[
+        float,
+        Meta(
+            description="Overall probability of applying a sequence (vs individual degradations)."
+        ),
+    ] = 0.5
+    predefined_sequences: Annotated[
+        dict[str, Any],
+        Meta(
+            description="Configuration for predefined sequences (internet, phone, dslr, social)."
+        ),
+    ] = field(default_factory=dict)
+
     dataroot_lq_prob: Annotated[
         float,
         Meta(description="Probability of using paired LR data instead of OTF LR data."),
@@ -641,6 +850,49 @@ class ReduxOptions(StrictStruct):
         ),
     ] = field(default_factory=lambda: [0.25, 0.25, 0.25, 0.25])
 
+    # Unified Compression Pipeline (Added by Philip Hofmann for ParagonSR)
+    compression_formats: Annotated[
+        list[Literal["jpeg", "webp", "avif", "heif"]],
+        Meta(description="List of compression formats for initial compression stage."),
+    ] = field(default_factory=lambda: ["jpeg", "webp", "avif", "heif"])
+    compression_weights: Annotated[
+        list[float],
+        Meta(description="Probability weights for each format in compression_formats."),
+    ] = field(default_factory=lambda: [0.60, 0.25, 0.10, 0.05])
+    compression_jpeg_range: Annotated[
+        tuple[float, float],
+        Meta(description="Quality range for JPEG compression in initial stage."),
+    ] = (45, 95)
+    compression_webp_range: Annotated[
+        tuple[float, float],
+        Meta(description="Quality range for WebP compression in initial stage."),
+    ] = (60, 85)
+    compression_avif_range: Annotated[
+        tuple[float, float],
+        Meta(description="Quality range for AVIF compression in initial stage."),
+    ] = (65, 90)
+    compression_heif_range: Annotated[
+        tuple[float, float],
+        Meta(description="Quality range for HEIF compression in initial stage."),
+    ] = (70, 90)
+
+    recompression_prob: Annotated[
+        float,
+        Meta(
+            description="Probability of applying a second compression stage (platform recompression)."
+        ),
+    ] = 0
+    recompression_formats: Annotated[
+        list[Literal["jpeg", "webp", "avif", "heif"]],
+        Meta(description="List of compression formats for recompression stage."),
+    ] = field(default_factory=lambda: ["jpeg", "webp", "avif", "heif"])
+    recompression_weights: Annotated[
+        list[float],
+        Meta(
+            description="Probability weights for each format in recompression_formats."
+        ),
+    ] = field(default_factory=lambda: [0.50, 0.35, 0.10, 0.05])
+
     queue_size: Annotated[
         int,
         Meta(
@@ -655,6 +907,14 @@ class ReduxOptions(StrictStruct):
         default_factory=lambda: {"backend": "nccl", "port": 29500}
     )
     onnx: OnnxOptions | None = None
+
+    # Automatic VRAM Management System
+    auto_vram_management: Annotated[
+        dict[str, Any] | None,
+        Meta(
+            description="Configuration for automatic VRAM management system that optimizes training parameters (lq_size, batch_size, workers) based on available GPU memory. Enable with {'enabled': true, 'target_vram_usage': 0.85, 'safety_margin': 0.05}."
+        ),
+    ] = None
 
     find_unused_parameters: bool = False
     contents: str | None = None

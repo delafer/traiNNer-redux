@@ -128,7 +128,11 @@ train:
       loss_weight: 1.0
     # GAN loss
     - type: ganloss
-      gan_type: vanilla
+      # To use the new R3GAN loss, set `gan_type` to "r3gan".
+      # Example:
+      #   gan_type: r3gan
+      #   loss_weight: 0.1
+      gan_type: r3gan
       loss_weight: 0.1
     # Additional losses - disabled by default.
     # To enable, change the loss_weight from 0 to the recommended loss_weight which appears as a comment next to the loss weight.

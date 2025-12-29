@@ -1,0 +1,115 @@
+# yaml-language-server: $schema=https://raw.githubusercontent.com/the-database/traiNNer-redux/refs/heads/master/schemas/redux-config.schema.json
+#########################################################################################
+# ParagonSR2 Nano - Perceptual Quality (Crisp, Visually Appealing)
+# Uses fidelity pretrain, adds perceptual losses for better visual quality
+#########################################################################################
+name: 2xParagonSR2_Nano_Perceptual
+scale: 2
+
+use_amp: true
+amp_bf16: true
+use_channels_last: true
+fast_matmul: true
+num_gpu: auto
+
+datasets:
+  train:
+    name: Train
+    type: pairedimagedataset
+    dataroot_gt: /home/phips/Documents/dataset/cc0/hr
+    dataroot_lq: /home/phips/Documents/dataset/cc0/lr_x2 # Clean downsampled
+    lq_size: 128
+    use_hflip: true
+    use_rot: true
+    num_worker_per_gpu: 8
+    batch_size_per_gpu: 10
+    accum_iter: 1
+
+  val:
+    name: Val
+    type: pairedimagedataset
+    dataroot_gt: /home/phips/Documents/dataset/cc0/val_hr
+    dataroot_lq: /home/phips/Documents/dataset/cc0/val_lr_x2
+
+network_g:
+  type: paragonsr2_nano
+
+path:
+  # Load fidelity pretrain
+  pretrain_network_g: experiments/2xParagonSR2_Nano_Fidelity/models/net_g_ema_200000.safetensors
+  strict_load_g: true
+  resume_state: ~
+
+train:
+  ema_decay: 0.999
+  ema_power: 0.75
+  grad_clip: true
+
+  optim_g:
+    type: AdamW
+    lr: !!float 1e-4
+    weight_decay: !!float 1e-4
+    betas: [0.9, 0.99]
+
+  scheduler:
+    type: MultiStepLR
+    milestones: [20000, 35000]
+    gamma: 0.5
+
+  total_iter: 50000
+  warmup_iter: 200
+
+  losses:
+    # Pixel accuracy - ramp down
+    - type: charbonnierloss
+      loss_weight: 1.0
+      target_iter: 25000
+      target_weight: 0.2 # Keep higher for nano (less capacity)
+      schedule_type: linear
+
+    # Perceptual - main driver
+    - type: convnextperceptualloss
+      loss_weight: 0.5
+      layers: [1, 2]
+      layer_weights: [1.0, 0.7]
+
+    # Texture quality
+    - type: distsloss
+      loss_weight: 0.1
+
+    # Color stability - important for nano
+    - type: ConsistencyLoss
+      loss_weight: 0.2 # Slightly higher for nano
+      criterion: "chc"
+      blur: false
+      cosim: true
+      cosim_weight: 0.5
+
+val:
+  val_enabled: true
+  val_freq: 2500
+  save_img: true
+
+  metrics_enabled: true
+  metrics:
+    psnr:
+      type: calculate_psnr
+      crop_border: 2
+    ssim:
+      type: calculate_ssim
+      crop_border: 2
+    lpips:
+      type: calculate_lpips
+      better: lower
+    dists:
+      type: calculate_dists
+      better: lower
+    topiq:
+      type: calculate_topiq
+      better: higher
+
+logger:
+  print_freq: 50
+  save_checkpoint_freq: 2500
+  save_checkpoint_format: safetensors
+  use_tb_logger: true

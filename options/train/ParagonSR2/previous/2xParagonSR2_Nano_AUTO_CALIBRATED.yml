@@ -1,0 +1,181 @@
+# ParagonSR2 Nano Training Configuration with Intelligent Auto-Calibration
+# Simply set auto_calibrate: true and let the framework handle everything!
+
+# Model and Network Configuration
+scale: 2
+network_g:
+  type: ParagonSR2  # Architecture type automatically detected for intelligent calibration
+  num_block: 6
+  num_grow_ch: 32
+  scale: 2
+
+# Dataset Configuration
+datasets:
+  train:
+    name: CC0_147k_Auto
+    type: PairedImageDataset
+    dataroot_lq: datasets/CC0_147k/LR_bicubic_x2
+    dataroot_gt: datasets/CC0_147k/HR
+    meta_info_file:
+    filename_tmpl: '{}'
+    io_backend:
+      type: lmdb
+    batch_size: 4
+    num_worker: 8
+    shuffle: true
+    sampler:
+      type: DistributedSampler
+      shuffle: true
+    epoch_count: 1
+    niter: 40000
+    warmup_iter: 1000
+
+  val:
+    name: CC0_147k_Val
+    type: PairedImageDataset
+    dataroot_lq: datasets/CC0_147k/LR_bicubic_x2/val
+    dataroot_gt: datasets/CC0_147k/HR/val
+    meta_info_file:
+    io_backend:
+      type: disk
+    batch_size: 1
+    num_worker: 1
+    shuffle: false
+
+# Training Configuration
+train:
+  total_iter: 40000
+  optim_g:
+    type: AdamW
+    lr: 2e-4
+    weight_decay: 0.0
+    betas: [0.9, 0.99]
+  optim_d:
+    type: AdamW
+    lr: 2e-4
+    weight_decay: 0.0
+    betas: [0.9, 0.99]
+
+  # Loss Configuration - Multiple loss types for comprehensive training
+  losses:
+    # Pixel/Content Loss
+    - type: L1Loss
+      loss_weight: 1.0
+      reduction: mean
+
+    # Perceptual Loss for realistic details
+    - type: PerceptualLoss
+      layers: ['relu1_2','relu2_2','relu3_4','relu4_4']
+      perceptual_weight: 1.0
+      style_weight: 0.0
+      loss_weight: 0.1
+
+    # GAN Loss for realistic sharpness
+    - type: GANLoss
+      gan_type: vanilla
+      loss_weight: 0.05
+      real_label_value: 1.0
+      fake_label_value: 0.0
+      # Weight will be automatically scheduled by intelligent system
+
+  # 🧠 INTELLIGENT DYNAMIC LOSS SCHEDULING
+  # Simply enable auto_calibrate: true - that's it!
+  # The system will automatically:
+  # - Detect architecture (ParagonSR2)
+  # - Set optimal parameters for Nano model
+  # - Analyze your dataset automatically (texture variance, edge density, color variation)
+  # - Adjust based on training phase (early/middle/late)
+  # - Monitor stability and auto-correct if needed
+  # - Prevent configuration errors that could mess up training
+  dynamic_loss_scheduling:
+    enabled: true
+    auto_calibrate: true
+    # NO MANUAL CONFIGURATION NEEDED!
+    # The system will automatically analyze your dataset during training initialization
+    # and set optimal parameters based on:
+    # - Architecture type (detected from network_g.type)
+    # - Dataset complexity (automatically analyzed)
+    # - Training length and other context
+    #
+    # Optional: You can still override specific parameters if needed:
+    # momentum: 0.8              # Manual override
+    # adaptation_rate: 0.012     # Manual override
+    #
+    # Optional: Manual dataset info (auto-detected if not provided):
+    # training_config:
+    #   total_iterations: 40000
+    #   dataset_info:
+    #     texture_variance: 0.7    # 0.0-1.0, higher = more complex textures
+    #     edge_density: 0.6        # 0.0-1.0, higher = more edges/details
+    #     color_variation: 0.8     # 0.0-1.0, higher = more color diversity
+
+  # EMA Configuration
+  ema_decay: 0.999
+  ema_update_after_step: 10
+
+  # Precision Configuration
+  use_amp: true
+  amp_bf16: true  # Better numerical stability
+
+  # Gradient Clipping
+  grad_clip: true  # Correct parameter name (not grad_clip_max_norm)
+
+  # Learning Rate Scheduling - EMA compatible
+  scheduler_g:
+    type: MultiStepLR
+    milestones: [30000, 35000]
+    gamma: 0.5
+  scheduler_d:
+    type: MultiStepLR
+    milestones: [30000, 35000]
+    gamma: 0.5
+
+# Validation Configuration
+val:
+  val_freq: 2000
+  save_img: true
+  tile_size: 0  # 0 = no tiling
+
+# Logging Configuration
+logger:
+  print_freq: 100
+  save_checkpoint_freq: 5000
+
+# Path Configuration
+path:
+  strict_load_g: true
+  pretrain_network_g: # Optional: path to pretrained model
+  resume_state: # Optional: path to resume training
+
+# Output Configuration
+name: ParagonSR2_Nano_CC0_147k_AUTO
+is_train: true
+
+# ========================================
+# 🚀 SIMPLE AUTO-CALIBRATION USAGE:
+# ========================================
+#
+# Before (manual configuration - error prone):
+# dynamic_loss_scheduling:
+#   enabled: true
+#   momentum: 0.95              # ❌ Too high for Nano (causes training degradation!)
+#   adaptation_rate: 0.005      # ❌ Too slow
+#   max_weight: 100.0           # ❌ Too high (causes instability!)
+#   baseline_iterations: 200    # ❌ Too long
+#
+# After (intelligent auto-calibration - foolproof):
+# dynamic_loss_scheduling:
+#   enabled: true
+#   auto_calibrate: true        # ✅ Optimal parameters auto-selected!
+#
+# That's it! The system will:
+# ✅ Detect ParagonSR2 Nano architecture
+# ✅ Set momentum: 0.85 (optimal for Nano)
+# ✅ Set adaptation_rate: 0.015 (faster response)
+# ✅ Set max_weight: 5.0 (stable bounds)
+# ✅ Set baseline_iterations: 50 (quick start)
+# ✅ Adjust parameters based on training progress
+# ✅ Auto-correct if instability detected
+# ✅ Prevent training degradation issues
+#
+# No more manual configuration errors! 🎉

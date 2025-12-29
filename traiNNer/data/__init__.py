@@ -9,11 +9,12 @@ import torch.utils.data
 from torch.utils.data.dataset import Dataset
 
 from traiNNer.data.base_dataset import BaseDataset
+from traiNNer.data.collate_functions import create_collate_function
 from traiNNer.data.data_sampler import EnlargedSampler
 from traiNNer.data.prefetch_dataloader import PrefetchDataLoader
 from traiNNer.utils import get_root_logger, scandir
 from traiNNer.utils.dist_util import get_dist_info
-from traiNNer.utils.redux_options import DatasetOptions
+from traiNNer.utils.redux_options import DatasetOptions, ReduxOptions
 from traiNNer.utils.registry import DATASET_REGISTRY
 from traiNNer.utils.rng import RNG
 from traiNNer.utils.types import DataLoaderArgs
@@ -64,6 +65,7 @@ def build_dataloader(
     dist: bool = False,
     sampler: EnlargedSampler | None = None,
     seed: int | None = None,
+    opt: ReduxOptions | None = None,
 ) -> PrefetchDataLoader | torch.utils.data.DataLoader:
     """Build dataloader.
 
@@ -79,6 +81,8 @@ def build_dataloader(
             phase. Default: False.
         sampler (torch.utils.data.sampler): Data sampler. Default: None.
         seed (int | None): Seed. Default: None
+        opt (ReduxOptions | None): Main options containing AMP and memory format settings.
+            Used for automatic memory format compatibility handling. Default: None.
     """
     rank, _ = get_dist_info()
     if dataset_opt.phase == "train":
@@ -127,8 +131,23 @@ def build_dataloader(
             f"Wrong dataset phase: {dataset_opt.phase}. Supported ones are 'train', 'val' and 'test'."
         )
 
+    # Handle memory format compatibility for AMP + channels_last + pin_memory
+    if (
+        opt is not None
+        and opt.use_amp
+        and opt.use_channels_last
+        and dataset_opt.pin_memory
+    ):
+        # Use custom collate function to convert memory format before pin_memory
+        dataloader_args["collate_fn"] = create_collate_function(opt)
+        logger = get_root_logger()
+        logger.info(
+            "Using custom collate function for channels_last memory format compatibility with pin_memory."
+        )
+
     dataloader_args["pin_memory"] = dataset_opt.pin_memory
     prefetch_mode = dataset_opt.prefetch_mode
+
     if prefetch_mode == "cpu":  # CPUPrefetcher
         num_prefetch_queue = dataset_opt.num_prefetch_queue
         logger = get_root_logger()

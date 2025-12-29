@@ -1,0 +1,217 @@
+2025-12-18 10:24:01,619 INFO: ✅ Logger: File logging activated: /home/phips/Documents/GitHub/traiNNer-redux/experiments/2xParagonSR2_Photo_fidelity/train_2xParagonSR2_Photo_fidelity_20251218_102401.log
+2025-12-18 10:24:01,620 INFO: 📝 Logger: File logging successfully added to existing logger
+2025-12-18 10:24:02,332 INFO: [italic red]:rocket:  traiNNer-redux: good luck! :rocket:[/]
+System Information: 
+	Current GPU: 
+		Name: NVIDIA GeForce RTX 3060
+		Total VRAM: 11.63 GB
+		Compute Capability: 8.6
+		Multiprocessors: 28
+	Storage:
+		Free Space: 69.99 GB
+Version Information: 
+	traiNNer-redux: 
+		Git commit: deafa14d48da737f4bdbe5b8baf8b1e543a05ab4 (dirty) ([green]Up to date[/green])
+		Commit date: 2025-12-17 14:41:06 +0100
+	PyTorch: 2.9.0+cu128
+	TorchVision: 0.24.0+cu128
+2025-12-18 10:24:02,335 DEBUG: #########################################################################################
+# ParagonSR2 Photo Fidelity Config
+# Optimized for highest PSNR/SSIM metrics with pure reconstruction (no sharpening)
+# Balanced general purpose variant with attention for photography
+#########################################################################################
+name: 2xParagonSR2_Photo_fidelity
+scale: 2
+
+# VRAM MANAGEMENT SYSTEM
+auto_vram_management:
+  enabled: true # Enable automatic VRAM management
+  target_vram_usage: 0.85 # Target 85% VRAM usage
+  safety_margin: 0.05 # Additional 5% safety margin
+
+use_amp: true # Mixed Precision for efficiency
+amp_bf16: true # BF16 numerical stability
+use_channels_last: true # Always true for NVIDIA GPUs (Tensor Cores), works with compile
+num_gpu: auto
+use_compile: false # Torch compile creates fused kernels for the Attention mechanics
+
+datasets:
+  train:
+    name: CC0_147k_Train
+    type: pairedimagedataset
+    dataroot_gt: /home/phips/Documents/dataset/cc0/filtered_versions/cc0_c5_hr
+    dataroot_lq: /home/phips/Documents/dataset/cc0/filtered_versions/cc0_c5_lr_x2
+
+    # METRIC-OPTIMIZED PARAMETERS for RTX 3060 12GB (Auto-VRAM managed)
+    lq_size: 256 # 256 input -> 512 output. Crucial for Attention window coverage (needs to be > window_size)
+    batch_size_per_gpu: 4 # Conservative start (4). The optimizer will auto-scale this up to ~8-12 depending on VRAM.
+    num_worker_per_gpu: 8 # Workers for data loading
+    accum_iter: 1 # No accumulation needed
+    prefetch_mode: cpu # CPU prefetch to save VRAM
+    pin_memory: false # Disable pin_memory for stability
+
+    use_hflip: true
+    use_rot: true
+
+  val:
+    name: CC0_147k_Val
+    type: pairedimagedataset
+    dataroot_gt: /home/phips/Documents/dataset/cc0/val_hr
+    dataroot_lq: /home/phips/Documents/dataset/cc0/val_lr_x2_bicubic_aa
+
+network_g:
+  type: paragonsr2_photo # The "Base" variant
+  # FIDELITY OPTIMIZATION: Pure reconstruction for highest PSNR/SSIM
+  upsampler_alpha: 0.0 # 0.0 (No sharpening) - Ensures metric validity (Sharpening lowers PSNR/SSIM)
+  use_checkpointing: true # REQUIRED for Photo variant on 12GB VRAM due to Attention usage.
+
+path:
+  pretrain_network_g: ~
+  strict_load_g: true
+
+train:
+  ema_decay: 0.999
+  ema_power: 0.75
+  grad_clip: true # Essential for Transformer/Attention based models to prevent collapse
+
+  optim_g:
+    type: AdamW
+    lr: !!float 2e-4 # 2e-4 is optimal for this hybrid architecture
+    weight_decay: !!float 1e-4
+    betas: [0.9, 0.99]
+
+  scheduler:
+    type: MultiStepLR
+    milestones: [40000, 50000, 55000] # Decays late
+    gamma: 0.5
+
+  total_iter: 200000
+  warmup_iter: 1000
+
+  # DYNAMIC LOSS SCHEDULING WITH AUTO-CALIBRATION
+  dynamic_loss_scheduling:
+    enabled: true
+
+  # TRAINING AUTOMATIONS
+  training_automations:
+    enabled: true
+    intelligent_learning_rate_scheduler:
+      enabled: true
+
+    DynamicBatchAndPatchSizeOptimizer:
+      enabled: true
+      target_vram_usage: 0.85
+      safety_margin: 0.05
+      adjustment_frequency: 100
+      min_batch_size: 2
+      max_batch_size: 64
+      min_lq_size: 64
+      max_lq_size: 256
+      vram_history_size: 50
+
+    IntelligentEarlyStopping:
+      enabled: true
+      patience: 10000
+      min_improvement: 0.01
+      monitor_metric: "val/psnr"
+      convergence_threshold: 0.0001
+      convergence_log_frequency: 500
+
+    adaptive_gradient_clipping:
+      enabled: true
+
+  # OPTIMAL FIDELITY LOSS COMBINATION
+  losses:
+    - type: l1loss
+      loss_weight: 1.0
+    - type: mssimloss
+      loss_weight: 0.08
+
+val:
+  val_enabled: true
+  val_freq: 1000
+  save_img: true
+
+  metrics_enabled: true
+  metrics:
+    psnr:
+      type: calculate_psnr
+      crop_border: 4
+    ssim:
+      type: calculate_ssim
+      crop_border: 4
+
+logger:
+  print_freq: 100
+  save_checkpoint_freq: 10000
+  save_checkpoint_format: safetensors
+  use_tb_logger: true
+
+2025-12-18 10:24:02,339 INFO: Training with manual_seed=1937.
+2025-12-18 10:24:02,341 INFO: Building Dataset CC0_147k_Train...
+2025-12-18 10:24:02,720 INFO: Dataset [bold]PairedImageDataset[/bold] - CC0_147k_Train is built.
+2025-12-18 10:24:02,721 INFO: Use cpu prefetch dataloader: num_prefetch_queue = 1
+2025-12-18 10:24:02,722 INFO: Training statistics for [b]2xParagonSR2_Photo_fidelity[/b]:
+	Number of train image pairs:      28,658	Dataset enlarge ratio:                 1
+	Batch size per gpu:                    4	Accumulate iterations:                 1
+	HR crop size:                        512	LR crop size:                        256
+	World size (gpu number):               1	Require iter per epoch:            7,164
+	Total epochs:                         28	Total iters:                     200,000
+2025-12-18 10:24:02,724 INFO: Building Dataset CC0_147k_Val...
+2025-12-18 10:24:02,729 INFO: Dataset [bold]PairedImageDataset[/bold] - CC0_147k_Val is built.
+2025-12-18 10:24:02,729 INFO: Using custom collate function for channels_last memory format compatibility with pin_memory.
+2025-12-18 10:24:02,730 INFO: Number of val images/folders in CC0_147k_Val: 70
+2025-12-18 10:24:02,732 INFO: DEBUG: Registry keys after registration: ['intelligentlearningratescheduler', 'dynamicbatchandpatchsizeoptimizer', 'adaptivegradientclipping', 'intelligentearlystopping', 'adaptive_gradient_clipping', 'intelligent_learning_rate_scheduler', 'dynamic_batch_and_patch_size_optimizer', 'intelligent_early_stopping']
+2025-12-18 10:24:02,733 INFO: Automation IntelligentLearningRateScheduler enabled with config: {'enabled': True}
+2025-12-18 10:24:02,734 INFO: Initialized automation: intelligent_learning_rate_scheduler
+2025-12-18 10:24:02,734 INFO: Automation DynamicBatchAndPatchSizeOptimizer enabled with config: {'enabled': True, 'target_vram_usage': 0.85, 'safety_margin': 0.05, 'adjustment_frequency': 100, 'min_batch_size': 2, 'max_batch_size': 64, 'min_lq_size': 64, 'max_lq_size': 256, 'vram_history_size': 50}
+2025-12-18 10:24:02,736 INFO: Initialized automation: DynamicBatchAndPatchSizeOptimizer
+2025-12-18 10:24:02,737 INFO: Automation IntelligentEarlyStopping enabled with config: {'enabled': True, 'patience': 10000, 'min_improvement': 0.01, 'monitor_metric': 'val/psnr', 'convergence_threshold': 0.0001, 'convergence_log_frequency': 500}
+2025-12-18 10:24:02,738 INFO: Initialized automation: IntelligentEarlyStopping
+2025-12-18 10:24:02,738 INFO: Automation AdaptiveGradientClipping enabled with config: {'enabled': True}
+2025-12-18 10:24:02,739 INFO: 🤖 AdaptiveGradientClipping: Autonomous mode enabled - auto-calibrating parameters based on detected architecture
+2025-12-18 10:24:02,740 INFO: Initialized automation: adaptive_gradient_clipping
+2025-12-18 10:24:02,753 INFO: Network [bold]ParagonSR2[/bold]({'upsampler_alpha': 0.0, 'use_checkpointing': True, 'scale': 2}) is created from [bold]traiNNer-redux[/bold].
+2025-12-18 10:24:02,772 INFO: Using Automatic Mixed Precision (AMP) with fp32 and bf16.
+2025-12-18 10:24:02,774 INFO: Using channels last memory format.
+2025-12-18 10:24:02,775 INFO: Using Exponential Moving Average (EMA) with decay: 0.999.
+2025-12-18 10:24:02,797 INFO: Gradient clipping is enabled.
+2025-12-18 10:24:02,798 INFO: Loss [bold]L1Loss[/bold]({'loss_weight': 1.0}) is created.
+2025-12-18 10:24:02,799 INFO: Loss [bold]MSSIMLoss[/bold]({'loss_weight': 0.08}) is created.
+2025-12-18 10:24:02,800 INFO: Dynamic loss scheduling enabled with config: {'enabled': True}
+2025-12-18 10:24:02,801 WARNING: Params base.sharp.h.weight will not be optimized.
+2025-12-18 10:24:02,801 WARNING: Params base.sharp.v.weight will not be optimized.
+2025-12-18 10:24:02,802 WARNING: Params base.blur.h.weight will not be optimized.
+2025-12-18 10:24:02,803 WARNING: Params base.blur.v.weight will not be optimized.
+2025-12-18 10:24:02,804 INFO: Optimizer [bold]AdamW[/bold]({'lr': 0.0002, 'weight_decay': 0.0001, 'betas': [0.9, 0.99]}) is created.
+2025-12-18 10:24:02,805 INFO: Scheduler [bold]MultiStepLR[/bold]({'milestones': [40000, 50000, 55000], 'gamma': 0.5}) is created.
+2025-12-18 10:24:02,806 INFO: Model [bold]SRModel[/bold] is created.
+2025-12-18 10:24:03,224 INFO: Dynamic dataloader initialized with batch_size: 4 (original: None)
+2025-12-18 10:24:03,225 INFO: Automation DynamicBatchAndPatchSizeOptimizer: Dynamic wrappers set - Dataloader: True, Dataset: True
+2025-12-18 10:24:03,226 INFO: Automation DynamicBatchAndPatchSizeOptimizer: Starting VRAM monitoring period (adjustment_frequency: 100 iterations). Initial Peak VRAM: 0.000 (0.0%)
+2025-12-18 10:24:03,227 INFO: BaseModel: Dynamic wrappers set for VRAM management - Dataloader: True, Dataset: True
+2025-12-18 10:24:03,228 INFO: Automation DynamicBatchAndPatchSizeOptimizer: Parameters initialized - Batch: 4, LQ: 256
+2025-12-18 10:24:03,229 INFO: ✅ VRAM Automation verification - Config batch: 4, lq: 256, Automation batch: 4, Automation lq: 256
+2025-12-18 10:24:03,230 INFO: 🔥 Initial VRAM usage: 0.000 (0.0%)
+2025-12-18 10:24:03,231 INFO: Dynamic VRAM management initialized - Batch: 4, LQ: 256, Dynamic Wrappers: Enabled
+2025-12-18 10:24:03,232 INFO: ================================================================================
+2025-12-18 10:24:03,233 INFO: 🚀 ENHANCED TRAINING LOGGING ENABLED
+2025-12-18 10:24:03,234 INFO: ================================================================================
+2025-12-18 10:24:03,234 INFO: 📊 Network: paragonsr2_photo (scale: 2x)
+2025-12-18 10:24:03,235 INFO: ⚙️  Config: patch: 256, scale: 2x
+2025-12-18 10:24:03,236 INFO: 🎯 Losses: l1loss(1.00e+00), mssimloss(8.00e-02)
+2025-12-18 10:24:03,237 INFO: 🤖 Automations: Intelligent Learning Rate Scheduler, Dynamicbatchandpatchsizeoptimizer, Intelligentearlystopping, Adaptive Gradient Clipping (4 enabled)
+2025-12-18 10:24:03,238 INFO: ================================================================================
+2025-12-18 10:24:03,345 INFO: Automation DynamicBatchAndPatchSizeOptimizer: VRAM usage 0.0005 (0.01GB), peak: 0.0005 (0.01GB/12.49GB), target: 0.85
+2025-12-18 10:24:03,347 INFO: 🚀 Early VRAM monitoring - Initialization phase (iterations 0-99): Monitoring VRAM without adjustments, batch: 4, LQ: 256
+2025-12-18 10:24:03,348 INFO: Start training from epoch: 0, iter: 0.
+2025-12-18 10:24:25,221 INFO: User interrupted. Preparing to save state...
+2025-12-18 10:24:25,221 INFO: User interrupted. Preparing to save state...
+2025-12-18 10:24:25,221 INFO: User interrupted. Preparing to save state...
+2025-12-18 10:24:25,221 INFO: User interrupted. Preparing to save state...
+2025-12-18 10:24:25,221 INFO: User interrupted. Preparing to save state...
+2025-12-18 10:24:25,221 INFO: User interrupted. Preparing to save state...
+2025-12-18 10:24:25,222 INFO: User interrupted. Preparing to save state...
+2025-12-18 10:24:25,224 INFO: User interrupted. Preparing to save state...
+2025-12-18 10:24:25,223 INFO: User interrupted. Preparing to save state...
+2025-12-18 10:24:25,578 INFO: Saving models and training states to [link=file:////home/phips/Documents/GitHub/traiNNer-redux/experiments/2xParagonSR2_Photo_fidelity/models]experiments folder[/link] for epoch: 0, iter: 7.

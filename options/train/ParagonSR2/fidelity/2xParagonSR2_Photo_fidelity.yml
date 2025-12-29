@@ -1,0 +1,131 @@
+#########################################################################################
+# ParagonSR2 Photo Fidelity Config
+# Optimized for highest PSNR/SSIM metrics with pure reconstruction (no sharpening)
+# Balanced general purpose variant with attention for photography
+#########################################################################################
+name: 2xParagonSR2_Photo_fidelity
+scale: 2
+
+# VRAM MANAGEMENT SYSTEM
+auto_vram_management:
+  enabled: true # Enable automatic VRAM management
+  target_vram_usage: 0.85 # Target 85% VRAM usage
+  safety_margin: 0.05 # Additional 5% safety margin
+
+use_amp: true # Mixed Precision for efficiency
+amp_bf16: true # BF16 numerical stability
+use_channels_last: true # Always true for NVIDIA GPUs (Tensor Cores), works with compile
+num_gpu: auto
+use_compile: false # Torch compile creates fused kernels for the Attention mechanics
+
+datasets:
+  train:
+    name: CC0_147k_Train
+    type: pairedimagedataset
+    dataroot_gt: /home/phips/Documents/dataset/cc0/filtered_versions/cc0_c5_hr
+    dataroot_lq: /home/phips/Documents/dataset/cc0/filtered_versions/cc0_c5_lr_x2
+
+    # METRIC-OPTIMIZED PARAMETERS for RTX 3060 12GB (Auto-VRAM managed)
+    lq_size: 256 # 256 input -> 512 output. Crucial for Attention window coverage (needs to be > window_size)
+    batch_size_per_gpu: 20 # Resuming at the optimized batch size found by the automation. First training run this was 4
+    num_worker_per_gpu: 8 # Workers for data loading
+    accum_iter: 1 # No accumulation needed
+    prefetch_mode: cpu # CPU prefetch to save VRAM
+    pin_memory: false # Disable pin_memory for stability
+
+    use_hflip: true
+    use_rot: true
+
+  val:
+    name: CC0_147k_Val
+    type: pairedimagedataset
+    dataroot_gt: /home/phips/Documents/dataset/cc0/val_hr
+    dataroot_lq: /home/phips/Documents/dataset/cc0/val_lr_x2_bicubic_aa
+
+network_g:
+  type: paragonsr2_photo # The "Base" variant
+  # FIDELITY OPTIMIZATION: Pure reconstruction for highest PSNR/SSIM
+  upsampler_alpha: 0.0 # 0.0 (No sharpening) - Ensures metric validity (Sharpening lowers PSNR/SSIM)
+  use_checkpointing: true # REQUIRED for Photo variant on 12GB VRAM due to Attention usage.
+
+path:
+  pretrain_network_g: ~
+  strict_load_g: true
+
+train:
+  ema_decay: 0.999
+  ema_power: 0.75
+  grad_clip: true # Essential for Transformer/Attention based models to prevent collapse
+
+  optim_g:
+    type: AdamW
+    lr: !!float 2e-4 # 2e-4 is optimal for this hybrid architecture
+    weight_decay: !!float 1e-4
+    betas: [0.9, 0.99]
+
+  scheduler:
+    type: MultiStepLR
+    milestones: [40000, 50000, 55000] # Decays late
+    gamma: 0.5
+
+  total_iter: 400000
+  warmup_iter: 1000
+
+  # DYNAMIC LOSS SCHEDULING WITH AUTO-CALIBRATION
+  dynamic_loss_scheduling:
+    enabled: true
+
+  # TRAINING AUTOMATIONS
+  training_automations:
+    enabled: true
+    intelligent_learning_rate_scheduler:
+      enabled: true
+
+    DynamicBatchAndPatchSizeOptimizer:
+      enabled: true
+      target_vram_usage: 0.85
+      safety_margin: 0.05
+      adjustment_frequency: 100
+      min_batch_size: 2
+      max_batch_size: 64
+      min_lq_size: 64
+      max_lq_size: 256
+      vram_history_size: 50
+
+    IntelligentEarlyStopping:
+      enabled: true
+      patience: 10000
+      min_improvement: 0.01
+      monitor_metric: "val/psnr"
+      convergence_threshold: 0.0001
+      convergence_log_frequency: 500
+
+    adaptive_gradient_clipping:
+      enabled: true
+
+  # OPTIMAL FIDELITY LOSS COMBINATION
+  losses:
+    - type: l1loss
+      loss_weight: 1.0
+    - type: mssimloss
+      loss_weight: 0.08
+
+val:
+  val_enabled: true
+  val_freq: 1000
+  save_img: true
+
+  metrics_enabled: true
+  metrics:
+    psnr:
+      type: calculate_psnr
+      crop_border: 4
+    ssim:
+      type: calculate_ssim
+      crop_border: 4
+
+logger:
+  print_freq: 100
+  save_checkpoint_freq: 10000
+  save_checkpoint_format: safetensors
+  use_tb_logger: true
