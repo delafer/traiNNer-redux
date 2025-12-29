@@ -766,6 +766,12 @@ def train_pipeline(root_path: str) -> None:
                                 "OOM detected, attempting automation recovery..."
                             )
 
+                            # CRITICAL: Deep VRAM Clearance BEFORE retry
+                            # 1. Nullify references to large batch data
+                            train_data = None
+                            # 2. Clear model-internal tensors and empty CUDA cache
+                            model.clean_gpu()
+
                             # Automation will record actual failing params and return safe recovery values
                             recovery_params = model.handle_automation_oom_recovery()
 
@@ -836,11 +842,6 @@ def train_pipeline(root_path: str) -> None:
 
                         # Reset prefetcher to discard queued batches with old (large) size
                         prefetcher.reset()
-                        # Fetch the first batch with the new settings to ensure we can proceed
-                        train_data = prefetcher.next()
-
-                        # Collect garbage (clear VRAM)
-                        torch.cuda.empty_cache()
                         # Retry the iteration (continue the loop)
                         logger.info(
                             "OOM Recovery successful. Retrying iteration with reduced parameters."

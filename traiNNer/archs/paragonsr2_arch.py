@@ -520,7 +520,7 @@ class ProBlock(nn.Module):
         dim: int,
         expansion: float = 2.0,
         num_tokens: int = 64,
-        window_size: int = 8,
+        window_size: int = 16,
         shift_size: int = 0,
         attention_mode: str = "sdpa",
         export_safe: bool = False,
@@ -1418,6 +1418,6 @@ def paragonsr2_pro(scale=4, **kw):
         upsampler_alpha=kw.pop("upsampler_alpha", 0.4),
         attention_mode=kw.pop("attention_mode", "sdpa"),
         export_safe=kw.pop("export_safe", False),
-        window_size=kw.pop("window_size", 8),
+        window_size=kw.pop("window_size", 16),
         **kw,
     )

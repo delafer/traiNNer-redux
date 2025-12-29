@@ -908,7 +908,14 @@ class BaseModel:
             "IntelligentLearningRateScheduler"
         )
         if automation and automation.enabled:
-            automation.update_loss_tracking(loss_value)
+            multiplier = automation.update_loss_tracking(loss_value)
+            if multiplier:
+                for opt in self.optimizers:
+                    for param_group in opt.param_groups:
+                        param_group["lr"] *= multiplier
+                logger.info(
+                    f"BaseModel: Applied LR multiplier {multiplier:.2f} from automation (loss triggered)"
+                )
 
         automation = self.training_automation_manager.automations.get(
             "IntelligentEarlyStopping"
@@ -931,7 +938,14 @@ class BaseModel:
             "IntelligentLearningRateScheduler"
         )
         if automation and automation.enabled:
-            automation.update_validation_tracking(metrics)
+            multiplier = automation.update_validation_tracking(metrics)
+            if multiplier:
+                for opt in self.optimizers:
+                    for param_group in opt.param_groups:
+                        param_group["lr"] *= multiplier
+                logger.info(
+                    f"BaseModel: Applied LR multiplier {multiplier:.2f} from automation (validation triggered)"
+                )
 
         # Check early stopping
         automation = self.training_automation_manager.automations.get(
@@ -990,6 +1004,20 @@ class BaseModel:
         if self.training_automation_manager:
             return self.training_automation_manager.get_automation_stats()
         return {}
+
+    def clean_gpu(self) -> None:
+        """Deep clean GPU memory by nulling tensor references and clearing cache."""
+        import gc
+
+        # Clear PyTorch cache
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
+        # Force garbage collection
+        gc.collect()
+
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
 
     def handle_automation_oom_recovery(
         self, failed_batch_size: int | None = None, failed_lq_size: int | None = None

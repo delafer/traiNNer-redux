@@ -60,17 +60,17 @@ train:
 
   optim_g:
     type: AdamW
-    lr: !!float 1e-4 # Lower LR (1e-4) for Transformer stability
+    lr: !!float 2e-4
     weight_decay: !!float 1e-4
     betas: [0.9, 0.99]
 
   scheduler:
     type: MultiStepLR
-    milestones: [150000, 250000, 350000] # Extended for 36-block model
+    milestones: [40000, 80000, 120000]
     gamma: 0.5
 
-  total_iter: 600000 # Deeper model needs more training to fully converge
-  warmup_iter: 3000 # Slightly longer warmup for stability
+  total_iter: 600000
+  warmup_iter: 3000
 
   # DYNAMIC LOSS SCHEDULING WITH AUTO-CALIBRATION
   dynamic_loss_scheduling:
