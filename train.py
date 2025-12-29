@@ -6,6 +6,12 @@ os.environ["TF_CPP_MIN_LOG_LEVEL"] = "1"
 from traiNNer.check.check_dependencies import check_dependencies
 
 if __name__ == "__main__":
+    import torch.multiprocessing
+
+    try:
+        torch.multiprocessing.set_sharing_strategy("file_system")
+    except RuntimeError:
+        pass  # In case it's already set
     check_dependencies()
 
 
@@ -119,6 +125,7 @@ def create_train_val_dataloader(
                 dist=opt.dist,
                 sampler=train_sampler,
                 seed=opt.manual_seed,
+                opt=opt,
             )
 
             iter_per_epoch = (
@@ -184,6 +191,7 @@ def create_train_val_dataloader(
                     dist=opt.dist,
                     sampler=None,
                     seed=opt.manual_seed,
+                    opt=opt,
                 )
                 logger.info(
                     "Number of val images/folders in %s: %d",
@@ -287,8 +295,35 @@ def train_pipeline(root_path: str) -> None:
 
     # WARNING: should not use get_root_logger in the above codes, including the called functions
     # Otherwise the logger will not be properly initialized
+
+    # Ensure log directory exists before creating log file
     log_file = osp.join(opt.path.log, f"train_{opt.name}_{get_time_str()}.log")
+    os.makedirs(opt.path.log, exist_ok=True)
+
+    # Debug log file creation
+    print(f"🔍 Debug: Log file path: {log_file}")
+    print(f"🔍 Debug: Log directory exists: {os.path.exists(opt.path.log)}")
+    print(f"🔍 Debug: Log directory writable: {os.access(opt.path.log, os.W_OK)}")
+
     logger = get_root_logger(logger_name="traiNNer", log_file=log_file)
+
+    # Verify log file was actually created
+    if os.path.exists(log_file):
+        print(f"✅ Log file successfully created: {log_file}")
+    else:
+        print(f"❌ Log file was not created: {log_file}")
+        # Try to create a fallback log file for debugging
+        fallback_log = osp.join(
+            opt.path.log, f"fallback_train_{opt.name}_{get_time_str()}.log"
+        )
+        try:
+            with open(fallback_log, "w") as f:
+                f.write(
+                    f"Training log file creation failed. Original path: {log_file}\n"
+                )
+            print(f"📝 Fallback log file created: {fallback_log}")
+        except Exception as e:
+            print(f"💥 Failed to create fallback log file: {e}")
     logger.info(get_env_info())
     logger.debug(opt.contents)
     opt.contents = None
@@ -330,6 +365,126 @@ def train_pipeline(root_path: str) -> None:
 
     # create model
     model = build_model(opt)
+
+    # Initialize dynamic wrappers for VRAM management
+    dynamic_dataloader_wrapper = None
+    dynamic_dataset_wrapper = None
+
+    if (
+        hasattr(model, "training_automation_manager")
+        and model.training_automation_manager
+    ):
+        # Create dynamic dataloader wrapper if VRAM management is enabled
+        automation = model.training_automation_manager.automations.get(
+            "DynamicBatchAndPatchSizeOptimizer"
+        )
+        if automation and automation.enabled:
+            from traiNNer.data.dynamic_dataloader_wrapper import (
+                create_dynamic_dataloader,
+                patch_dataset_for_dynamic_updates,
+            )
+
+            current_batch_size = opt.datasets["train"].batch_size_per_gpu or 8
+            current_lq_size = opt.datasets["train"].lq_size or 128
+
+            # Create dynamic dataset wrapper
+            dynamic_dataset_wrapper = patch_dataset_for_dynamic_updates(
+                train_loader.dataset
+            )
+
+            # CRITICAL FIX: Recreate the DataLoader with the dynamic dataset
+            # We cannot modify .dataset of an existing DataLoader, so we must recreate it
+            from torch.utils.data import DataLoader
+
+            # Extract parameters from existing loader
+            loader_kwargs = {
+                "batch_size": train_loader.batch_size,
+                "num_workers": train_loader.num_workers,
+                "sampler": train_loader.sampler,
+                "batch_sampler": train_loader.batch_sampler,
+                # 'collate_fn': train_loader.collate_fn, # MOVED: Passed to wrapper instead
+                "pin_memory": train_loader.pin_memory,
+                "drop_last": train_loader.drop_last,
+                "timeout": train_loader.timeout,
+                "worker_init_fn": train_loader.worker_init_fn,
+                "multiprocessing_context": train_loader.multiprocessing_context,
+                "generator": train_loader.generator,
+                "prefetch_factor": train_loader.prefetch_factor,
+                "persistent_workers": train_loader.persistent_workers,
+            }
+
+            # Save original collate_fn to pass to wrapper
+            original_collate_fn = train_loader.collate_fn
+
+            # Disable collation in the internal loader to prevent worker crashes on mixed sizes
+            # This returns a list of raw samples to the wrapper
+            loader_kwargs["collate_fn"] = lambda x: x
+
+            # Remove arguments that are mutually exclusive or problematic
+            if loader_kwargs["batch_sampler"] is not None:
+                del loader_kwargs["batch_size"]
+                del loader_kwargs["sampler"]
+                del loader_kwargs["drop_last"]
+
+            # Create new loader with dynamic dataset
+            new_train_loader = DataLoader(dynamic_dataset_wrapper, **loader_kwargs)
+
+            # Create dynamic dataloader wrapper around the NEW loader
+            dynamic_dataloader_wrapper = create_dynamic_dataloader(
+                new_train_loader,
+                current_batch_size,
+                update_callback=lambda bs: logger.debug(f"Batch size updated to: {bs}"),
+                collate_fn=original_collate_fn,
+            )
+
+            # Set dynamic wrappers in the model for VRAM management
+            model.set_dynamic_wrappers(
+                dynamic_dataloader_wrapper, dynamic_dataset_wrapper
+            )
+
+            # CRITICAL FIX: Replace the train_loader with the dynamic wrapper
+            # This ensures that the prefetcher uses the dynamic dataloader
+            train_loader = dynamic_dataloader_wrapper
+
+            # Initialize automation parameters with explicit validation
+            model.set_automation_parameters(current_batch_size, current_lq_size)
+
+            # Verify automation parameters are correctly set
+            automation = model.training_automation_manager.automations.get(
+                "DynamicBatchAndPatchSizeOptimizer"
+            )
+            if automation and automation.enabled:
+                logger.info(
+                    f"✅ VRAM Automation verification - "
+                    f"Config batch: {current_batch_size}, lq: {current_lq_size}, "
+                    f"Automation batch: {automation.current_batch_size}, "
+                    f"Automation lq: {automation.current_lq_size}"
+                )
+
+                # Initialize VRAM monitoring immediately if possible
+                if torch.cuda.is_available():
+                    initial_vram = (
+                        torch.cuda.memory_allocated()
+                        / torch.cuda.get_device_properties(0).total_memory
+                    )
+                    logger.info(
+                        f"🔥 Initial VRAM usage: {initial_vram:.3f} ({initial_vram * 100:.1f}%)"
+                    )
+
+            logger.info(
+                f"Dynamic VRAM management initialized - "
+                f"Batch: {current_batch_size}, LQ: {current_lq_size}, "
+                f"Dynamic Wrappers: Enabled"
+            )
+        else:
+            # Fallback to traditional automation without dynamic wrappers
+            current_batch_size = opt.datasets["train"].batch_size_per_gpu or 8
+            current_lq_size = opt.datasets["train"].lq_size or 128
+            model.set_automation_parameters(current_batch_size, current_lq_size)
+            logger.info(
+                f"Automation parameters initialized - Batch: {current_batch_size}, LQ: {current_lq_size}"
+            )
+
     if model.with_metrics:
         if not any(
             isinstance(
@@ -385,6 +540,31 @@ def train_pipeline(root_path: str) -> None:
     gc.collect()
     torch.cuda.empty_cache()
 
+    # Early VRAM monitoring during warmup to ensure automation starts working
+    if (
+        hasattr(model, "training_automation_manager")
+        and model.training_automation_manager
+    ):
+        automation = model.training_automation_manager.automations.get(
+            "DynamicBatchAndPatchSizeOptimizer"
+        )
+        if automation and automation.enabled:
+            # Trigger initial VRAM monitoring to establish baseline
+            initial_adjustments = model.update_automation_vram_monitoring()
+            if initial_adjustments:
+                batch_adj, lq_adj = initial_adjustments
+                # Handle None values during initialization phase (before training starts)
+                if batch_adj is not None and lq_adj is not None:
+                    logger.info(
+                        f"🚀 Early VRAM monitoring - Initial adjustments suggested: "
+                        f"Batch: {batch_adj:+d}, LQ: {lq_adj:+d}"
+                    )
+                else:
+                    logger.info(
+                        f"🚀 Early VRAM monitoring - Initialization phase (iterations 0-99): "
+                        f"Monitoring VRAM without adjustments, batch: {automation.current_batch_size}, LQ: {automation.current_lq_size}"
+                    )
+
     logger.info("Start training from epoch: %d, iter: %d.", start_epoch, current_iter)
     data_timer, iter_timer = AvgTimer(), AvgTimer()
     start_time = time.time()
@@ -419,6 +599,14 @@ def train_pipeline(root_path: str) -> None:
                     current_accum_iter = 0
                     current_iter += 1
                     apply_gradient = True
+
+                    # Update automations with new iteration
+                    model.update_automation_iteration(current_iter)
+
+                    # Check for early stopping from automation
+                    if model.training_automation_manager:
+                        # Early stopping will be checked during validation, but we can prepare
+                        pass
                 else:
                     apply_gradient = False
 
@@ -430,13 +618,234 @@ def train_pipeline(root_path: str) -> None:
                     model.optimize_parameters(
                         current_iter, current_accum_iter, apply_gradient
                     )
+
+                    # Update training automations with training progress
+                    if apply_gradient:
+                        # Update VRAM monitoring for batch size and lq_size optimization
+                        adjustments = model.update_automation_vram_monitoring()
+
+                        # Enhanced VRAM automation debugging - more frequent and detailed
+                        if (
+                            current_iter % 500 == 0
+                        ):  # Log every 500 iterations for better monitoring
+                            if (
+                                hasattr(model, "training_automation_manager")
+                                and model.training_automation_manager
+                            ):
+                                automation = (
+                                    model.training_automation_manager.automations.get(
+                                        "DynamicBatchAndPatchSizeOptimizer"
+                                    )
+                                )
+                                if automation and automation.enabled:
+                                    # Get current VRAM usage for debugging
+                                    if torch.cuda.is_available():
+                                        current_vram = (
+                                            torch.cuda.memory_allocated()
+                                            / torch.cuda.get_device_properties(
+                                                0
+                                            ).total_memory
+                                        )
+                                        logger.info(
+                                            f"🔍 VRAM DEBUG (iter {current_iter}): "
+                                            f"VRAM: {current_vram:.3f} ({current_vram * 100:.1f}%), "
+                                            f"Target: {automation.target_vram_usage:.3f} ({automation.target_vram_usage * 100:.1f}%), "
+                                            f"Current batch: {automation.current_batch_size}, "
+                                            f"Current lq: {automation.current_lq_size}, "
+                                            f"Min batch: {automation.min_batch_size}, "
+                                            f"Max batch: {automation.max_batch_size}, "
+                                            f"Min lq: {automation.min_lq_size}, "
+                                            f"Max lq: {automation.max_lq_size}"
+                                        )
+                                    else:
+                                        logger.info(
+                                            f"🔍 VRAM DEBUG (iter {current_iter}): "
+                                            f"CUDA not available, batch: {automation.current_batch_size}, lq: {automation.current_lq_size}"
+                                        )
+                                else:
+                                    logger.info(
+                                        f"🔍 VRAM DEBUG (iter {current_iter}): DynamicBatchAndPatchSizeOptimizer not found or disabled"
+                                    )
+                            else:
+                                logger.info(
+                                    f"🔍 VRAM DEBUG (iter {current_iter}): No training automation manager found"
+                                )
+
+                        if adjustments is not None:
+                            batch_adjustment, lq_adjustment = adjustments
+                            if (
+                                batch_adjustment is not None
+                                and lq_adjustment is not None
+                            ):
+                                if batch_adjustment != 0 or lq_adjustment != 0:
+                                    logger.info(
+                                        f"Automation suggests adjustments - Batch size: {batch_adjustment:+d}, LQ size: {lq_adjustment:+d}"
+                                    )
+                                try:
+                                    # Update batch size tracking and apply to dynamic wrapper
+                                    if batch_adjustment != 0:
+                                        current_batch = (
+                                            automation.current_batch_size
+                                            or opt.datasets["train"].batch_size_per_gpu
+                                        )
+                                        new_batch = max(
+                                            1, current_batch + batch_adjustment
+                                        )
+
+                                        # Update automation tracking
+                                        model.set_automation_batch_size(new_batch)
+
+                                        # Apply to dynamic wrapper if available (this is the key fix!)
+                                        if dynamic_dataloader_wrapper:
+                                            dynamic_dataloader_wrapper.set_batch_size(
+                                                new_batch
+                                            )
+                                        elif (
+                                            hasattr(automation, "dynamic_dataloader")
+                                            and automation.dynamic_dataloader
+                                        ):
+                                            automation.dynamic_dataloader.set_batch_size(
+                                                new_batch
+                                            )
+
+                                        logger.info(
+                                            f"Batch size adjusted: {current_batch} → {new_batch}"
+                                        )
+
+                                    # Update lq_size tracking and apply to dynamic wrapper
+                                    if lq_adjustment != 0:
+                                        current_lq = (
+                                            automation.current_lq_size
+                                            or opt.datasets["train"].lq_size
+                                        )
+                                        new_lq = max(32, current_lq + lq_adjustment)
+
+                                        # Update automation tracking
+                                        model.set_automation_lq_size(new_lq)
+
+                                        # Safely get scale factor
+                                        scale_factor = opt.scale or 1
+                                        # Apply to dynamic wrapper if available (this is the key fix!)
+                                        if dynamic_dataset_wrapper and hasattr(
+                                            dynamic_dataset_wrapper,
+                                            "set_dynamic_gt_size",
+                                        ):
+                                            dynamic_dataset_wrapper.set_dynamic_gt_size(
+                                                new_lq * scale_factor
+                                            )
+                                        elif (
+                                            hasattr(automation, "dynamic_dataset")
+                                            and automation.dynamic_dataset
+                                        ):
+                                            if hasattr(
+                                                automation.dynamic_dataset,
+                                                "set_dynamic_gt_size",
+                                            ):
+                                                automation.dynamic_dataset.set_dynamic_gt_size(
+                                                    new_lq * scale_factor
+                                                )
+
+                                        logger.info(
+                                            f"LQ size adjusted: {current_lq} → {new_lq} (GT: {new_lq * scale_factor})"
+                                        )
+
+                                except Exception as e:
+                                    logger.warning(
+                                        f"Failed to apply automation adjustments: {e}"
+                                    )
+
                 except RuntimeError as e:
                     # Check to see if its actually the CUDA out of memory error
                     if "allocate" in str(e) or "CUDA" in str(e):
+                        # Handle OOM recovery with automations
+                        if (
+                            hasattr(model, "training_automation_manager")
+                            and model.training_automation_manager
+                        ):
+                            logger.info(
+                                "OOM detected, attempting automation recovery..."
+                            )
+
+                            # Automation will record actual failing params and return safe recovery values
+                            recovery_params = model.handle_automation_oom_recovery()
+
+                            if recovery_params:
+                                suggested_batch_size, suggested_lq_size = (
+                                    recovery_params
+                                )
+                            else:
+                                # Fallback if automation is not managing these
+                                current_batch_size = opt.datasets[
+                                    "train"
+                                ].batch_size_per_gpu
+                                suggested_batch_size = max(1, current_batch_size // 2)
+                                suggested_lq_size = opt.datasets["train"].lq_size // 2
+
+                            # Apply OOM recovery to dynamic wrappers
+                            if dynamic_dataloader_wrapper:
+                                dynamic_dataloader_wrapper.set_batch_size(
+                                    suggested_batch_size
+                                )
+                            elif (
+                                hasattr(
+                                    model.training_automation_manager.automations.get(
+                                        "DynamicBatchAndPatchSizeOptimizer"
+                                    ),
+                                    "dynamic_dataloader",
+                                )
+                                and model.training_automation_manager.automations.get(
+                                    "DynamicBatchAndPatchSizeOptimizer"
+                                ).dynamic_dataloader
+                            ):
+                                model.training_automation_manager.automations.get(
+                                    "DynamicBatchAndPatchSizeOptimizer"
+                                ).dynamic_dataloader.set_batch_size(
+                                    suggested_batch_size
+                                )
+
+                            # Safely get scale factor for OOM recovery
+                            scale_factor = opt.scale or 1
+                            if dynamic_dataset_wrapper and hasattr(
+                                dynamic_dataset_wrapper, "set_dynamic_gt_size"
+                            ):
+                                dynamic_dataset_wrapper.set_dynamic_gt_size(
+                                    suggested_lq_size * scale_factor
+                                )
+                            elif (
+                                hasattr(
+                                    model.training_automation_manager.automations.get(
+                                        "DynamicBatchAndPatchSizeOptimizer"
+                                    ),
+                                    "dynamic_dataset",
+                                )
+                                and model.training_automation_manager.automations.get(
+                                    "DynamicBatchAndPatchSizeOptimizer"
+                                ).dynamic_dataset
+                            ):
+                                if hasattr(
+                                    model.training_automation_manager.automations.get(
+                                        "DynamicBatchAndPatchSizeOptimizer"
+                                    ).dynamic_dataset,
+                                    "set_dynamic_gt_size",
+                                ):
+                                    model.training_automation_manager.automations.get(
+                                        "DynamicBatchAndPatchSizeOptimizer"
+                                    ).dynamic_dataset.set_dynamic_gt_size(
+                                        suggested_lq_size * scale_factor
+                                    )
+
+                        # Reset prefetcher to discard queued batches with old (large) size
+                        prefetcher.reset()
+                        # Fetch the first batch with the new settings to ensure we can proceed
+                        train_data = prefetcher.next()
+
                         # Collect garbage (clear VRAM)
-                        raise RuntimeError(
-                            "Ran out of VRAM during training. Please reduce lq_size or batch_size_per_gpu and try again."
-                        ) from None
+                        torch.cuda.empty_cache()
+                        # Retry the iteration (continue the loop)
+                        logger.info(
+                            "OOM Recovery successful. Retrying iteration with reduced parameters."
+                        )
+                        continue
                     else:
                         # Re-raise the exception if not an OOM error
                         raise
@@ -460,6 +869,30 @@ def train_pipeline(root_path: str) -> None:
                         }
                     )
                     log_vars.update(model.get_current_log())
+
+                    # Add enhanced training statistics for comprehensive monitoring
+                    try:
+                        # Get gradients for enhanced logging (if available)
+                        gradients = []
+                        if hasattr(model, "net_g"):
+                            gradients = [
+                                p.grad
+                                for p in model.net_g.parameters()
+                                if p.grad is not None
+                            ]
+
+                        # Collect enhanced logging statistics
+                        if hasattr(model, "_collect_enhanced_logging_stats"):
+                            enhanced_stats = model._collect_enhanced_logging_stats(
+                                model.log_dict, current_iter, gradients
+                            )
+                            # Add enhanced stats to log_vars
+                            for key, value in enhanced_stats.items():
+                                log_vars[key] = value
+                    except Exception as e:
+                        # Fallback if enhanced logging fails
+                        logger.debug(f"Enhanced logging failed: {e}")
+
                     model.reset_current_log()
                     msg_logger(log_vars)
 
@@ -495,6 +928,46 @@ def train_pipeline(root_path: str) -> None:
                                 opt.val.save_img,
                                 multi_val_datasets,
                             )
+
+                        # Check for early stopping from automations
+                        if (
+                            hasattr(model, "training_automation_manager")
+                            and model.training_automation_manager
+                        ):
+                            # Get validation metrics from model for early stopping
+                            validation_metrics = {}
+                            if model.with_metrics and model.metric_results:
+                                # Convert metric results to dict format expected by automations
+                                for (
+                                    metric_name,
+                                    metric_value,
+                                ) in model.metric_results.items():
+                                    validation_metrics[metric_name] = float(
+                                        metric_value
+                                    )
+                                # Also add common metric names
+                                if "psnr" in model.metric_results:
+                                    validation_metrics["val/psnr"] = (
+                                        model.metric_results["psnr"]
+                                    )
+                                if "ssim" in model.metric_results:
+                                    validation_metrics["val/ssim"] = (
+                                        model.metric_results["ssim"]
+                                    )
+
+                            # Update validation tracking and check for early stopping
+                            should_stop, stop_reason = (
+                                model.update_automation_validation_tracking(
+                                    validation_metrics, current_iter
+                                )
+                            )
+
+                            if should_stop:
+                                logger.info(
+                                    f"Training stopped by automation: {stop_reason}"
+                                )
+                                interrupt_received = True
+                                break
 
                 data_timer.start()
                 iter_timer.start()

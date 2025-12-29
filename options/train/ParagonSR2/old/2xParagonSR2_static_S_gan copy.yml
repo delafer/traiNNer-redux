@@ -1,0 +1,180 @@
+# yaml-language-server: $schema=https://raw.githubusercontent.com/the-database/traiNNer-redux/refs/heads/master/schemas/redux-config.schema.json
+# -------------------------------------------------------------------------------------------------
+# ParagonSR2-STATIC-S (GAN + Perceptual Phase-Shift Fine-Tuning, High Visual Contrast)
+# Uses R3GAN, phased activation to ensure dramatic perceptual change without instability.
+# -------------------------------------------------------------------------------------------------
+
+name: 2xParagonSR2_S_static_perceptual_r3_v1
+scale: 2
+
+use_amp: true
+amp_bf16: true
+use_channels_last: true
+fast_matmul: true
+num_gpu: auto
+
+# -------------------------------------------------------------------------------------------------
+# Datasets
+# -------------------------------------------------------------------------------------------------
+datasets:
+  train:
+    name: Train_Dataset
+    type: pairedimagedataset
+    dataroot_gt: /home/phips/Documents/dataset/cc0/hr
+    dataroot_lq: /home/phips/Documents/dataset/cc0/lr_x2
+    lq_size: 128
+    use_hflip: true
+    use_rot: true
+    num_worker_per_gpu: 8
+    batch_size_per_gpu: 8
+    accum_iter: 1
+
+  val:
+    name: Val_Dataset
+    type: pairedimagedataset
+    dataroot_gt: /home/phips/Documents/dataset/cc0/val_hr
+    dataroot_lq: /home/phips/Documents/dataset/cc0/val_lr_x2
+
+# -------------------------------------------------------------------------------------------------
+# Network
+# -------------------------------------------------------------------------------------------------
+network_g:
+  type: paragonsr2_static_s
+
+network_d:
+  type: munet
+
+# -------------------------------------------------------------------------------------------------
+# Paths: Pretrain & Resume
+# -------------------------------------------------------------------------------------------------
+path:
+  pretrain_network_g: experiments/2xParagonSR2_S_fidelity/models/net_g_ema_400000.safetensors
+  strict_load_g: true
+  resume_state: ~
+
+# -------------------------------------------------------------------------------------------------
+# Training
+# -------------------------------------------------------------------------------------------------
+train:
+  ema_decay: 0.995
+  ema_power: 0.75
+  grad_clip: true
+
+  optim_g:
+    type: AdamW
+    lr: !!float 1.0e-4
+    weight_decay: !!float 1.0e-4
+    betas: [0.9, 0.99]
+
+  optim_d:
+    type: AdamW
+    lr: !!float 1.5e-4
+    weight_decay: !!float 0.0
+    betas: [0.9, 0.99]
+
+  scheduler:
+    type: MultiStepLR
+    milestones: [70000, 120000]
+    gamma: 0.5
+
+  total_iter: 150000
+  warmup_iter: 1000
+
+  # -------------------------------------------------------------------------------------------------
+  # LOSS SCHEDULE: MAXIMUM VISUAL DISTINCTION FROM FIDELITY MODEL
+  # -------------------------------------------------------------------------------------------------
+  losses:
+
+    # 1) Pixel anchor (ramped down for perceptual focus)
+    - type: charbonnierloss
+      loss_weight: 1.0
+      start_iter: 20000
+      target_iter: 40000
+      target_weight: 0.7
+      schedule_type: linear
+
+    # 2) ConvNeXt Perceptual Structure
+    - type: convnextperceptualloss
+      loss_weight: 0.12
+      layers: [1, 2]
+      layer_weights: [1.0, 0.7]
+      eps: 1.0e-6
+      start_iter: 0
+      target_iter: 20000
+      target_weight: 0.26
+
+    # 3) Structural similarity (perceptual, not pixel)
+    - type: distsloss
+      loss_weight: 0.08
+      as_loss: true
+      load_weights: true
+      use_input_norm: true
+
+    # 4) Frequency / microdetail sharpening (enhanced after 20k)
+    - type: ffloss
+      loss_weight: 0.08
+      start_iter: 20000
+      target_iter: 40000
+      target_weight: 0.18
+      schedule_type: linear
+
+    # 5) Texture regularity guidance (stabilized after 1k iterations)
+    - type: GradientVarianceLoss
+      loss_weight: 0.03
+      start_iter: 1000
+      patch_size: 16
+      criterion: charbonnier
+
+    # 6) Local artifact suppression (optional, remove later)
+    - type: ldlloss
+      loss_weight: 0.5
+      disable_after: 50000
+
+    # 7) GAN Loss (R3GAN, OFF until 20k)
+    - type: ganloss
+      gan_type: r3gan
+      loss_weight: 0.00
+      start_iter: 20000
+      target_weight: 0.08
+      r1_weight: 2.0
+      r2_weight: 2.0
+
+    # 8) Optional semantic anchor (CLIP, also phased-in)
+    - type: ContrastiveLoss
+      loss_weight: 0.00
+      temperature: 0.1
+      start_iter: 30000
+      target_weight: 0.05
+
+# -------------------------------------------------------------------------------------------------
+# Validation
+# -------------------------------------------------------------------------------------------------
+val:
+  val_enabled: true
+  val_freq: 5000
+  save_img: true
+  metrics_enabled: true
+  metrics:
+    psnr:
+      type: calculate_psnr
+      crop_border: 2
+    ssim:
+      type: calculate_ssim
+      crop_border: 2
+    lpips:
+      type: calculate_lpips
+      better: lower
+    dists:
+      type: calculate_dists
+      better: lower
+    topiq:
+      type: calculate_topiq
+
+# -------------------------------------------------------------------------------------------------
+# Logging
+# -------------------------------------------------------------------------------------------------
+logger:
+  print_freq: 100
+  save_checkpoint_freq: 5000
+  save_checkpoint_format: safetensors
+  use_tb_logger: true

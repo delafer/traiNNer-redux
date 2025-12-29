@@ -1,0 +1,227 @@
+name: 2xParagonSR2_S_DeJPEG_Ultimate
+scale: 2
+use_amp: true
+amp_bf16: true
+use_channels_last: true
+fast_matmul: true
+num_gpu: auto
+
+datasets:
+  train:
+    name: Train_Dataset
+    type: pairedimagedataset
+    dataroot_gt: /home/phips/Documents/dataset/cc0/hr
+    dataroot_lq: /home/phips/Documents/dataset/cc0/lr_x2_jpg
+    lq_size: 128
+    use_hflip: true
+    use_rot: true
+    num_worker_per_gpu: 8
+    batch_size_per_gpu: 4
+    accum_iter: 1
+
+  val:
+    name: Val_Dataset
+    type: pairedimagedataset
+    dataroot_gt: /home/phips/Documents/dataset/cc0/val_hr
+    dataroot_lq: /home/phips/Documents/dataset/cc0/val_lr_x2_jpg
+
+network_g:
+  type: paragonsr2_static_s
+  # Ensure hr_blocks matches your Pretrain (S usually has 2, Micro has 1)
+  hr_blocks: 2
+
+network_d:
+  type: munet
+
+path:
+  pretrain_network_g: experiments/2xParagonSR2_S_with_FeatureMatching_Optimized/models/net_g_ema_140000.safetensors
+  strict_load_g: true
+  resume_state: ~
+
+train:
+  ema_decay: 0.995
+  ema_power: 0.75
+  grad_clip: true
+
+  optim_g:
+    type: AdamW
+    lr: !!float 1e-4
+    weight_decay: !!float 1.0e-4
+    betas: [0.9, 0.99]
+
+  optim_d:
+    type: AdamW
+    lr: !!float 3e-5 # 1e-4, changed to 3e-5 at 7500its, discrim became too strong
+    weight_decay: 0
+    betas: [0.9, 0.99]
+
+  scheduler:
+    type: MultiStepLR
+    milestones: [30000, 45000]
+    gamma: 0.5
+
+  total_iter: 50000
+  warmup_iter: 200
+
+  # =========================================================================
+  # OPTIMIZED LOSS STACK FOR JPEG DE-ARTIFACTING
+  # =========================================================================
+
+  # Charbonnier → Pixel accuracy
+  # Perceptual → Structure
+  # DISTS → Texture quality
+  # Feature Matching → Discriminator alignment
+  # LDL → Local artifact removal
+  # Consistency → Color stability
+  # FF → Frequency domain
+  # AdaptiveBlockTV → JPEG block artifacts
+  # GAN → Photorealism
+
+  losses:
+    # 1. PIXEL LOSS: Stable foundation
+    - type: charbonnierloss
+      loss_weight: 0.8
+      start_iter: 0
+      target_iter: 25000
+      target_weight: 0.1
+      schedule_type: linear
+
+    # 2. PERCEPTUAL: Core structural loss
+    - type: convnextperceptualloss
+      loss_weight: 0.5
+      start_iter: 0
+      layers: [1, 2]
+      layer_weights: [1.0, 0.7]
+
+    # 3. DISTS: Texture quality (S model can handle this)
+    - type: distsloss
+      loss_weight: 0.1
+      start_iter: 0
+
+    # 4. FEATURE MATCHING: Discriminator guidance
+    - type: featurematchingloss
+      loss_weight: 0.5
+      start_iter: 0
+      layers: ['down2', 'mid']   # Keep 2 layers for efficiency
+      criterion: charbonnier
+
+    # 5. LDL: Anti-JPEG artifact loss
+    - type: ldlloss
+      loss_weight: 10.0
+      start_iter: 0
+
+    # 6. CONSISTENCY: Color stability
+    - type: ConsistencyLoss
+      loss_weight: 0.25
+      start_iter: 0
+      criterion: "chc"
+      blur: false
+      brightness: 1.0
+      saturation: 1.0
+      cosim: true
+      cosim_weight: 0.5
+
+    # 7. FF LOSS: Frequency domain
+    - type: ffloss
+      loss_weight: 0.1
+      start_iter: 5000
+      target_iter: 25000
+      target_weight: 0.2
+      schedule_type: linear
+
+    # 8. ADAPTIVE BLOCK TV: JPEG block targeting
+    - type: AdaptiveBlockTVLoss
+      loss_weight: 0.005         # Low weight
+      start_iter: 0
+      block_size: 8              # Target JPEG blocks
+      sharpness: 4.0
+      reduction: mean
+      eps: 1e-6
+
+    # 9. GAN: Texture generation
+    - type: ganloss
+      gan_type: r3gan
+      loss_weight: 0.0001
+      start_iter: 10000
+      target_iter: 25000
+      target_weight: 0.03        # Conservative (not 0.1)
+      r1_weight: 1.0             # Used for stability
+      r2_weight: 0.0             # DISABLED for speed and vram saving
+      schedule_type: linear
+
+    # HFEN: Edge preservation
+    #- type: hfenloss
+    #  loss_weight: 0.015         # Edge detail preservation
+    #  start_iter: 2000           # Start early
+    #  target_iter: 2000
+    #  target_weight: 0.015
+    #  kernel_size: 7
+    #  sigma: 1.0
+    #  criterion: charbonnier
+    #  reduction: mean
+
+    # GRADIENT VARIANCE: Microtexture
+    #- type: GradientVarianceLoss
+    #  loss_weight: 0.06          # Microtexture preservation
+    #  start_iter: 500
+    #  target_iter: 500
+    #  target_weight: 0.06
+    #  patch_size: 16
+    #  criterion: charbonnier
+
+    # LAPLACIAN PYRAMID: Multi-scale detail
+    #- type: LaplacianPyramidLoss
+    #  loss_weight: 0.12          # Slightly higher
+    #  levels: 3
+    #  criterion: charbonnier
+    #  start_iter: 0
+
+    # CHECKERBOARD: Anti-upsampling artifacts
+    #- type: CheckerboardLoss
+    #  loss_weight: 0.015         # Slightly higher
+    #  scale: 2
+    #  criterion: charbonnier
+    #  start_iter: 0
+
+    #- type: ContrastiveLoss
+    #  loss_weight: 0.00
+    #  start_iter: 0
+    #  target_iter: 50000
+    #  target_weight: 0.05
+    #  temperature: 0.1
+
+val:
+  val_enabled: true
+  val_freq: 2500
+  save_img: true
+  metrics_enabled: true
+  metrics:
+    # PSNR - Peak Signal-to-Noise Ratio (pixel-wise reconstruction fidelity)
+    psnr:
+      type: calculate_psnr
+      crop_border: 2       # Ignore 2-pixel border (avoids boundary artifacts)
+
+    # SSIM - Structural Similarity Index (structural preservation)
+    ssim:
+      type: calculate_ssim
+      crop_border: 2       # Consistent crop for fair comparison
+
+    # LPIPS - Learned Perceptual Image Patch Similarity (perceptual quality)
+    lpips:
+      type: calculate_lpips
+      better: lower        # Lower LPIPS = better perceptual quality
+
+    # DISTS - Deep Image Structure and Texture Similarity (texture quality)
+    dists:
+      type: calculate_dists
+      better: lower        # Lower DISTS = better structure/texture match
+
+    # ToPIQ - Transferable Perceptual Image Quality (comprehensive quality)
+    topiq:
+      type: calculate_topiq
+
+logger:
+  print_freq: 50
+  save_checkpoint_freq: 2500
+  save_checkpoint_format: safetensors
+  use_tb_logger: true

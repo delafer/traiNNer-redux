@@ -1,0 +1,162 @@
+# yaml-language-server: $schema=https://raw.githubusercontent.com/the-database/traiNNer-redux/refs/heads/master/schemas/redux-config.schema.json
+#########################################################################################
+# ParagonSR2 S - Real-World Degradations (Complex, Multiple Artifacts)
+# Handles blur, noise, JPG/AVIF/WebP compression, downsampling artifacts
+# Requires discriminator for photorealistic output quality
+#########################################################################################
+name: 2xParagonSR2_S_Real
+scale: 2
+
+use_amp: true
+amp_bf16: true
+use_channels_last: true
+fast_matmul: true
+num_gpu: auto
+
+datasets:
+  train:
+    name: Train
+    type: pairedimagedataset
+    dataroot_gt: /home/phips/Documents/dataset/cc0/hr
+    dataroot_lq: /home/phips/Documents/dataset/cc0/lr_x2_real # Complex degradations
+    lq_size: 256 # S model benefits from larger context
+    use_hflip: true
+    use_rot: true
+    num_worker_per_gpu: 8
+    batch_size_per_gpu: 4
+    accum_iter: 1
+
+  val:
+    name: Val
+    type: pairedimagedataset
+    dataroot_gt: /home/phips/Documents/dataset/cc0/val_hr
+    dataroot_lq: /home/phips/Documents/dataset/cc0/val_lr_x2_real
+
+network_g:
+  type: paragonsr2_s
+
+network_d:
+  type: munet # Multi-branch discriminator for artifact detection
+
+path:
+  # Start from fidelity or perceptual pretrain
+  pretrain_network_g: experiments/2xParagonSR2_S_Perceptual/models/net_g_ema_60000.safetensors
+  strict_load_g: true
+  resume_state: ~
+
+train:
+  ema_decay: 0.999 # Standard for S model
+  ema_power: 0.75
+  grad_clip: true
+
+  optim_g:
+    type: AdamW
+    lr: !!float 1e-4
+    weight_decay: !!float 1e-4
+    betas: [0.9, 0.99]
+
+  optim_d:
+    type: AdamW
+    lr: !!float 3e-5 # Conservative discriminator LR
+    weight_decay: 0
+    betas: [0.9, 0.99]
+
+  scheduler:
+    type: MultiStepLR
+    milestones: [30000, 45000]
+    gamma: 0.5
+
+  total_iter: 100000 # Longer for GAN stability
+  gan_start_iter: 15000 # Start GAN after solid baseline
+  warmup_iter: 200
+
+  # Optimized loss stack for real-world degradations + GAN
+  losses:
+    # 1. Pixel accuracy - ramp down aggressively for photorealism
+    - type: charbonnierloss
+      loss_weight: 1.0
+      target_iter: 40000
+      target_weight: 0.1 # Low but not too low (stability)
+      schedule_type: linear
+
+    # 2. Perceptual - core structure preservation
+    - type: convnextperceptualloss
+      loss_weight: 0.2 # Lower with GAN (GAN handles detail)
+      layers: [1, 2]
+      layer_weights: [1.0, 0.7]
+
+    # 3. Texture quality
+    - type: distsloss
+      loss_weight: 0.1
+
+    # 4. Color stability - critical for GAN training
+    - type: ConsistencyLoss
+      loss_weight: 0.1 # Standard for S with GAN
+      criterion: "chc"
+      blur: false
+      cosim: true
+      cosim_weight: 0.5
+
+    # 5. Frequency domain - handles compression artifacts
+    - type: ffloss
+      loss_weight: 0.1
+      start_iter: 5000
+      target_iter: 30000
+      target_weight: 0.2 # Moderate for compression
+      schedule_type: linear
+
+    # 6. Block artifact removal (JPG/WebP/AVIF)
+    - type: AdaptiveBlockTVLoss
+      loss_weight: 0.01 # Moderate for S (preserves texture)
+      block_size: 8
+      sharpness: 4.0
+
+    # 7. High-frequency detail (lower with GAN)
+    - type: hfenloss
+      loss_weight: 0.08 # Moderate (GAN helps with detail)
+      start_iter: 2000
+      kernel_size: 7
+      sigma: 1.0
+      criterion: charbonnier
+
+    # 8. Feature matching - GAN stabilizer (CRITICAL!)
+    - type: featurematchingloss
+      loss_weight: 0.1 # Standard stabilizer weight
+      start_iter: 15000 # Start with GAN
+
+    # 9. GAN - photorealistic texture synthesis
+    - type: ganloss # Standard GANLoss with r3gan type
+      gan_type: r3gan
+      loss_weight: 0.03 # Conservative weight
+      start_iter: 15000 # Start after solid baseline
+
+  # R1 gradient penalty (applied to discriminator during training)
+  r1_reg_weight: 10.0 # Stabilizes GAN training
+
+val:
+  val_enabled: true
+  val_freq: 2500
+  save_img: true
+
+  metrics_enabled: true
+  metrics:
+    psnr:
+      type: calculate_psnr
+      crop_border: 2
+    ssim:
+      type: calculate_ssim
+      crop_border: 2
+    lpips:
+      type: calculate_lpips
+      better: lower
+    dists:
+      type: calculate_dists
+      better: lower
+    topiq:
+      type: calculate_topiq
+
+logger:
+  print_freq: 50
+  save_checkpoint_freq: 2500
+  save_checkpoint_format: safetensors
+  use_tb_logger: true

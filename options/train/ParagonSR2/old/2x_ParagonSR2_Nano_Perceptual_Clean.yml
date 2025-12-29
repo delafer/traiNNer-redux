@@ -1,0 +1,177 @@
+# yaml-language-server: $schema=https://raw.githubusercontent.com/the-database/traiNNer-redux/refs/heads/master/schemas/redux-config.schema.json
+# 2x ParagonSR2 Nano - Perceptual Clean
+#
+# Goals:
+# - Start from 2x_ParagonSR2_Nano_Pretrain_Clean (sharp, artifact-minimized).
+# - Add perceptual guidance and a very light, stable adversarial term.
+# - Achieve crisp, visually pleasing outputs that look good to humans:
+#     * sharp, detailed, with good micro-contrast,
+#     * minimal halos, ghost lines, watercolor, or GAN "oil painting" artifacts.
+# - Keep the architecture and losses deployment-friendly:
+#     * no exotic ops,
+#     * ParagonSR2 Nano (Magic+Conv + HR head),
+#     * suitable for fuse_for_release + ONNX/TensorRT + FP16/INT8.
+#
+# This config is the recommended 2x ParagonSR2 Nano perceptual setup built on the clean pretrain.
+
+name: 2x_ParagonSR2_Nano_Perceptual_Clean
+scale: 2
+
+use_amp: true
+amp_bf16: false
+use_channels_last: true
+fast_matmul: true
+num_gpu: auto
+
+# -------------------------------------------------------------------------------------------------
+# Data
+# -------------------------------------------------------------------------------------------------
+datasets:
+  train:
+    name: Train_Dataset
+    type: pairedimagedataset
+    dataroot_gt: /home/phips/Documents/dataset/cc0/hr
+    dataroot_lq: /home/phips/Documents/dataset/cc0/lr_x2
+    lq_size: 64
+    use_hflip: true
+    use_rot: true
+    num_worker_per_gpu: 8
+    batch_size_per_gpu: 8
+    accum_iter: 1
+
+  val:
+    name: Val_Dataset
+    type: pairedimagedataset
+    dataroot_gt: /home/phips/Documents/dataset/cc0/val_hr
+    dataroot_lq: /home/phips/Documents/dataset/cc0/val_lr_x2
+
+# -------------------------------------------------------------------------------------------------
+# Network
+# -------------------------------------------------------------------------------------------------
+network_g:
+  type: paragonsr2_nano
+  # Match the architecture used in the clean pretrain:
+  upsampler_alpha: 0.5
+  hr_blocks: 1
+
+network_d:
+  type: munet
+
+# -------------------------------------------------------------------------------------------------
+# Paths
+# -------------------------------------------------------------------------------------------------
+path:
+  # Use the clean pretrain as initialization:
+  pretrain_network_g: experiments/2x_ParagonSR2_Nano_Pretrain_Clean/models/net_g_ema_50000.safetensors
+  # NOTE: Adjust the above path to your actual pretrain checkpoint location.
+  strict_load_g: true
+  resume_state: ~
+
+# -------------------------------------------------------------------------------------------------
+# Training
+# -------------------------------------------------------------------------------------------------
+train:
+  ema_decay: 0.995
+  ema_power: 0.75
+  grad_clip: true
+
+  optim_g:
+    type: AdamW
+    lr: !!float 5.0e-5
+    weight_decay: 0.0
+    betas: [0.9, 0.99]
+
+  optim_d:
+    type: AdamW
+    lr: !!float 5.0e-5
+    weight_decay: 0.0
+    betas: [0.9, 0.99]
+
+  scheduler:
+    type: MultiStepLR
+    milestones: [40000, 60000]
+    gamma: 0.5
+
+  total_iter: 80000
+  warmup_iter: 2000
+
+  # Losses: designed for "clean perceptual" behavior.
+  losses:
+    # 1) Fidelity anchor, prevents hallucination and color drift.
+    - type: l1loss
+      loss_weight: 1.0
+
+    # 2) Perceptual losses (modern, robust), encourage perceptual sharpness and natural textures.
+    - type: convnextperceptualloss
+      loss_weight: 0.15
+
+    - type: distsloss
+      loss_weight: 0.10
+
+    # 4) Consistency: stabilize color/brightness, avoid weird shifts
+    - type: ConsistencyLoss
+      loss_weight: 0.05
+      criterion: chc
+      blur: false
+      saturation: 1.0
+      brightness: 1.0
+      cosim: true
+      cosim_weight: 0.5
+
+    # 5) small structural regularizer
+    - type: ContrastiveLoss
+      loss_weight: 0.03
+      temperature: 0.1
+
+    # 6) Frequency sharpening (moderate, to keep crispness), pushes for high-frequency detail; directly fights blur.
+    - type: ffloss
+      loss_weight: 0.12
+
+    # 7) Very light R3GAN for subtle micro-contrast and “pop” without going painterly
+    - type: ganloss
+      gan_type: r3gan
+      loss_weight: 0.02
+      r1_weight: 2.5
+      r2_weight: 2.5
+
+    # 8) Gradient-variance loss to suppress aliasing/jaggies
+    - type: GradientVarianceLoss
+      loss_weight: 0.04
+      patch_size: 16
+      criterion: charbonnier
+
+# -------------------------------------------------------------------------------------------------
+# Validation
+# -------------------------------------------------------------------------------------------------
+val:
+  val_enabled: true
+  val_freq: 5000
+  save_img: true
+
+  metrics_enabled: true
+  metrics:
+    psnr:
+      type: calculate_psnr
+      crop_border: 2
+      test_y_channel: false
+    ssim:
+      type: calculate_ssim
+      crop_border: 2
+      test_y_channel: false
+    lpips:
+      type: calculate_lpips
+      better: lower
+    dists:
+      type: calculate_dists
+      better: lower
+    topiq:
+      type: calculate_topiq
+
+# -------------------------------------------------------------------------------------------------
+# Logging
+# -------------------------------------------------------------------------------------------------
+logger:
+  print_freq: 100
+  save_checkpoint_freq: 5000
+  save_checkpoint_format: safetensors
+  use_tb_logger: true

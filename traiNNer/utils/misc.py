@@ -272,7 +272,11 @@ def underscore(word: str) -> str:
 def loss_type_to_label(loss_type: str, network_label: str = "g") -> str:
     # label = loss_type.replace("HSLuvLoss", "HSLUVLoss")  # hack for HSLuv
     # label = underscore(label)
-    label = loss_type.lower().replace("loss", "")
+    loss_type_lower = loss_type.lower()
+    if loss_type_lower in ["r3ganloss", "multiscaleganloss"]:
+        return f"l_{network_label}_gan"
+
+    label = loss_type_lower.replace("loss", "")
     return f"l_{network_label}_{label}"
 
 

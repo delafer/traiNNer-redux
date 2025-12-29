@@ -32,6 +32,10 @@ from traiNNer.utils.dist_util import master_only
 from traiNNer.utils.logger import clickable_file_path
 from traiNNer.utils.misc import is_json_compatible, require_triton
 from traiNNer.utils.redux_options import ReduxOptions
+from traiNNer.utils.training_automations import (
+    TrainingAutomationManager,
+    setup_training_automations,
+)
 from traiNNer.utils.types import DataFeed, TrainingState
 
 
@@ -78,6 +82,11 @@ class BaseModel:
         self.scaler_ae: GradScaler | None = None
         self.accum_iters: int = 1
         self.grad_clip: bool = False
+
+        # Initialize training automations
+        self.training_automation_manager: TrainingAutomationManager | None = None
+        if self.is_train:
+            self.training_automation_manager = setup_training_automations(opt)
 
     @abstractmethod
     def feed_data(self, data: DataFeed) -> None:
@@ -175,7 +184,16 @@ class BaseModel:
             self.best_metric_results[dataset_name][metric]["iter"] = current_iter
 
     def get_current_log(self) -> dict[str, float | torch.Tensor]:
-        return {k: v / self.loss_samples for k, v in self.log_dict.items()}
+        """Get current log with safe division for numeric values only."""
+        result = {}
+        for k, v in self.log_dict.items():
+            if isinstance(v, (int, float, torch.Tensor)):
+                # Only divide numeric values
+                result[k] = v / self.loss_samples
+            else:
+                # Keep dictionary values (like training automation stats) as-is
+                result[k] = v
+        return result
 
     def reset_current_log(self) -> None:
         self.log_dict = {}
@@ -217,6 +235,12 @@ class BaseModel:
         elif self.opt.num_gpu > 1:
             net = DataParallel(net)
 
+        if self.opt.use_compile:
+            logger = get_root_logger()
+            logger.info(
+                "Compiling network %s. This may take several minutes...", net_name
+            )
+            net = torch.compile(net, dynamic=True, mode="max-autotune")  # pyright: ignore[reportAssignmentType]
         return net
 
     def get_optimizer(
@@ -730,6 +754,14 @@ class BaseModel:
             elif self.net_ae_ema is not None:
                 state["ema_step"] = self.net_ae_ema.step
 
+            if (
+                hasattr(self, "training_automation_manager")
+                and self.training_automation_manager
+            ):
+                state["training_automation_manager"] = (
+                    self.training_automation_manager.state_dict()
+                )
+
             save_filename = f"{current_iter}.state"
             save_path = os.path.join(self.opt.path.training_states, save_filename)
 
@@ -803,6 +835,15 @@ class BaseModel:
                 self.net_ae_ema.register_buffer("step", resume_state["ema_step"])
                 self.net_ae_ema.register_buffer("initted", torch.tensor(True))
 
+        if (
+            "training_automation_manager" in resume_state
+            and hasattr(self, "training_automation_manager")
+            and self.training_automation_manager
+        ):
+            self.training_automation_manager.load_state_dict(
+                resume_state["training_automation_manager"]
+            )
+
     def reduce_loss_dict(self, loss_dict: dict[str, Any]) -> dict[str, Any]:
         """reduce loss dict.
 
@@ -843,3 +884,187 @@ class BaseModel:
                     "MoA debugging enabled. Augmented tiles will be saved to: %s",
                     MOA_DEBUG_PATH,
                 )
+
+    # Training Automation Integration Methods
+
+    def update_automation_iteration(self, iteration: int) -> None:
+        """Update iteration for all training automations."""
+        if self.training_automation_manager:
+            self.training_automation_manager.update_iteration(iteration)
+
+    def update_automation_loss_tracking(
+        self, loss_value: float, iteration: int
+    ) -> None:
+        """Update loss tracking for automations that monitor training loss."""
+        if not self.training_automation_manager:
+            return
+
+        # Import logging here to avoid issues
+        from traiNNer.utils import get_root_logger
+
+        logger = get_root_logger()
+
+        automation = self.training_automation_manager.automations.get(
+            "IntelligentLearningRateScheduler"
+        )
+        if automation and automation.enabled:
+            automation.update_loss_tracking(loss_value)
+
+        automation = self.training_automation_manager.automations.get(
+            "IntelligentEarlyStopping"
+        )
+        if automation and automation.enabled:
+            automation.update_training_monitoring(loss_value, iteration)
+
+    def update_automation_validation_tracking(
+        self, metrics: dict[str, float], iteration: int
+    ) -> tuple[bool, str]:
+        """Update validation tracking and return early stopping decision."""
+        if not self.training_automation_manager:
+            return False, ""
+
+        should_stop = False
+        stop_reason = ""
+
+        # Update learning rate scheduler
+        automation = self.training_automation_manager.automations.get(
+            "IntelligentLearningRateScheduler"
+        )
+        if automation and automation.enabled:
+            automation.update_validation_tracking(metrics)
+
+        # Check early stopping
+        automation = self.training_automation_manager.automations.get(
+            "IntelligentEarlyStopping"
+        )
+        if automation and automation.enabled:
+            should_stop, stop_reason = automation.update_validation_monitoring(
+                metrics, iteration
+            )
+
+        return should_stop, stop_reason
+
+    def update_automation_vram_monitoring(self) -> tuple[int, int] | None:
+        """Update VRAM monitoring and return suggested batch size and lq_size adjustments."""
+        if not self.training_automation_manager:
+            return None
+
+        automation = self.training_automation_manager.automations.get(
+            "DynamicBatchAndPatchSizeOptimizer"
+        )
+        if automation and automation.enabled:
+            return automation.update_vram_monitoring()
+
+        return None
+
+    def update_automation_gradient_monitoring(
+        self, gradients: list[torch.Tensor]
+    ) -> float | None:
+        """Update gradient monitoring and return suggested clipping threshold."""
+        if not self.training_automation_manager:
+            return None
+
+        automation = self.training_automation_manager.automations.get(
+            "AdaptiveGradientClipping"
+        )
+        if automation and automation.enabled:
+            return automation.update_gradient_monitoring(gradients)
+
+        return None
+
+    def get_automation_clipping_threshold(self) -> float:
+        """Get current gradient clipping threshold from automation."""
+        if not self.training_automation_manager:
+            return 1.0  # Default threshold
+
+        automation = self.training_automation_manager.automations.get(
+            "AdaptiveGradientClipping"
+        )
+        if automation and automation.enabled:
+            return automation.get_clipping_threshold()
+
+        return 1.0  # Default threshold
+
+    def get_automation_stats(self) -> dict[str, Any]:
+        """Get statistics from all training automations."""
+        if self.training_automation_manager:
+            return self.training_automation_manager.get_automation_stats()
+        return {}
+
+    def handle_automation_oom_recovery(
+        self, failed_batch_size: int | None = None, failed_lq_size: int | None = None
+    ) -> tuple[int, int] | None:
+        """Handle OOM recovery through automation."""
+        if not self.training_automation_manager:
+            return None
+
+        automation = self.training_automation_manager.automations.get(
+            "DynamicBatchAndPatchSizeOptimizer"
+        )
+        if automation and automation.enabled:
+            return automation.handle_oom_recovery(failed_batch_size, failed_lq_size)
+
+        return None
+
+    def set_automation_batch_size(self, batch_size: int) -> None:
+        """Set current batch size for automation monitoring."""
+        if not self.training_automation_manager:
+            return
+
+        automation = self.training_automation_manager.automations.get(
+            "DynamicBatchAndPatchSizeOptimizer"
+        )
+        if automation and automation.enabled:
+            # Set both batch size and lq_size (use current lq_size if available)
+            current_lq_size = (
+                automation.current_lq_size if automation.current_lq_size else 128
+            )
+            automation.set_current_parameters(batch_size, current_lq_size)
+
+    def set_automation_parameters(self, batch_size: int, lq_size: int) -> None:
+        """Set current batch size and lq_size for automation monitoring."""
+        if not self.training_automation_manager:
+            return
+
+        automation = self.training_automation_manager.automations.get(
+            "DynamicBatchAndPatchSizeOptimizer"
+        )
+        if automation and automation.enabled:
+            automation.set_current_parameters(batch_size, lq_size)
+
+    def set_automation_lq_size(self, lq_size: int) -> None:
+        """Set current lq_size for automation monitoring (keeps batch_size unchanged)."""
+        if not self.training_automation_manager:
+            return
+
+        automation = self.training_automation_manager.automations.get(
+            "DynamicBatchAndPatchSizeOptimizer"
+        )
+        if automation and automation.enabled:
+            # Keep current batch_size, only update lq_size
+            current_batch_size = automation.current_batch_size or 8
+            automation.set_current_parameters(current_batch_size, lq_size)
+
+    def set_dynamic_wrappers(
+        self, dynamic_dataloader=None, dynamic_dataset=None
+    ) -> None:
+        """Set dynamic dataloader and dataset wrappers for real-time VRAM management."""
+        if not self.training_automation_manager:
+            return
+
+        # Import logging here to avoid issues
+        from traiNNer.utils import get_root_logger
+
+        logger = get_root_logger()
+
+        automation = self.training_automation_manager.automations.get(
+            "DynamicBatchAndPatchSizeOptimizer"
+        )
+        if automation and automation.enabled:
+            automation.set_dynamic_wrappers(dynamic_dataloader, dynamic_dataset)
+            automation.start_monitoring_period()  # Initialize peak VRAM tracking
+            logger.info(
+                f"BaseModel: Dynamic wrappers set for VRAM management - "
+                f"Dataloader: {dynamic_dataloader is not None}, "
+                f"Dataset: {dynamic_dataset is not None}"
+            )

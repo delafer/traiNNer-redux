@@ -97,7 +97,7 @@ class GANLoss(nn.Module):
         return input.new_ones(input.size()) * target_val
 
     def forward(
-        self, input: Tensor, target_is_real: bool, is_disc: bool = False
+        self, input: Tensor, target_is_real: bool, is_disc: bool = False, **kwargs
     ) -> Tensor:
         """
         Args:
@@ -106,6 +106,7 @@ class GANLoss(nn.Module):
             target_is_real (bool): Whether the targe is real or fake.
             is_disc (bool): Whether the loss for discriminators or not.
                 Default: False.
+            **kwargs: Additional parameters (for compatibility with R3GAN).
 
         Returns:
             Tensor: GAN loss value.
@@ -141,7 +142,11 @@ class MultiScaleGANLoss(GANLoss):
         super().__init__(loss_weight, gan_type, real_label_val, fake_label_val)
 
     def forward(
-        self, input: Tensor | list[Tensor], target_is_real: bool, is_disc: bool = False
+        self,
+        input: Tensor | list[Tensor],
+        target_is_real: bool,
+        is_disc: bool = False,
+        **kwargs,
     ) -> Tensor:
         """
         The input is a list of tensors, or a list of (a list of tensors)
@@ -156,11 +161,13 @@ class MultiScaleGANLoss(GANLoss):
                     # in case of multiscale feature matching
                     pred_i = pred_i[-1]
                 # Safe operation: 0-dim tensor calling self.mean() does nothing
-                loss_tensor = super().forward(pred_i, target_is_real, is_disc).mean()
+                loss_tensor = (
+                    super().forward(pred_i, target_is_real, is_disc, **kwargs).mean()
+                )
                 loss += loss_tensor
             return loss / len(input)
         else:
-            return super().forward(input, target_is_real, is_disc)
+            return super().forward(input, target_is_real, is_disc, **kwargs)
 
 
 def r1_penalty(real_pred: Tensor, real_img: Tensor) -> Tensor:

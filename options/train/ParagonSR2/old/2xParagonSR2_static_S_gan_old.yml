@@ -1,0 +1,177 @@
+# yaml-language-server: $schema=https://raw.githubusercontent.com/the-database/traiNNer-redux/refs/heads/master/schemas/redux-config.schema.json
+# -------------------------------------------------------------------------------------------------
+# V2 CONFIGURATION RATIONALE: ARTIFACT-FREE & CRISP (ParagonSR2 Static GAN Fine-Tune)
+# -------------------------------------------------------------------------------------------------
+# Focused on clean, artifact-free, perceptually high-quality outputs.
+# Includes optional CLIP contrastive loss as a semantic anchor.
+# -------------------------------------------------------------------------------------------------
+
+name: 2xParagonSR2_S_static_gan_clip
+scale: 2
+
+use_amp: true
+amp_bf16: true
+use_channels_last: true
+fast_matmul: true
+num_gpu: auto
+
+# -------------------------------------------------------------------------------------------------
+# Datasets
+# -------------------------------------------------------------------------------------------------
+datasets:
+  train:
+    name: Train_Dataset
+    type: pairedimagedataset
+    dataroot_gt: /home/phips/Documents/dataset/cc0/hr
+    dataroot_lq: /home/phips/Documents/dataset/cc0/lr_x2
+    lq_size: 128
+    use_hflip: true
+    use_rot: true
+    num_worker_per_gpu: 8
+    batch_size_per_gpu: 8
+    accum_iter: 1
+
+  val:
+    name: Val_Dataset
+    type: pairedimagedataset
+    dataroot_gt: /home/phips/Documents/dataset/cc0/val_hr
+    dataroot_lq: /home/phips/Documents/dataset/cc0/val_lr_x2
+
+# -------------------------------------------------------------------------------------------------
+# Network
+# -------------------------------------------------------------------------------------------------
+network_g:
+  type: paragonsr2_static_s
+
+network_d:
+  type: munet
+
+# -------------------------------------------------------------------------------------------------
+# Paths: Pretrain & Resume
+# -------------------------------------------------------------------------------------------------
+path:
+  pretrain_network_g: experiments/2xParagonSR2_S_fidelity/models/net_g_ema_400000.safetensors
+  strict_load_g: true
+  resume_state: ~
+
+# -------------------------------------------------------------------------------------------------
+# Training
+# -------------------------------------------------------------------------------------------------
+train:
+  ema_decay: 0.995
+  ema_power: 0.75
+  grad_clip: true
+
+  # Generator optimizer
+  optim_g:
+    type: AdamW
+    lr: !!float 1.0e-4
+    weight_decay: !!float 1.0e-4
+    betas: [0.9, 0.99]
+
+  # Discriminator optimizer
+  optim_d:
+    type: AdamW
+    lr: !!float 1.5e-4
+    weight_decay: !!float 0.0
+    betas: [0.9, 0.99]
+
+  # Learning rate scheduler
+  scheduler:
+    type: MultiStepLR
+    milestones: [70000, 120000]
+    gamma: 0.5
+
+  total_iter: 150000
+  warmup_iter: 1000
+
+  # Loss stack
+  losses:
+    # 1) Fidelity anchor: Charbonnier Loss
+    - type: charbonnierloss
+      loss_weight: 1.0
+
+    # 2) ConvNeXt-Tiny Perceptual Loss
+    - type: convnextperceptualloss
+      loss_weight: 0.18
+      layers: [1, 2]
+      layer_weights: [1.0, 0.7]
+      eps: 1.0e-6
+
+    # 3) Local Discriminative Loss (artifact suppression)
+    - type: ldlloss
+      loss_weight: 1.0
+
+    # 4) Structural similarity: DISTS
+    - type: distsloss
+      loss_weight: 0.10
+      as_loss: true
+      load_weights: true
+      use_input_norm: true
+
+    # 5) Color/Brightness consistency (CHC)
+    - type: ConsistencyLoss
+      loss_weight: 0.05
+      criterion: chc
+      blur: false
+      saturation: 1.0
+      brightness: 1.0
+      cosim: true
+      cosim_weight: 0.5
+
+    # 6) Frequency sharpening
+    - type: ffloss
+      loss_weight: 0.08
+
+    # 7) Gradient-variance regularizer
+    - type: GradientVarianceLoss
+      loss_weight: 0.04
+      patch_size: 16
+      criterion: charbonnier
+
+    # 8) Very light R3GAN Adversarial Loss
+    - type: ganloss
+      gan_type: r3gan
+      loss_weight: 0.03
+      r1_weight: 2.5
+      r2_weight: 2.5
+
+    # 9) Optional semantic anchor: CLIP contrastive loss
+    - type: ContrastiveLoss
+      loss_weight: 0.02
+      temperature: 0.1
+
+# -------------------------------------------------------------------------------------------------
+# Validation
+# -------------------------------------------------------------------------------------------------
+val:
+  val_enabled: true
+  val_freq: 5000
+  save_img: true
+  metrics_enabled: true
+  metrics:
+    psnr:
+      type: calculate_psnr
+      crop_border: 2
+      test_y_channel: false
+    ssim:
+      type: calculate_ssim
+      crop_border: 2
+      test_y_channel: false
+    lpips:
+      type: calculate_lpips
+      better: lower
+    dists:
+      type: calculate_dists
+      better: lower
+    topiq:
+      type: calculate_topiq
+
+# -------------------------------------------------------------------------------------------------
+# Logging
+# -------------------------------------------------------------------------------------------------
+logger:
+  print_freq: 100
+  save_checkpoint_freq: 5000
+  save_checkpoint_format: safetensors
+  use_tb_logger: true

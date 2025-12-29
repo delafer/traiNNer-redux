@@ -1,0 +1,124 @@
+# yaml-language-server: $schema=https://raw.githubusercontent.com/the-database/traiNNer-redux/refs/heads/master/schemas/redux-config.schema.json
+#########################################################################################
+# General Settings
+#########################################################################################
+name: 4xParagonDiffusion_Nano_Test
+scale: 4
+use_amp: true
+amp_bf16: true
+use_channels_last: false
+fast_matmul: false
+num_gpu: auto
+
+
+########################################################################################################################
+# Dataset and Dataloader Settings
+########################################################################################################################
+datasets:
+  train:
+    name: Train Dataset
+    type: pairedimagedataset
+    dataroot_gt: [/home/phips/Documents/dataset/cc0/hr]
+    dataroot_lq: [/home/phips/Documents/dataset/cc0/lr_pretrain_x4]
+
+    lq_size: 64
+    use_hflip: true
+    use_rot: true
+
+    num_worker_per_gpu: 8
+    batch_size_per_gpu: 1  # Reduced for diffusion model VRAM requirements
+    accum_iter: 2          # Simulate a batch size of 2 to stabilize training
+
+  # Validation dataset is not used when val_enabled is false, but kept for future reference
+  val:
+    name: Val Dataset
+    type: pairedimagedataset
+    dataroot_gt: [/home/phips/Documents/dataset/cc0/val_hr]
+    dataroot_lq: [/home/phips/Documents/dataset/cc0/val_x4]
+
+#####################################################################
+# Network Settings
+#####################################################################
+network_g:
+  type: paragondiffusion_nano
+  use_checkpoint: true  # Enable gradient checkpointing to save VRAM
+
+# No discriminator needed for this training setup
+network_d: ~
+
+#########################################################################################
+# Pretrain and Resume Paths
+#########################################################################################
+path:
+  pretrain_network_g: ~
+  param_key_g: ~
+  strict_load_g: true
+  resume_state: ~
+
+###########################################################################################
+# Training Settings
+###########################################################################################
+train:
+  ema_decay: 0.999
+
+  optim_g:
+    type: AdamW
+    lr: 0.0001
+    weight_decay: 0.01
+    betas: [0.9, 0.99]
+
+  # No optimizer needed for the discriminator
+  optim_d: ~
+
+  scheduler:
+    type: CosineAnnealingWarmRestarts
+    periods: [250000]
+    restart_weights: [1]
+    eta_min: 0.000001
+
+  total_iter: 250000
+  warmup_iter: 1000
+
+  # Loss Settings
+  losses:
+    # Use the ModelAsLoss wrapper, which treats the generator's output as the loss.
+    - type: ModelAsLoss
+      loss_weight: 1.0  # The loss is self-contained, so weight is 1.0
+
+##############################################################################################
+# Validation
+##############################################################################################
+val:
+  val_enabled: false # Validation is disabled as it's not compatible with the diffusion training loop
+  val_freq: 1000  # How often to run validations, in iterations.
+  save_img: false  # Whether to save the validation images.
+  tile_size: 0  # Tile size of input, reduce VRAM usage but slower inference.
+  tile_overlap: 8  # Number of pixels to overlap tiles by.
+
+  metrics_enabled: false  # Whether to run metrics calculations during validation.
+  metrics:
+    topiq:
+      type: calculate_topiq
+    psnr:
+      type: calculate_psnr
+      crop_border: 4
+      test_y_channel: false
+    ssim:
+      type: calculate_ssim
+      crop_border: 4
+      test_y_channel: false
+    lpips:
+      type: calculate_lpips
+      better: lower
+    dists:
+      type: calculate_dists
+      better: lower
+
+##############################################################################################
+# Logging
+##############################################################################################
+logger:
+  print_freq: 100
+  save_checkpoint_freq: 1000
+  save_checkpoint_format: safetensors
+  use_tb_logger: true

@@ -420,7 +420,8 @@ class SSIMLoss(torch.nn.Module):
 
         score = ssim(x, y, data_range=self.data_range, downsample=self.downsample)
         assert isinstance(score, Tensor)
-        return score
+        # Ensure we return a scalar by taking mean over batch dimension
+        return score.mean()
 
 
 def ms_ssim(
