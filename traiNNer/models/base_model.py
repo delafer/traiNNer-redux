@@ -895,7 +895,14 @@ class BaseModel:
             "IntelligentLearningRateScheduler"
         )
         if automation and automation.enabled:
-            automation.update_loss_tracking(loss_value)
+            multiplier = automation.update_loss_tracking(loss_value)
+            if multiplier:
+                for opt in self.optimizers:
+                    for param_group in opt.param_groups:
+                        param_group["lr"] *= multiplier
+                logger.info(
+                    f"BaseModel: Applied LR multiplier {multiplier:.2f} from automation (loss triggered)"
+                )
 
         automation = self.training_automation_manager.automations.get(
             "IntelligentEarlyStopping"
@@ -918,7 +925,14 @@ class BaseModel:
             "IntelligentLearningRateScheduler"
         )
         if automation and automation.enabled:
-            automation.update_validation_tracking(metrics)
+            multiplier = automation.update_validation_tracking(metrics)
+            if multiplier:
+                for opt in self.optimizers:
+                    for param_group in opt.param_groups:
+                        param_group["lr"] *= multiplier
+                logger.info(
+                    f"BaseModel: Applied LR multiplier {multiplier:.2f} from automation (validation triggered)"
+                )
 
         # Check early stopping
         automation = self.training_automation_manager.automations.get(

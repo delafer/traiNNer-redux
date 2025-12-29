@@ -180,10 +180,10 @@ class IntelligentLearningRateScheduler(TrainingAutomationBase):
         # Architecture-specific optimizations
         self.architecture_hints = config.get("architecture_hints", {})
 
-    def update_loss_tracking(self, loss_value: float) -> None:
+    def update_loss_tracking(self, loss_value: float) -> float | None:
         """Update loss tracking for intelligent scheduling."""
         if not self.enabled:
-            return
+            return None
 
         self.loss_history.append(loss_value)
 
@@ -207,11 +207,15 @@ class IntelligentLearningRateScheduler(TrainingAutomationBase):
             suggested_lr_multiplier = self._calculate_lr_multiplier()
             if suggested_lr_multiplier != 1.0:
                 self._apply_lr_multiplier(suggested_lr_multiplier)
+                # Reset plateau counter after adjustment to prevent oscillating adjustments
+                self.plateau_counter = 0
+                return suggested_lr_multiplier
+        return None
 
-    def update_validation_tracking(self, metrics: dict[str, float]) -> None:
+    def update_validation_tracking(self, metrics: dict[str, float]) -> float | None:
         """Update validation metric tracking."""
         if not self.enabled or not self.monitor_validation:
-            return
+            return None
 
         # Extract primary metric (prefer PSNR, then SSIM, then first metric)
         primary_metric = None
@@ -241,6 +245,9 @@ class IntelligentLearningRateScheduler(TrainingAutomationBase):
                     self._lr_adjustment_log_count += 1
                     self._last_lr_adjustment_reason = "validation plateau"
                     self._last_lr_multiplier_value = 0.8
+                    return 0.8
+
+        return None
 
     def _should_adjust_learning_rate(self) -> bool:
         """Determine if learning rate should be adjusted."""
