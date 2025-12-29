@@ -1203,6 +1203,13 @@ class SRModel(BaseModel):
 
         self.save_training_state(epoch, current_iter)
 
+    def clean_gpu(self) -> None:
+        """Deep clean GPU memory by nulling tensor references and clearing cache."""
+        self.lq = None
+        self.gt = None
+        self.output = None
+        super().clean_gpu()
+
     def _collect_enhanced_logging_stats(
         self,
         loss_dict: dict[str, Any],

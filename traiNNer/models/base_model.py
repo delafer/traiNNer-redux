@@ -992,6 +992,20 @@ class BaseModel:
             return self.training_automation_manager.get_automation_stats()
         return {}
 
+    def clean_gpu(self) -> None:
+        """Deep clean GPU memory by nulling tensor references and clearing cache."""
+        import gc
+
+        # Clear PyTorch cache
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
+        # Force garbage collection
+        gc.collect()
+
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
     def handle_automation_oom_recovery(
         self, failed_batch_size: int | None = None, failed_lq_size: int | None = None
     ) -> tuple[int, int] | None:

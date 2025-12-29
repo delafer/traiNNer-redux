@@ -408,6 +408,13 @@ class DynamicBatchAndPatchSizeOptimizer(TrainingAutomationBase):
         self.failing_batch_size: int | None = None
         self.failing_lq_size: int | None = None
 
+        # Track which parameter was last adjusted to help with OOM attribution
+        self.last_adjustment_type: str | None = None  # "batch_size" or "lq_size"
+
+        # Safe parameter history (parameters that completed at least one monitoring period)
+        self.safe_batch_size: int | None = None
+        self.safe_lq_size: int | None = None
+
     def update_vram_monitoring(self) -> tuple[int | None, int | None]:
         """Update VRAM monitoring and return suggested (batch_size_adjustment, lq_size_adjustment)."""
         if not self.enabled:
@@ -463,20 +470,25 @@ class DynamicBatchAndPatchSizeOptimizer(TrainingAutomationBase):
                 self.peak_vram_usage  # Use PEAK VRAM, not current
             )
 
+            # Update safe parameters: current parameters are now "proven safe"
+            # if we didn't OOM and we aren't being told to decrease them
+            if batch_adjustment >= 0 and lq_adjustment >= 0:
+                self.safe_batch_size = self.current_batch_size
+                self.safe_lq_size = self.current_lq_size
+
+            # ALWAYS reset for next monitoring period once cooldown hits 0
+            self.peak_vram_usage = peak_usage_ratio
+            self.adjustment_cooldown = self.adjustment_frequency
+
+            # Reset CUDA peak memory stats immediately so we can see the effect of the adjustment
+            # This is CRITICAL: otherwise max_memory_allocated() keeps returning the old high value
+            if torch.cuda.is_available():
+                torch.cuda.reset_peak_memory_stats()
+
             if batch_adjustment != 0 or lq_adjustment != 0:
-                # Reset peak VRAM tracking for next monitoring period
-                # Start fresh tracking from current peak
-                self.peak_vram_usage = peak_usage_ratio
-                self.adjustment_cooldown = self.adjustment_frequency
                 logger.info(
                     f"Suggested adjustments - Batch: {batch_adjustment:+d}, LQ: {lq_adjustment:+d}"
                 )
-
-                # Reset CUDA peak memory stats immediately so we can see the effect of the adjustment
-                # This is CRITICAL: otherwise max_memory_allocated() keeps returning the old high value
-                if torch.cuda.is_available():
-                    torch.cuda.reset_peak_memory_stats()
-
                 return batch_adjustment, lq_adjustment
 
         return None, None
@@ -534,6 +546,7 @@ class DynamicBatchAndPatchSizeOptimizer(TrainingAutomationBase):
 
                     if suggested_lq_increase > 0:
                         lq_adjustment = suggested_lq_increase
+                        self.last_adjustment_type = "lq_size"
                         logger.info(
                             f"🔄 VRAM OPTIMIZATION (STABLE): Available memory {available_memory_ratio:.3f}, "
                             f"suggesting lq_size increase of +{suggested_lq_increase} "
@@ -545,7 +558,13 @@ class DynamicBatchAndPatchSizeOptimizer(TrainingAutomationBase):
                 remaining_memory = target_usage - peak_usage_ratio
                 # Require at least 5% headroom for batch size increase (more conservative than lq)
                 if remaining_memory > 0.05:
-                    suggested_batch_increase = 2  # Fixed small step for stability
+                    # SMARTER INCREASE: Estimate VRAM per batch to avoid overshoot
+                    # We add a 10% buffer (1.1x) to current peak to account for spiky usage
+                    vram_per_batch = (peak_usage_ratio / self.current_batch_size) * 1.1
+                    max_safe_increase = int(remaining_memory / vram_per_batch)
+
+                    # Use min(2, max_safe) to keep steps manageable but strictly within target
+                    suggested_batch_increase = min(2, max_safe_increase)
 
                     # Respect failing parameters
                     if self.failing_batch_size is not None:
@@ -564,6 +583,7 @@ class DynamicBatchAndPatchSizeOptimizer(TrainingAutomationBase):
 
                     if suggested_batch_increase > 0:
                         batch_adjustment = suggested_batch_increase
+                        self.last_adjustment_type = "batch_size"
                         logger.info(
                             f"🔄 VRAM OPTIMIZATION (STABLE): Remaining memory {remaining_memory:.3f}, "
                             f"suggesting batch_size increase of +{suggested_batch_increase} "
@@ -659,11 +679,68 @@ class DynamicBatchAndPatchSizeOptimizer(TrainingAutomationBase):
                 f"Automation {self.name}: Recorded failing parameters - Batch: {actual_failed_batch}, LQ: {actual_failed_lq}"
             )
 
-        # Calculate safe parameters for recovery (conservative reduction)
-        safe_batch_size = max(self.min_batch_size, actual_failed_batch // 2)
-        safe_lq_size = max(
-            self.min_lq_size, (actual_failed_lq // 2 // 4) * 4
-        )  # Keep multiple of 4
+        # Calculate safe parameters for recovery (Safe Revert strategy)
+        # Prioritize reverting to parameters that are already "known safe"
+        if self.safe_batch_size is not None and self.safe_lq_size is not None:
+            # Only revert if the safe parameters are actually smaller than what failed
+            # This prevents infinite loops if the "safe" ones also OOM somehow
+            revert_batch = min(actual_failed_batch, self.safe_batch_size)
+            revert_lq = min(actual_failed_lq, self.safe_lq_size)
+
+            # If the safe parameters are identical to the failed ones, we need a further reduction
+            if revert_batch == actual_failed_batch and revert_lq == actual_failed_lq:
+                safe_batch_size = max(
+                    self.min_batch_size, int(actual_failed_batch * 0.75)
+                )
+                safe_lq_size = max(
+                    self.min_lq_size, (int(actual_failed_lq * 0.75) // 4) * 4
+                )
+                logger.info(
+                    f"Automation {self.name}: Safe parameters matches failed parameters. Falling back to 25% reduction."
+                )
+            else:
+                safe_batch_size = revert_batch
+                safe_lq_size = revert_lq
+                logger.info(
+                    f"Automation {self.name}: Reverting to known-safe parameters ({actual_failed_batch}/{actual_failed_lq} → {safe_batch_size}/{safe_lq_size})"
+                )
+        # Fallback: No history exists (OOM on first monitoring period)
+        # Use granular 25% reduction of the causative parameter
+        elif self.last_adjustment_type == "batch_size":
+            safe_batch_size = max(self.min_batch_size, int(actual_failed_batch * 0.75))
+            safe_lq_size = actual_failed_lq
+            logger.info(
+                f"Automation {self.name}: No safe history. Targeting batch_size for 25% reduction."
+            )
+        elif self.last_adjustment_type == "lq_size":
+            safe_batch_size = actual_failed_batch
+            safe_lq_size = max(
+                self.min_lq_size, (int(actual_failed_lq * 0.75) // 4) * 4
+            )
+            logger.info(
+                f"Automation {self.name}: No safe history. Targeting lq_size for 25% reduction."
+            )
+        else:
+            safe_batch_size = max(self.min_batch_size, int(actual_failed_batch * 0.75))
+            safe_lq_size = max(
+                self.min_lq_size, (int(actual_failed_lq * 0.75) // 4) * 4
+            )
+            logger.info(
+                f"Automation {self.name}: No safe history. Reducing both parameters by 25%."
+            )
+
+        # Reset last adjustment type and safe history so we don't repeatedly revert to the same thing if it fails
+        self.last_adjustment_type = None
+        # Also clear failing safe parameters to avoid death loops
+        if (
+            safe_batch_size == self.safe_batch_size
+            and safe_lq_size == self.safe_lq_size
+        ):
+            logger.debug(
+                f"Automation {self.name}: Clearing safe history to prevent repeating flawed reversion."
+            )
+            self.safe_batch_size = None
+            self.safe_lq_size = None
 
         self.current_batch_size = safe_batch_size
         self.current_lq_size = safe_lq_size
@@ -700,6 +777,9 @@ class DynamicBatchAndPatchSizeOptimizer(TrainingAutomationBase):
                 "current_lq_size": self.current_lq_size,
                 "failing_batch_size": self.failing_batch_size,
                 "failing_lq_size": self.failing_lq_size,
+                "last_adjustment_type": self.last_adjustment_type,
+                "safe_batch_size": self.safe_batch_size,
+                "safe_lq_size": self.safe_lq_size,
                 "vram_history": list(self.vram_history),
             }
         )
@@ -716,6 +796,11 @@ class DynamicBatchAndPatchSizeOptimizer(TrainingAutomationBase):
             "failing_batch_size", self.failing_batch_size
         )
         self.failing_lq_size = state_dict.get("failing_lq_size", self.failing_lq_size)
+        self.last_adjustment_type = state_dict.get(
+            "last_adjustment_type", self.last_adjustment_type
+        )
+        self.safe_batch_size = state_dict.get("safe_batch_size", self.safe_batch_size)
+        self.safe_lq_size = state_dict.get("safe_lq_size", self.safe_lq_size)
         if "vram_history" in state_dict:
             from collections import deque
 
@@ -740,11 +825,16 @@ class DynamicBatchAndPatchSizeOptimizer(TrainingAutomationBase):
             # Reset peak memory stats for accurate tracking in new period
             torch.cuda.reset_peak_memory_stats()
 
-            # Initialize with PEAK VRAM to match main logger measurement
+            # Match main logger measurement
             initial_memory = torch.cuda.max_memory_allocated()
             total_memory = torch.cuda.get_device_properties(0).total_memory
             initial_usage_ratio = initial_memory / total_memory
             self.peak_vram_usage = initial_usage_ratio
+
+            # Update safe parameters: current parameters are now "known safe"
+            # as they survived the previous monitoring period
+            self.safe_batch_size = self.current_batch_size
+            self.safe_lq_size = self.current_lq_size
 
             logger.info(
                 f"Automation {self.name}: Starting VRAM monitoring period "
